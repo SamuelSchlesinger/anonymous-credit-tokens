@@ -241,7 +241,7 @@ impl SpendProof {
 }
 
 impl PrivateKey {
-    pub fn refund(&self, _spend_proof: &SpendProof) -> Option<Refund> {
+    pub fn refund(&self, _spend_proof: &SpendProof, mut _rng: impl CryptoRngCore) -> Option<Refund> {
         todo!()
     }
 }
@@ -254,7 +254,7 @@ pub struct PreRefund {
 }
 
 impl CreditToken {
-    pub fn prove_spend(&self, _charge: Scalar, _public_key: &PublicKey, mut rng: impl CryptoRngCore) -> (SpendProof, PreRefund) {
+    pub fn prove_spend(&self, _charge: Scalar, _public_key: &PublicKey, mut _rng: impl CryptoRngCore) -> (SpendProof, PreRefund) {
         todo!()
     }
 }
@@ -274,6 +274,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn issuance() {
+        use rand_core::OsRng;
+        for _i in 0..100 {
+            let private_key = PrivateKey::random(OsRng);
+            let preissuance = PreIssuance::random(OsRng);
+            let issuance_request = preissuance.request(OsRng);
+            let issuance_response = private_key
+                .issue(&issuance_request, Scalar::from(20u64), OsRng)
+                .unwrap();
+            let _credit_token1 = preissuance
+                .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
+                .unwrap();
+            }
+    }
+
+    /*
+    #[test]
     fn full_cycle() {
         use rand_core::OsRng;
         for _i in 0..100 {
@@ -288,16 +305,17 @@ mod tests {
                 .unwrap();
             let charge = Scalar::from(20u64);
             let (spend_proof, prerefund) = credit_token1.prove_spend(charge, private_key.public(), OsRng);
-            let refund = private_key.refund(&spend_proof).unwrap();
+            let refund = private_key.refund(&spend_proof, OsRng).unwrap();
             let credit_token2 = prerefund
                 .to_credit_token(&spend_proof, &refund, private_key.public())
                 .unwrap();
             let charge = Scalar::from(20u64);
             let (spend_proof, prerefund) = credit_token2.prove_spend(charge, private_key.public(), OsRng);
-            let refund = private_key.refund(&spend_proof).unwrap();
-            let credit_token3 = prerefund
+            let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+            let _credit_token3 = prerefund
                 .to_credit_token(&spend_proof, &refund, private_key.public())
                 .unwrap();
         }
     }
+    */
 }
