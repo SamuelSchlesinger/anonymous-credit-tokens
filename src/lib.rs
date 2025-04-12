@@ -180,7 +180,6 @@ pub struct IssuanceResponse {
 }
 
 impl PrivateKey {
-    // TODO bound n
     pub fn respond(&self, request: &IssuanceRequest, n: Scalar, mut rng: impl CryptoRngCore) -> Option<IssuanceResponse> {
         let params = Params::default();
         let mut transcript = Transcript::new(b"request");
