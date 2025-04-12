@@ -39,12 +39,6 @@ impl Transcript {
             .update(&bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap());
     }
 
-    fn add_scalars<'a>(&mut self, scalars: impl Iterator<Item = &'a Scalar>) {
-        for scalar in scalars {
-            self.add_scalar(scalar);
-        }
-    }
-
     fn rng(self) -> ChaCha20Rng {
         ChaCha20Rng::from_seed(*self.hasher.finalize().as_bytes())
     }
@@ -243,7 +237,7 @@ mod tests {
         let resp = private_key
             .respond(&req, Scalar::from(20u64), OsRng)
             .unwrap();
-        let cred = pre_issuance
+        let _cred = pre_issuance
             .credential(private_key.public(), &req, &resp)
             .unwrap();
     }
