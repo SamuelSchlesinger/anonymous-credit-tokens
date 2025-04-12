@@ -1,0 +1,17 @@
+[package]
+name = "anoncreds-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = { version = "2.0.1", features = ["serde"] }
+blake3 = "1.8.1"
+curve25519-dalek = { version = "4.1.3", features = ["group", "ff", "serde", "digest"] }
+group = "0.13.0"
+rand_chacha = "0.3.1"
+rand_core = "0.6.4"
+serde = { version = "1.0.219", features = ["derive"] }
+subtle = "2.6.1"
+
+[dev-dependencies]
+rand_core = { version = "0.6.4", features = ["getrandom"] }
