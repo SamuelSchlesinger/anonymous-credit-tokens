@@ -112,7 +112,7 @@ pub struct IssuanceRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Credential {
+pub struct CreditToken {
     a: RistrettoPoint,
     e: Scalar,
     k: Scalar,
@@ -146,12 +146,12 @@ impl PreIssuance {
         IssuanceRequest { kr, c, r_z, k_z }
     }
 
-    pub fn credential(
+    pub fn to_credit_token(
         &self,
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
-    ) -> Option<Credential> {
+    ) -> Option<CreditToken> {
         let params = Params::default();
 
         let x_a = RistrettoPoint::generator() + request.kr + params.h2 * response.n;
@@ -168,7 +168,7 @@ impl PreIssuance {
             return None;
         }
 
-        Some(Credential {
+        Some(CreditToken {
             a: response.a,
             e: response.e,
             r: self.r,
@@ -188,7 +188,7 @@ pub struct IssuanceResponse {
 }
 
 impl PrivateKey {
-    pub fn respond(
+    pub fn issue(
         &self,
         request: &IssuanceRequest,
         n: Scalar,
@@ -224,21 +224,80 @@ impl PrivateKey {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct SpendProof {
+    nonce: Scalar,
+    charge: Scalar,
+}
+
+impl SpendProof {
+    pub fn nonce(&self) -> Scalar {
+        todo!()
+    }
+
+    pub fn charge(&self) -> Scalar {
+        todo!()
+    }
+}
+
+impl PrivateKey {
+    pub fn refund(&self, _spend_proof: &SpendProof) -> Option<Refund> {
+        todo!()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PreRefund {
+    r: Scalar,
+    k: Scalar,
+    m: Scalar,
+}
+
+impl CreditToken {
+    pub fn prove_spend(&self, _charge: Scalar, _public_key: &PublicKey, mut rng: impl CryptoRngCore) -> (SpendProof, PreRefund) {
+        todo!()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Refund {
+}
+
+impl PreRefund {
+    pub fn to_credit_token(&self, _spend_proof: &SpendProof, _refund: &Refund, _public_key: &PublicKey) -> Option<CreditToken> {
+        todo!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn create_credential() {
+    fn full_cycle() {
         use rand_core::OsRng;
-        let private_key = PrivateKey::random(OsRng);
-        let pre_issuance = PreIssuance::random(OsRng);
-        let req = pre_issuance.request(OsRng);
-        let resp = private_key
-            .respond(&req, Scalar::from(20u64), OsRng)
-            .unwrap();
-        let _cred = pre_issuance
-            .credential(private_key.public(), &req, &resp)
-            .unwrap();
+        for _i in 0..100 {
+            let private_key = PrivateKey::random(OsRng);
+            let preissuance = PreIssuance::random(OsRng);
+            let issuance_request = preissuance.request(OsRng);
+            let issuance_response = private_key
+                .issue(&issuance_request, Scalar::from(20u64), OsRng)
+                .unwrap();
+            let credit_token1 = preissuance
+                .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
+                .unwrap();
+            let charge = Scalar::from(20u64);
+            let (spend_proof, prerefund) = credit_token1.prove_spend(charge, private_key.public(), OsRng);
+            let refund = private_key.refund(&spend_proof).unwrap();
+            let credit_token2 = prerefund
+                .to_credit_token(&spend_proof, &refund, private_key.public())
+                .unwrap();
+            let charge = Scalar::from(20u64);
+            let (spend_proof, prerefund) = credit_token2.prove_spend(charge, private_key.public(), OsRng);
+            let refund = private_key.refund(&spend_proof).unwrap();
+            let credit_token3 = prerefund
+                .to_credit_token(&spend_proof, &refund, private_key.public())
+                .unwrap();
+        }
     }
 }
