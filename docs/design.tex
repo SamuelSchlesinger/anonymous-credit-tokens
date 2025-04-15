@@ -25,4 +25,19 @@ An Anonymous Credit Scheme (ACS) consists of several probabilistic polynomial ti
     \item $token \leftarrow RefundCredits(p, refund, w)$
 \end{enumerate}
 
+\begin{definition}{Double Spend Detection}
+
+    (High level) an issuer should be able to detect double spends.
+\end{definition}
+
+\begin{definition}{Fiscal Soundness}
+
+    (High level) an issuer should be assured that the total number of credits spent is less than or equal to the total number of credits issued.
+\end{definition}
+
+\begin{definition}{Anonymity}
+
+    (High level) clients should be confident that their spends cannot be correlated to their issuances or previous spends with probability better than guessing. In particular, assuming there are multiple unspent credit tokens with greater than or equal to $c$ credits, an issuer should not have any advantage over random chance in guessing which of these tokens were spent.
+\end{definition}
+
 \end{document}
