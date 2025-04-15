@@ -8,9 +8,21 @@
 \author{Samuel Schlesinger}
 \date{\today}
 
+\newtheorem{definition}{Definition}
+
 \begin{document}
 \maketitle
 
+An Anonymous Credit Scheme (ACS) consists of several probabilistic polynomial time algorithms. 
 
+\begin{enumerate}
+    \item $(x, w) \leftarrow GenerateKeyPair$
+    \item $(p, req) \leftarrow RequestIssuance$
+    \item $resp \leftarrow Issue(x, req, n)$
+    \item $token \leftarrow IssueCredits(p, w, req, resp)$
+    \item $(p, sp) \leftarrow Spend(token, charge, w)$
+    \item $refund \leftarrow Refund(x, sp)$
+    \item $token \leftarrow RefundCredits(p, refund, w)$
+\end{enumerate}
 
 \end{document}
