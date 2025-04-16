@@ -13,22 +13,192 @@
 \begin{document}
 \maketitle
 
-An Anonymous Credit Scheme (ACS) consists of several probabilistic polynomial time algorithms. 
+\begin{definition}
+
+An Anonymous Credit Scheme (ACS) consists of several probabilistic polynomial
+time algorithms, which compose several protocols. 
+
+The algorithms are:
 
 \begin{enumerate}
+
     \item $(x, w) \leftarrow GenerateKeyPair$
+
+        Run by the issuer before any Credit Tokens can be issued and spent,
+        this algorithm generates a keypair for the Issuer.
+
+    \begin{itemize}
+        \item w: public key
+        \item x: private key
+    \end{itemize}
+
     \item $(p, req) \leftarrow RequestIssuance$
-    \item $resp \leftarrow Issue(x, req, n)$
+
+        Run by the client to generate a request for a Credit Token, this
+        algorithm generates client secrets which will be used to construct the
+        Credit Token, as well as a request for a Credit Token.
+
+    \begin{itemize}
+        \item p: client secrets
+        \item req: issuance request
+    \end{itemize}
+
+    \item $resp \leftarrow Mint(x, req, n)$
+
+        Run by the issuer in response to a request for a Credit Token, this
+        algorithm verifies the issuance request and issues an issuance
+        response, while remaining blind to the nullifier which is associated
+        with this Credit Token. This algorithm fails if the issuance request is
+        incorrect.
+
+    \begin{itemize}
+        \item x: the issuer's private key
+        \item req: issuance request
+        \item n: the number of credits which will be issued in the Credit Token
+              constructed from this response
+        \item resp: a response to an issuance request
+    \end{itemize}
+
     \item $token \leftarrow IssueCredits(p, w, req, resp)$
-    \item $(p, sp) \leftarrow Spend(token, charge, w)$
-    \item $refund \leftarrow Refund(x, sp)$
-    \item $token \leftarrow RefundCredits(p, refund, w)$
+
+        Run by the client upon receiving an issuance response from the issuer,
+        this algorithm verifies the issuance response and forms the new Credit
+        Token from the client secrets and issuance response.
+
+    \begin{itemize}
+        \item p: client secrets
+        \item w: issuer public key
+        \item req: issuance request
+        \item resp: issuance response
+        \item token: a Credit Token
+    \end{itemize}
+
+    \item $(p, sp) \leftarrow ProveSpend(token, charge)$
+
+        Run by the client to generate a request to spend a Credit Token, this
+        algorithm generates client secrets which will be used to construct the
+        Credit Token, as well as a request for a Credit Token.
+
+    \begin{itemize}
+        \item token: the Credit Token we are requesting to spend
+        \item charge: the number of credits we're requesting to spend
+        \item p: client secrets
+        \item sp: proof of correct spend
+    \end{itemize}
+
+    \item $k \leftarrow GetNullifier(sp)$
+
+        Run by the issuer to extract the nullifier from the proof of correct
+        spend. The nullifier is the random value associated with the underlying
+        Credit Token which is revealed upon spending, preventing the double
+        spending a Credit Token.
+     
+    \begin{itemize}
+        \item sp: proof of correct spend
+        \item k: the nullifier
+    \end{itemize}
+
+    \item $refund \leftarrow Refund(x, sp, c)$
+
+        Run by the issuer to respond to a request to spend a Credit Token, this
+        algorithm verifies the proof of correct spend of the given number of
+        credits $c$ and issues a refund for the remaining credits. This
+        algorithm fails if the spend proof is incorrect.
+
+    \begin{itemize}
+        \item x: the issuer's private key
+        \item sp: proof of correct spend
+        \item c: the number of credits the client wishes to spend
+        \item refund: a refund
+    \end{itemize}
+
+    \item $token \leftarrow RefundCredits(p, sp, refund, w)$
+
+        Run by the client upon receiving a refund from the issuer, this algorithm
+        verifies the refund and forms the new Credit Token from the client secrets
+        and the refund.
+
+    \begin{itemize}
+        \item p: client secrets
+        \item sp: proof of correct spend
+        \item refund: a refund
+        \item w: issuer's public key
+        \item token: a Credit Token
+    \end{itemize}
+
 \end{enumerate}
 
-\begin{definition}{Double Spend Detection}
+The protocols are run between the client and the server, initiated by the client:
 
-    (High level) an issuer should be able to detect double spends.
+\begin{enumerate}
+    \item $Issue$
+
+        The issuer knows their private key $x$, their public key $w$, and the number of
+        credits they wish to issue, $n$.
+
+        The client knows the public key of the issuer, $w$.
+
+        \begin{enumerate}
+            \item[] $(p, req) \leftarrow RequestIssuance$ // run by client
+            \item[] // client sends req to issuer
+            \item[] $resp \leftarrow Mint(x, req, n)$ // run by issuer
+            \item[] // issuer sends resp to client
+            \item[] $token \leftarrow IssueCredits(p, w, req, resp)$ // run by client
+            \item[] return $token$
+        \end{enumerate}
+
+    \item $Spend$
+
+        The issuer knows their private key $x$, their public key $w$, and the number of
+        credits $c$ the client wishes to spend. They maintain a database $db$ which
+        contains all previously seen nullifiers $k$.
+
+        The client knows their $token$, the issuer's public key $w$, and the
+        number of credits $c$ they wish to spend.
+
+        \begin{enumerate}
+            \item[] $(p, sp) \leftarrow ProveSpend(token, charge)$ // run by the client
+            \item[] // client sends sp, charge to the issuer
+            \item[] $refund \leftarrow Refund(x, sp, c)$ // run by issuer
+            \item[] $k \leftarrow GetNullifier(sp$
+            \item[] if $db.lookup(k)$, fail
+            \item[] $db.insert(k)$
+            \item[] // issuer sends refund to client
+            \item[] $token \leftarrow RefundCredits(p, w, req, resp)$ // run by client
+            \item[] return $token$
+        \end{enumerate}
+\end{enumerate}
+
 \end{definition}
+
+\begin{definition}
+
+An Anonymous Credit System is \textbf{correct} if, for any efficient adversary
+    $A$, the probability that $flag$ is set to $1$ in the following experiment
+    is negligible.
+
+\begin{enumerate}
+    \item Generate keys $(w, x)$ and provide $w$ to $A$.
+    \item $A$ can interact with the following oracles, with $i$ being initialized
+          as $0$ and $db$ being initialized emptily:
+        \begin{itemize}
+
+            \item $Issue(n)$ runs the $Issue$ protocol between an honest issuer
+                and client with input $n$ and lets $token$ be the resulting
+                credits token. If $Issue$ fails, set $flag = 1$. Otherwise,
+                $token_i = token$ and increment $i$.
+
+            \item $Spend(j, c)$, which can be called only once for each $j$ and
+                only when the balance $n$ of $token_j$ satisfies $c \leq n$.
+                Run the $Spend$ protocol using $db$, $c$, and $token_j$,
+                returning $token$.  Send $sp$, $c$, $k$ to $A$, and set $flag =
+                1$ if the protocol fails. Set $token_i = token$ and increment
+                $i$.
+
+        \end{itemize}
+\end{enumerate}
+\end{definition}
+
 
 \begin{definition}{Fiscal Soundness}
 
