@@ -13,6 +13,22 @@
 \begin{document}
 \maketitle
 
+\section{Introduction}
+
+\paragraph*{}
+
+Many APIs expose metered access through credits, where you buy or otherwise
+receive a number of credits and use them to access the API. Often, a user of an
+API will identify themselves using an API key, a unique value which identifies
+the account. Then, when they use an endpoint which costs $c$ credits, the
+database can check whether they have enough and subsequently dock them $c$
+credits. This approach is flexible for API providers and is useful as a
+budgeting tool for API users.
+
+On the downside, this approach introduces an unnecessary tracking identifier:
+the API key itself. In this work, we attempt to design anonymous methods of
+tracking credits, and build an Anonymous Credit System (ACS).
+
 \begin{definition}
 
 An Anonymous Credit Scheme (ACS) consists of several probabilistic polynomial
@@ -202,12 +218,103 @@ An Anonymous Credit System is \textbf{correct} if, for any efficient adversary
 
 \begin{definition}{Fiscal Soundness}
 
-    (High level) an issuer should be assured that the total number of credits spent is less than or equal to the total number of credits issued.
+    An Anonymous Credit System is \textbf{fiscally sound} if, for any efficient
+    adversary $A$, the probability that $flag$ is sent to $1$ in the following
+    experiment is negligible.
+
+\begin{enumerate}
+
+    \item Generate keys $(w, x)$ and provide $w$ to $A$.
+
+    \item $A$ is given access to an oracle which runs $Issue$ between $A$ and
+      issuer. Let $m$ be a running sum of all total amounts ever issued. Return
+      the credit token to $A$.
+
+    \item $A$ is given access to an oracle which runs $(b, resp) \leftarrow
+      Refund(proof, c)$ for an arbitrary proof and $c$ provided by $A$. If
+      $tag$ has been reused or $b = 0$, return. Otherwise, add $c$ to $m'$, a
+      running sum of all amounts ever successfully spent using this oracle. If
+      $m' > m$, set $flag = 1$. $resp$, $tag$ is returned to $A$.
+
+\end{enumerate}
+
+
 \end{definition}
 
 \begin{definition}{Anonymity}
 
-    (High level) clients should be confident that their spends cannot be correlated to their issuances or previous spends with probability better than guessing. In particular, assuming there are multiple unspent credit tokens with greater than or equal to $c$ credits, an issuer should not have any advantage over random chance in guessing which of these tokens were spent.
+An Anonymous Credit System is \textbf{anonymous} if the success probability,
+  for any efficient adversary $A$, the probability that $flag$ is set to $1$ in
+  the following experiment will not be greater than $1/k$, where $k$ is the
+  number of unspent transactions at the end of the experiment.
+
+\begin{enumerate}
+
+    \item Generate keys $(w, x)$ and provide $w, x$ to $A$. Set integer $i = 0$.
+
+    \item $A$ is given access to an oracle $Issue(n)$ which runs the $Issue$ protocol
+      between an honest client and $A$. Each time, $token_i$ is set to the
+      result of $Issue(n)$, $n_i$ is set to $n$, and $i$ is incremented.
+
+    \item $A$ is given access to an oracle $(b, token, tag) \leftarrow Spend(i, c)$
+      which runs the $Spend(token_i, c)$ protocol between an honest client and $A$. If
+      $token_i$ has already been spent, or $c > n_i$, then $flag$ is set to $0$
+      and the program halts. The $tag$ and $proof$ are returned to $A$.
+      $token_i$ is set to $token$, and $i$ is incremented.
+
+    \item Whenever $A$ chooses, they can choose to complete the experiment. To
+      complete it, there must be at least two unspent transactions. $A$ chooses
+      a value $c$ which is less than or equal to the remaining balance of all
+      unspent tokens. Then, a random $j$ is selected from the set of all
+      remaining unspent tokens, and $Spend(token_j, c)$ is run between an
+      honest client and $A$. $A$ receives the token output from $Spend$, as
+      well as the $tag$, and is given an opportunity to guess $k$. If $k = j$,
+      then $flag$ is set to $1$, otherwise $flag$ is sent to $0$. The program
+      halts.
+
+\end{enumerate}
+
 \end{definition}
+
+\section{Engineering Considerations}
+
+\subsection*{Token Database}
+
+When operating an ACS, one must have a database of all the $k$ values they've
+already seen. This is likely a much larger database than the one used in the
+API key approach, mapping users to their balances. One natural modification to
+the scheme is to rotate keys regularly, requesting all clients to get a new
+Credit Token with the new private key, without revealing their balances. This
+way, we can eventually throw away old $k$ values. Doing this actually means
+that, at most, we'll have a $k$ for the total number of spends which take place
+in each epoch and the previous epoch. In fact, this could potentially be a
+smaller amount of total storage than simply holding the balance. However, this
+has the pernicious effect of your tokens expiring if you don't exchange them.
+This means that you must active manage your coin balances, which is a pretty
+significant cost.
+
+\subsection*{Token Distribution}
+
+Further, one must have a method of determining who gets Credit Tokens issued to
+them. This might be costly to maintain, and depending on your services, you
+might have to do a KYC type of flow at this stage.
+
+\subsection*{Key Compromise}
+
+A serious consideration for real life deployments is emergency key rotation. If
+a private key is leaked, then all tokens cannot be trusted, and all holders of
+currency will be very naturally upset. For this reason, token users who hold a
+significant amount of credits might want to keep records of their issuance and
+spending, such that they can redeem their credits if a key is leaked. However,
+this violates their privacy and is a very bad situation for everyone. Because
+your Credit Tokens contain random values you've never revealed, you will at
+least not have your credits stolen from you if you keep a record for this case.
+
+\begin{thebibliography}{9}
+\bibitem{bonehshoup}
+Dan Boneh and Victor Shoup (2023) A Graduate Course in Cryptography, Version 0.6
+\bibitem{bbsrevisited}
+Stefano Tessaro and Chenzhi Zhu (2023) Revisiting BBS Signatures
+\end{thebibliography}
 
 \end{document}
