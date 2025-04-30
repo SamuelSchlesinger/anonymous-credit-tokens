@@ -1,320 +1,245 @@
-\documentclass{article}
+\documentclass[11pt]{article}
+%\usepackage[utf8]{inputenc}
+\usepackage{fullpage,xcolor,hyperref}
+\usepackage{amsmath,amsfonts,amsthm}
 
-\usepackage{amsmath}
-\usepackage{amsthm}
-\usepackage{amssymb}
+\newcommand{\jnote}[1]{{{\color{blue}\textbf{Jon's note:} \emph{#1}}\normalcolor}}
+%\newcommand{\jnote}[1]{}
+		
+\newcommand{\ignore}[1]{}
 
-\title{anoncreds}
-\author{Samuel Schlesinger}
-\date{\today}
-
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
 \newtheorem{definition}{Definition}
 
+\def\bydef{\stackrel{\rm def}{=}}
+\def\com{{\sf com}}
+\def\A{{\mathcal A}}
+\def\tag{{\sf tag}}
+\def\send{{\sf to}\mbox{\_}{\sf send}}
+\def\hash{{\sf to}\mbox{\_}{\sf hash}}
+\def\Z{{\mathbb Z}}
+\def\bool{\{0,1\}}
+\def\issue{{\sf Issue}}
+\def\keygen{{\sf KeyGen}}
+\def\gencred{\issue}
+\def\credgen{\issue}
+\def\pk{{\sf pk}}
+\def\sk{{\sf sk}}
+\def\G{{\mathbb G}}
+\def\Z{{\mathbb Z}}
+\def\isequal{\stackrel{\rm ?}{=}}
+\def\tok{{\sf tok}}
+\def\cred{{\tok}}
+\def\spend{{\sf Spend}}
+\def\flag{{\sf flag}}
+
+\title{\textbf{Anonymous Credits}}
+\author{{\sc Jonathan Katz}\thanks{Google.} \and {\sc Samuel Schlesinger}$^*$}
+%\date{February 2024}
+\date{}
+
 \begin{document}
+
 \maketitle
 
-\section{Introduction}
+\begin{abstract}
+We describe a scheme that can be used for anonymous payments.
+\end{abstract}
 
-\paragraph*{}
+\section{Definitions}
+\label{sec:definitions}
+In the model we consider, there is a single \emph{issuer} and multiple {clients}. 
+The issuer issues credits to clients, who can redeem those credits with the issuer in an anonymous fashion. 
+(Of course, one can allow for multiple issuers who operate independently. 
+However, we assume that credits issues by a given issuer can only be redeemed at that issuer.)
+Formally:
 
-Many APIs expose metered access through credits, where you buy or otherwise
-receive a number of credits and use them to access the API. Often, a user of an
-API will identify themselves using an API key, a unique value which identifies
-the account. Then, when they use an endpoint which costs $c$ credits, the
-database can check whether they have enough and subsequently dock them $c$
-credits. This approach is flexible for API providers and is useful as a
-budgeting tool for API users.
+\begin{definition}\label{def:creds}
+An {\sf anonymous credit scheme} (ACS) consists of algorithms/protocols
+%\footnote{Some of these algorithms could also be replaced by interactive protocols.} 
+$(\keygen$, $\issue$, $\spend)$ with the following syntax:
+\begin{itemize}
+    \item $\keygen$ is run by an issuer to generate keys $(\pk, \sk)$.
+    \item $\issue$ is an interactive protocol run by the issuer and a client. The issuer has as input its private key $\sk$ and a (non-negative integer) value~$c$, and the client has as input the issuer's public key $\pk$ and the same value~$c$. At the end of the protocol, the client outputs a credit token~$(\tok, c)$ with  
+    $\tok=\perp$ indicating that it detected cheating by the issuer.
+ %   \item $\vrfycred$, run by a client, takes as input a public key~$\pk$, a time period~$T$, and a credential~$\cred$; it outputs a bit.
+    \item $\spend$ is an interactive protocol run by the issuer and a client. 
+    The issuer has as input its private key~$\sk$ and a (non-negative integer) value~$s$, and the client has as input the issuer's public key~$\pk$, the same value~$s$, and a token $(\tok, c)$ with $s \leq c$. 
+    At the end of the protocol, the issuer outputs a nullifier~$k$ with $k=\perp$ indicating that it detected cheating by the client; the client outputs $(\tok', c')$ with $\tok=\perp$ indicating that it detected cheating by the issuer.
+\end{itemize}
+\end{definition}
 
-On the downside, this approach introduces an unnecessary tracking identifier:
-the API key itself. In this work, we attempt to design anonymous methods of
-tracking credits, and build an Anonymous Credit System (ACS).
+Correctness requires that (in honest executions) issuance always succeeds in producing a token worth the appropriate number of credits, and that spending $s$ credits from token worth $c$ credits should succeed (at the issuer) and result in a new token worth $c'=c-s$ credits for the client. 
+We also require that the nullifiers output by the issuer are distinct.
 
 \begin{definition}
-
-An Anonymous Credit Scheme (ACS) consists of several probabilistic polynomial
-time algorithms, which compose several protocols. 
-
-The algorithms are:
-
+An anonymous credit scheme is {\sf correct} if for any efficient adversary $\A$ the probability that $\flag$ is set to~1 in the following experiment is negligible:
 \begin{enumerate}
-
-    \item $(x, w) \leftarrow GenerateKeyPair$
-
-        Run by the issuer before any Credit Tokens can be issued and spent,
-        this algorithm generates a keypair for the Issuer.
-
+    \item Generate  keys $(\pk, \sk) \leftarrow \keygen$, and give $\pk$ to~$\A$. Set $\flag:=0$.
+    \item $\A$ may interact with oracles as follows. On its $i$th oracle query:
     \begin{itemize}
-        \item w: public key
-        \item x: private key
+        \item If the $i$th query is of the form $\issue(c)$, run $\issue$ honestly between the issuer and a client on shared input~$c$; let $(\tok_i, c_i)$ be the client's output.
+        If $\tok_i=\perp$ or $c_i\neq c$, set $\flag:=1$.
+        
+        \item If the $i$th query is of the form $\spend(s, j)$ we require $j < i$ and $s \leq c_j$. 
+        Run $\spend$ honestly between the issuer and a client on shared input~$s$ and with the client using token $(\tok_j, c_j)$. Let $k$ be the output of the issuer, and let $(\tok_i, c_i)$ be the output of the client. Set $\flag:=1$ if $k=\perp$ or $\tok_i=\perp$ or $c_i \neq c_j-s$ or $k$ was every previously output be the issuer following a $\spend$ query.
     \end{itemize}
+\end{enumerate}
+\end{definition}
 
-    \item $(p, req) \leftarrow RequestIssuance$
+For security, we require \emph{fiscal soundness} (to protect against malicious clients) and \emph{anonymity} (to protect against a malicious issuer). 
+Formal definitions are omitted from the present draft.
 
-        Run by the client to generate a request for a Credit Token, this
-        algorithm generates client secrets which will be used to construct the
-        Credit Token, as well as a request for a Credit Token.
+\section{Construction}
+\subsection{Overview}
+Before providing the details of the construction, we give a high-level overview.
+Our ACS relies on (privately verifiable) BBS ``signatures.''  
+Roughly, a credit token for $c$ credits is a signature on $(c, k)$, where $k$ is a random nullifier chosen by the client. That is, issuance of a token for $c$ credits is done by having a client choose a uniform nullifier $k$ and then obtain a BBS signature from the issuer on $(c, k)$, without revealing~$k$.
+Spending $s$ credits using a $c$-credit token (with $c \geq s$) associated with nullifier~$k$ then involves the following steps:
+\begin{enumerate}
+    \item The client sends $k$ to the issuer, and proves possession of a BBS signature on $(c, k)$ with~$c \geq s$. (We currently use binary decomposition to prove the latter; other methods could also be used.)
+    \item The client obtains a fresh BBS signature from the issuer on $(c-s, k^*)$ for a fresh~$k^*$. (Note this must be done even when $c-s=0$ if the client wants to maintain anonymity.)
+\end{enumerate}
+The purpose of the nullifier is to prevent double spending: the issuer can store a database of previously used nullifiers, and reject a spend attempt if $k$ has been used before. This check is not included in the description below.
 
-    \begin{itemize}
-        \item p: client secrets
-        \item req: issuance request
-    \end{itemize}
+\subsection{Technical Details}
+We now provide the details of our scheme. We remark that, in contrast to the informal description in the previous section, our scheme actually uses BBS signatures on vectors of three attributes, with one of the attributes serving as a randomizer to prevent linkability.
 
-    \item $resp \leftarrow Mint(x, req, n)$
+\medskip\noindent
+{\bf Setup.}
+Fix a group $\G$ of prime order $q$ with generator~$g$, along with
+(random) generators $h_1, h_2, h_3 \in \G$. (These could be chosen by the issuer, or fixed public values.) 
+Finally, we assume the number of credits a token can contain (and hence the maximum possible spend amount) is strictly less than $2^\ell$ for known~$\ell$.\footnote{While one can consider a non-power-of-two bound, it is not clear that there is any advantage to doing so here.}
 
-        Run by the issuer in response to a request for a Credit Token, this
-        algorithm verifies the issuance request and issues an issuance
-        response, while remaining blind to the nullifier which is associated
-        with this Credit Token. This algorithm fails if the issuance request is
-        incorrect.
+\medskip\noindent{\bf Key generation.}
+An issuer chooses a secret key $x \leftarrow \Z_q$; the associated public key is~$w:=g^x$. 
 
-    \begin{itemize}
-        \item x: the issuer's private key
-        \item req: issuance request
-        \item n: the number of credits which will be issued in the Credit Token
-              constructed from this response
-        \item resp: a response to an issuance request
-    \end{itemize}
+\medskip\noindent{\bf Token issuance.} 
+To issue a token for~$c$ credits to some client, the client and issuer run the following protocol:
+\begin{enumerate}
+    \item The client chooses $k, r \leftarrow \Z_q$,  sets $K:=h_2^k h_3^r$, and computes a non-interactive proof of knowledge of~$k, r$ as follows: 
+    \begin{enumerate}
+        \item Choose $k', r' \leftarrow \Z_q$ and set $K_1:=h_2^{k'} h_3^{r'}$.
+        \item Compute $\gamma:=H(K \| K_1)$; then set $\bar k:=\gamma \cdot k + k'$ and $\bar r := \gamma \cdot r + r'$. 
+    \end{enumerate}
+    The client sends $K, \gamma, \bar k, \bar r$ to the issuer.
+    
+    \item The issuer then does:
+    \begin{itemize} 
+    \item ({\bf Verification.}) Compute $K_1:= h_2^{\bar k} h_3^{\bar r} K^{-\gamma}$ and check that $H(K\|K_1) \isequal \gamma$.
 
-    \item $token \leftarrow IssueCredits(p, w, req, resp)$
-
-        Run by the client upon receiving an issuance response from the issuer,
-        this algorithm verifies the issuance response and forms the new Credit
-        Token from the client secrets and issuance response.
-
-    \begin{itemize}
-        \item p: client secrets
-        \item w: issuer public key
-        \item req: issuance request
-        \item resp: issuance response
-        \item token: a Credit Token
-    \end{itemize}
-
-    \item $(p, sp) \leftarrow ProveSpend(token, charge)$
-
-        Run by the client to generate a request to spend a Credit Token, this
-        algorithm generates client secrets which will be used to construct the
-        Credit Token, as well as a request for a Credit Token.
-
-    \begin{itemize}
-        \item token: the Credit Token we are requesting to spend
-        \item charge: the number of credits we're requesting to spend
-        \item p: client secrets
-        \item sp: proof of correct spend
-    \end{itemize}
-
-    \item $k \leftarrow GetNullifier(sp)$
-
-        Run by the issuer to extract the nullifier from the proof of correct
-        spend. The nullifier is the random value associated with the underlying
-        Credit Token which is revealed upon spending, preventing the double
-        spending a Credit Token.
-     
-    \begin{itemize}
-        \item sp: proof of correct spend
-        \item k: the nullifier
-    \end{itemize}
-
-    \item $refund \leftarrow Refund(x, sp, c)$
-
-        Run by the issuer to respond to a request to spend a Credit Token, this
-        algorithm verifies the proof of correct spend of the given number of
-        credits $c$ and issues a refund for the remaining credits. This
-        algorithm fails if the spend proof is incorrect.
-
-    \begin{itemize}
-        \item x: the issuer's private key
-        \item sp: proof of correct spend
-        \item c: the number of credits the client wishes to spend
-        \item refund: a refund
-    \end{itemize}
-
-    \item $token \leftarrow RefundCredits(p, sp, refund, w)$
-
-        Run by the client upon receiving a refund from the issuer, this algorithm
-        verifies the refund and forms the new Credit Token from the client secrets
-        and the refund.
-
-    \begin{itemize}
-        \item p: client secrets
-        \item sp: proof of correct spend
-        \item refund: a refund
-        \item w: issuer's public key
-        \item token: a Credit Token
-    \end{itemize}
-
+\item ({\bf Issuance.}) The issuer then chooses
+$e \leftarrow \Z_q$ and sends
+$(A, e) = \left(\left(g \cdot h_1^c \cdot K\right)^{1/(e+x)}, e\right)$
+to the client. 
+It also proves that it computed this value correctly by proving that $\log_A \left(g \cdot h_1^c \cdot K\right) = \log_g \left(g^e \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof. 
+That is, let $X_A = g \cdot h_1^c \cdot K$ and $X_g = g^e \cdot w$. The issuer does:
+\begin{enumerate}
+    \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= A^{\alpha}$ and $Y_g:=g^\alpha$.
+    \item Compute $\gamma:=H(A\|e\|Y_A\|Y_g)$.
+    \item Compute $z:=\gamma\cdot (x+e)+\alpha$, and send $\gamma, z$ to the client.
+\end{enumerate}
+\end{itemize}
+\item The client verifies the proof $\gamma, z$ by computing $Y'_A:= A^z \cdot X_A^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
+checking if 
+$H( A\|e\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $((A, e, k, r), c)$; otherwise, the client outputs~$\perp$.
 \end{enumerate}
 
-The protocols are run between the client and the server, initiated by the client:
-
+\medskip\noindent{\bf Spending.}
+To spend $s\leq B$ credits using a token $(A, e, k, r)$ for $c$ credits (with $s \leq c\leq B$), the client and issuer do the following ($\send_1, \send_2$, and $\hash$ are initially empty):
+\begin{itemize}
+    \item ({\bf Client spend.}) The client reveals $k$ and proves knowledge of a BBS signature on a vector of the form $(c, k, r)$ for some $c, r$ with $c \geq s$. This is done as follows:
+    \begin{enumerate}
+        \item The client chooses $r_1, r_2, c', r', e', r'_2, r'_3 \leftarrow \Z_q$. It then sets $B:= g \cdot h_1^c h_2^k h_3^r$, $A':=A^{r_1 r_2}$, $\bar B:=B^{r_1}$, $r_3 := r_1^{-1}$,
+ $A_1:=(A')^{e'} \cdot \bar B^{r'_2}$, $A_2:= \bar B^{r'_3} \cdot h_1^{c'} h_3^{r'}$, $\send_1:=\send_1\|k\|A'\|\bar B$, and $\hash:=\hash\|A_1\|A_2$.
+ 
+ \item Let $i_{\ell-1}, \ldots, i_0 \in \bool$ be the binary representation of $c-s$. % (so $c-s=\sum_{j=0}^{\ell-1} 2^j \cdot i_j$). 
+The client chooses $k^*, s_0, \ldots, s_{\ell-1} \leftarrow \Z_q$ and sets
+$\com_0:=h_1^{i_0} h_2^{k^*} h_3^{s_0}$ and
+$\com_j:=h_1^{i_j} h_3^{s_j}$ for $j=1, \ldots, \ell-1$; it then sets $\send_1:=\send_1\|\com_0\|\cdots \|\com_{\ell-1}$.
+It then does:
 \begin{enumerate}
-    \item $Issue$
-
-        The issuer knows their private key $x$, their public key $w$, and the number of
-        credits they wish to issue, $n$.
-
-        The client knows the public key of the issuer, $w$.
-
-        \begin{enumerate}
-            \item[] $(p, req) \leftarrow RequestIssuance$ // run by client
-            \item[] // client sends req to issuer
-            \item[] $resp \leftarrow Mint(x, req, n)$ // run by issuer
-            \item[] // issuer sends resp to client
-            \item[] $token \leftarrow IssueCredits(p, w, req, resp)$ // run by client
-            \item[] return $token$
+        \item Set $C_{0,0}:=\com_0$ and $C_{0,1} :=\com_0/h_1$.     
+        \item Choose $k'_0, s'_0, \gamma_0, w_0, z_0 \leftarrow \Z_q$.
+        \item If $i_0=0$ set $C'_{0,0} := h_2^{k'_0} h_3^{s'_0}$ and $C'_{0,1}:= h_2^{w_0} h_3^{z_0} C_{0,1}^{-\gamma_0}$.\\
+              If $i_0=1$ set $C'_{0,0} := h_2^{w_0} h_3^{z_0} C_{0,0}^{-\gamma_0}$ and $C'_{0,1}:= h_2^{k'_0} h_3^{s'_0}$.
+        \item Set $\hash:=\hash\|C'_{0,0} \| C'_{0,1}$.
         \end{enumerate}
-
-    \item $Spend$
-
-        The issuer knows their private key $x$, their public key $w$, and the number of
-        credits $c$ the client wishes to spend. They maintain a database $db$ which
-        contains all previously seen nullifiers $k$.
-
-        The client knows their $token$, the issuer's public key $w$, and the
-        number of credits $c$ they wish to spend.
-
-        \begin{enumerate}
-            \item[] $(p, sp) \leftarrow ProveSpend(token, charge)$ // run by the client
-            \item[] // client sends sp, charge to the issuer
-            \item[] $refund \leftarrow Refund(x, sp, c)$ // run by issuer
-            \item[] $k \leftarrow GetNullifier(sp$
-            \item[] if $db.lookup(k)$, fail
-            \item[] $db.insert(k)$
-            \item[] // issuer sends refund to client
-            \item[] $token \leftarrow RefundCredits(p, w, req, resp)$ // run by client
-            \item[] return $token$
+Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
+        \item Set $C_{j,0}:=\com_j$ and $C_{j,1} :=\com_j/h_1$.     
+        \item Choose $s'_j, \gamma_j, z_j \leftarrow \Z_q$.
+        \item If $i_j=0$ set $C'_{j,0} := h_3^{s'_j}$ and $C'_{j,1}:=h_3^{z_j} C_{j,1}^{-\gamma_j}$.\\
+              If $i_j=1$ set $C'_{j,0} := h_3^{z_j} C_{j,0}^{-\gamma_j}$ and $C'_{j,1}:=h_3^{s'_j}$.
+        \item Set $\hash:=\hash\|C'_{j,0} \| C'_{j,1}$.
         \end{enumerate}
-\end{enumerate}
-
-\end{definition}
-
-\begin{definition}
-
-An Anonymous Credit System is \textbf{correct} if, for any efficient adversary
-    $A$, the probability that $flag$ is set to $1$ in the following experiment
-    is negligible.
-
+        Finally, it sets  
+        $r^* := \sum_{j=0}^{\ell-1} 2^j s_j$.
+        
+    \item The client chooses $k', s'\leftarrow \Z_q$ and sets $C:=h_1^{c'}h_2^{k'} h_3^{s'}$ and $\hash:=\hash\|C$. Then it computes $\gamma := H(\send_1\|\hash) \in \Z_q$.
+        \item The client computes $\bar e := -\gamma \cdot e + e'$, $\bar r_2 := \gamma r_2 + r'_2$, $\bar r_3:=\gamma r_3 + r'_3$, $\bar c:=-\gamma c+c'$, $\bar r:=-\gamma r + r'$, and $\send_2:=\send_2\|\bar e\| \bar r_2 \| \bar r_3 \| \bar c \| \bar r$. 
+        Then
+  \begin{enumerate}
+    \item If $i_0=0$ set $\gamma_{0,0}:=\gamma-\gamma_0$, $w_{0,0}:=\gamma_{0,0} \cdot k^*+k'_0$, 
+    $w_{0,1}:=w_0$,
+    $z_{0,0}:=\gamma_{0,0}\cdot s_0+s'_j$, and $z_{0,1}:=z_0$.\\
+    %
+    If $i_0=1$ set $\gamma_{0,0}:=\gamma_0$, $w_{0,0}:=z_0$, $w_{0,1}:= (\gamma-\gamma_{0,0}) \cdot k^*+k'_0$,
+    $z_{0,0}:=z_0$, and $z_{0,1}:=(\gamma-\gamma_{0,0}) \cdot s_0+s'_0$. 
+    \item Set $\send_2:=\send_2\|w_{0,0}\|w_{0,1}\|\gamma_{0,0}\|z_{0,0}\|z_{0,1}$.
+\end{enumerate}      
+        Then for $j=1, \ldots, \ell-1$ it does:
 \begin{enumerate}
-    \item Generate keys $(w, x)$ and provide $w$ to $A$.
-    \item $A$ can interact with the following oracles, with $i$ being initialized
-          as $0$ and $db$ being initialized emptily:
-        \begin{itemize}
-
-            \item $Issue(n)$ runs the $Issue$ protocol between an honest issuer
-                and client with input $n$ and lets $token$ be the resulting
-                credits token. If $Issue$ fails, set $flag = 1$. Otherwise,
-                $token_i = token$ and increment $i$.
-
-            \item $Spend(j, c)$, which can be called only once for each $j$ and
-                only when the balance $n$ of $token_j$ satisfies $c \leq n$.
-                Run the $Spend$ protocol using $db$, $c$, and $token_j$,
-                returning $token$.  Send $sp$, $c$, $k$ to $A$, and set $flag =
-                1$ if the protocol fails. Set $token_i = token$ and increment
-                $i$.
-
-        \end{itemize}
+    \item If $i_j=0$ set $\gamma_{j,0}:=\gamma-\gamma_j$, $z_{j,0}:=\gamma_{j,0}\cdot s_j+s'_j$, and $z_{j,1}:=z_j$.\\
+    If $i_j=1$ set $\gamma_{j,0}:=\gamma_j$, %$\gamma_{j,1}:=\gamma-\gamma_{j,0}$, 
+    $z_{j,0}:=z_j$, and $z_{j,1}:=(\gamma-\gamma_{j,0}) \cdot s_j+s'_j$. 
+    \item Set $\send_2:=\send_2\|\gamma_{j,0}\|z_{j,0}\|z_{j,1}$.
 \end{enumerate}
-\end{definition}
+\item The client sets $\bar k:= \gamma k^* + k'$, $\bar s := \gamma s^* + s'$ and $\send_2:=\send_2\|\bar k\|\bar s$.
+Finally, the client sends $\send_1, \gamma, \send_2$ to the issuer.
+The client stores $c-s, k^*, r^*$ to be used later below.
 
 
-\begin{definition}{Fiscal Soundness}
-
-    An Anonymous Credit System is \textbf{fiscally sound} if, for any efficient
-    adversary $A$, the probability that $flag$ is sent to $1$ in the following
-    experiment is negligible.
-
+    \end{enumerate}
+            \item ({\bf Verification by the issuer.}) The issuer, with secret key~$x$, parses $\send_1, \send_2$ as
+            \begin{eqnarray*} & \send_1 = k\|A'\|\bar B\|\com_0\|\cdots\|\com_{\ell-1} & \\
+            &\send_2 = \bar e \| \bar r_2\|\bar r_3\|\bar c \| \bar r\| w_{0,0}\|w_{0,1}\| \gamma_{0,0}\|z_{0,0}\|z_{0,1}\|\cdots \| \gamma_{\ell-1,0}\|z_{\ell-1,0}\|z_{\ell-1,1}\|\bar k\|\bar s \; .&
+            \end{eqnarray*}
+It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially empty):
 \begin{enumerate}
-
-    \item Generate keys $(w, x)$ and provide $w$ to $A$.
-
-    \item $A$ is given access to an oracle which runs $Issue$ between $A$ and
-      issuer. Let $m$ be a running sum of all total amounts ever issued. Return
-      the credit token to $A$.
-
-    \item $A$ is given access to an oracle which runs $(b, resp) \leftarrow
-      Refund(proof, c)$ for an arbitrary proof and $c$ provided by $A$. If
-      $tag$ has been reused or $b = 0$, return. Otherwise, add $c$ to $m'$, a
-      running sum of all amounts ever successfully spent using this oracle. If
-      $m' > m$, set $flag = 1$. $resp$, $tag$ is returned to $A$.
-
+    \item Set $\bar A:=(A')^x$, $H_1:=g \cdot h_2^k$, $A_1:= (A')^{\bar e} \bar B^{\bar r_2} \bar A^{-\gamma}$, $A_2:= \bar B^{\bar r_3} h_1^{\bar c} h_3^{\bar r} H_1^{-\gamma}$, and $\hash:=\hash\|A_1\|A_2$. 
+    \item Do:
+           \begin{enumerate}
+           \item Set $\gamma_{0,1}:=\gamma-\gamma_{0,0}$, $C_{0,0}:=\com_0$, and  $C_{0,1}:=\com_0/h_1$.
+           \item Set $C'_{0,0}:=h_2^{w_{0,0}} h_3^{z_{0,0}} C_{0,0}^{-\gamma_{0,0}}$ and $C'_{0,1}:=h_2^{w_{0,1}} h_3^{z_{0,1}}C_{0,1}^{-\gamma_{0,1}}$.
+           \item Set $\hash:=\hash\|C'_{0,0}\|C'_{0,1}$.
+       \end{enumerate}
+       Then for $j=1, \ldots, \ell-1$ do:
+              \begin{enumerate}
+           \item Set $\gamma_{0,1}:=\gamma-\gamma_{0,0}$, $C_{0,0}:=\com_0$, and  $C_{0,1}:=\com_0/h_1$.
+           \item Set $C'_{j,0}:=h_3^{z_{j,0}} C_{j,0}^{-\gamma_{j,0}}$ and $C'_{j,1}:=h_3^{z_{j,1}}C_{j,1}^{-\gamma_{j,1}}$.
+           \item Set $\hash:=\hash\|C'_{j,0}\|C'_{j,1}$.
+       \end{enumerate}
+       \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{\bar c} h_2^{\bar k} h_2^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
 \end{enumerate}
 
-
-\end{definition}
-
-\begin{definition}{Anonymity}
-
-An Anonymous Credit System is \textbf{anonymous} if the success probability,
-  for any efficient adversary $A$, the probability that $flag$ is set to $1$ in
-  the following experiment will not be greater than $1/k$, where $k$ is the
-  number of unspent transactions at the end of the experiment.
-
+\item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step. The issuer does the following (note this is almost identical to the issuance protocol described earlier):
+Choose
+$e \leftarrow \Z_q$ and send
+$(A, e) = \left(\left(g \cdot K'\right)^{1/(e+x)}, e\right)$
+to the client. 
+Also prove that it computed this value correctly by proving that $\log_A \left(g \cdot K'\right) = \log_g \left(g^e \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof. 
+That is, let $X_A = g \cdot K'$ and $X_g = g^e \cdot w$. The issuer does:
 \begin{enumerate}
-
-    \item Generate keys $(w, x)$ and provide $w, x$ to $A$. Set integer $i = 0$.
-
-    \item $A$ is given access to an oracle $Issue(n)$ which runs the $Issue$ protocol
-      between an honest client and $A$. Each time, $token_i$ is set to the
-      result of $Issue(n)$, $n_i$ is set to $n$, and $i$ is incremented.
-
-    \item $A$ is given access to an oracle $(b, token, tag) \leftarrow Spend(i, c)$
-      which runs the $Spend(token_i, c)$ protocol between an honest client and $A$. If
-      $token_i$ has already been spent, or $c > n_i$, then $flag$ is set to $0$
-      and the program halts. The $tag$ and $proof$ are returned to $A$.
-      $token_i$ is set to $token$, and $i$ is incremented.
-
-    \item Whenever $A$ chooses, they can choose to complete the experiment. To
-      complete it, there must be at least two unspent transactions. $A$ chooses
-      a value $c$ which is less than or equal to the remaining balance of all
-      unspent tokens. Then, a random $j$ is selected from the set of all
-      remaining unspent tokens, and $Spend(token_j, c)$ is run between an
-      honest client and $A$. $A$ receives the token output from $Spend$, as
-      well as the $tag$, and is given an opportunity to guess $k$. If $k = j$,
-      then $flag$ is set to $1$, otherwise $flag$ is sent to $0$. The program
-      halts.
-
+    \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= A^{\alpha}$ and $Y_g:=g^\alpha$.
+    \item Compute $\gamma:=H(A\|e\|Y_A\|Y_g)$.
+    \item Compute $z:=\gamma\cdot (x+e)+\alpha$, and send $\gamma, z$ to the client.
 \end{enumerate}
 
-\end{definition}
-
-\section{Engineering Considerations}
-
-\subsection*{Token Database}
-
-When operating an ACS, one must have a database of all the $k$ values they've
-already seen. This is likely a much larger database than the one used in the
-API key approach, mapping users to their balances. One natural modification to
-the scheme is to rotate keys regularly, requesting all clients to get a new
-Credit Token with the new private key, without revealing their balances. This
-way, we can eventually throw away old $k$ values. Doing this actually means
-that, at most, we'll have a $k$ for the total number of spends which take place
-in each epoch and the previous epoch. In fact, this could potentially be a
-smaller amount of total storage than simply holding the balance. However, this
-has the pernicious effect of your tokens expiring if you don't exchange them.
-This means that you must active manage your coin balances, which is a pretty
-significant cost.
-
-\subsection*{Token Distribution}
-
-Further, one must have a method of determining who gets Credit Tokens issued to
-them. This might be costly to maintain, and depending on your services, you
-might have to do a KYC type of flow at this stage.
-
-\subsection*{Key Compromise}
-
-A serious consideration for real life deployments is emergency key rotation. If
-a private key is leaked, then all tokens cannot be trusted, and all holders of
-currency will be very naturally upset. For this reason, token users who hold a
-significant amount of credits might want to keep records of their issuance and
-spending, such that they can redeem their credits if a key is leaked. However,
-this violates their privacy and is a very bad situation for everyone. Because
-your Credit Tokens contain random values you've never revealed, you will at
-least not have your credits stolen from you if you keep a record for this case.
-
-\begin{thebibliography}{9}
-\bibitem{bonehshoup}
-Dan Boneh and Victor Shoup (2023) A Graduate Course in Cryptography, Version 0.6
-\bibitem{bbsrevisited}
-Stefano Tessaro and Chenzhi Zhu (2023) Revisiting BBS Signatures
-\end{thebibliography}
-
+\item ({\bf Client computes refund.}) The client verifies the proof $\gamma, z$ by computing $Y'_A:= A^z \cdot X_A^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
+checking if 
+$H( A\|e\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $((A, e, k^*, r^*), c-s)$; otherwise, the client outputs~$\perp$.
+\end{itemize}
 \end{document}
+
+

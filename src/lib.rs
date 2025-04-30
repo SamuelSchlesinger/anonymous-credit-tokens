@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use std::ops::Neg;
 
+pub const L: u32 = 32;
+
+// largest amount of credits which can be issued
+pub const B: u64 = 2u64.pow(L);
+
 struct Transcript {
     hasher: blake3::Hasher,
 }
@@ -75,9 +80,9 @@ pub struct PublicKey {
 
 #[derive(Serialize, Deserialize)]
 pub struct Params {
-    h0: RistrettoPoint,
     h1: RistrettoPoint,
     h2: RistrettoPoint,
+    h3: RistrettoPoint,
 }
 
 impl Default for Params {
@@ -90,9 +95,9 @@ impl Default for Params {
 impl Params {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         Params {
-            h0: RistrettoPoint::random(&mut rng),
             h1: RistrettoPoint::random(&mut rng),
             h2: RistrettoPoint::random(&mut rng),
+            h3: RistrettoPoint::random(&mut rng),
         }
     }
 }
@@ -105,10 +110,10 @@ pub struct PreIssuance {
 
 #[derive(Serialize, Deserialize)]
 pub struct IssuanceRequest {
-    kr: RistrettoPoint,
-    c: Scalar,
-    r_z: Scalar,
-    k_z: Scalar,
+    big_k: RistrettoPoint,
+    gamma: Scalar,
+    k_bar: Scalar,
+    r_bar: Scalar,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,7 +122,7 @@ pub struct CreditToken {
     e: Scalar,
     k: Scalar,
     r: Scalar,
-    n: Scalar,
+    c: Scalar,
 }
 
 impl PreIssuance {
@@ -131,19 +136,19 @@ impl PreIssuance {
     pub fn request(&self, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         let params = Params::default();
 
-        let kr = params.h0 * self.r + params.h1 * self.k;
-        let r_t = Scalar::random(&mut rng);
-        let k_t = Scalar::random(&mut rng);
-        let kr_t = params.h0 * r_t + params.h1 * k_t;
+        let big_k = params.h2 * self.k + params.h3 * self.r;
+        let k_prime = Scalar::random(&mut rng);
+        let r_prime = Scalar::random(&mut rng);
+        let k1 = params.h2 * k_prime + params.h3 * r_prime;
 
-        let c = Transcript::with(b"request", |transcript| {
-            transcript.add_elements([&kr, &kr_t].into_iter());
+        let gamma = Transcript::with(b"request", |transcript| {
+            transcript.add_elements([&big_k, &k1].into_iter());
         });
 
-        let r_z = r_t + self.r * c;
-        let k_z = k_t + self.k * c;
+        let k_bar = k_prime + self.k * gamma;
+        let r_bar = r_prime + self.r * gamma;
 
-        IssuanceRequest { kr, c, r_z, k_z }
+        IssuanceRequest { big_k, gamma, k_bar, r_bar }
     }
 
     pub fn to_credit_token(
@@ -154,17 +159,17 @@ impl PreIssuance {
     ) -> Option<CreditToken> {
         let params = Params::default();
 
-        let x_a = RistrettoPoint::generator() + request.kr + params.h2 * response.n;
+        let x_a = RistrettoPoint::generator() + params.h1 * response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
-        let y_a = response.a * response.z + x_a * response.c.neg();
-        let y_g = RistrettoPoint::generator() * response.z + x_g * response.c.neg();
+        let y_a = response.a * response.z + x_a * response.gamma.neg();
+        let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
 
-        let c = Transcript::with(b"respond", |transcript| {
+        let gamma = Transcript::with(b"respond", |transcript| {
             transcript.add_scalar(&response.e);
             transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
-        if c != response.c {
+        if gamma != response.gamma {
             return None;
         }
 
@@ -173,7 +178,7 @@ impl PreIssuance {
             e: response.e,
             r: self.r,
             k: self.k,
-            n: response.n,
+            c: response.c,
         })
     }
 }
@@ -182,61 +187,61 @@ impl PreIssuance {
 pub struct IssuanceResponse {
     a: RistrettoPoint,
     e: Scalar,
-    c: Scalar,
+    gamma: Scalar,
     z: Scalar,
-    n: Scalar,
+    c: Scalar,
 }
 
 impl PrivateKey {
     pub fn issue(
         &self,
         request: &IssuanceRequest,
-        n: Scalar,
+        c: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Option<IssuanceResponse> {
         let params = Params::default();
-        let kr_t = (params.h0 * request.r_z + params.h1 * request.k_z) - request.kr * request.c;
+        let k1 = (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
 
-        let c = Transcript::with(b"request", |transcript| {
-            transcript.add_elements([&request.kr, &kr_t].into_iter());
+        let gamma = Transcript::with(b"request", |transcript| {
+            transcript.add_elements([&request.big_k, &k1].into_iter());
         });
 
-        if c != request.c {
+        if gamma != request.gamma {
             return None;
         }
 
         let e = Scalar::random(&mut rng);
-        let a = (RistrettoPoint::generator() + request.kr + params.h2 * n) * (e + self.x).invert();
-        let x_a = RistrettoPoint::generator() + request.kr + params.h2 * n;
+        let x_a = RistrettoPoint::generator() + params.h1 * c + request.big_k;
+        let a = x_a * (e + self.x).invert();
         let x_g = RistrettoPoint::generator() * e + self.public.w;
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
         let y_g = RistrettoPoint::generator() * alpha;
 
-        let c = Transcript::with(b"respond", |transcript| {
+        let gamma = Transcript::with(b"respond", |transcript| {
             transcript.add_scalar(&e);
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
-        let z = c * (self.x + e) + alpha;
+        let z = gamma * (self.x + e) + alpha;
 
-        Some(IssuanceResponse { a, e, c, z, n })
+        Some(IssuanceResponse { a, e, gamma, z, c })
     }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct SpendProof {
-    nonce: Scalar,
-    charge: Scalar,
+    k: Scalar,
+    c: Scalar,
 }
 
 impl SpendProof {
     pub fn nonce(&self) -> Scalar {
-        todo!()
+        self.k
     }
 
     pub fn charge(&self) -> Scalar {
-        todo!()
+        self.c
     }
 }
 
@@ -254,8 +259,26 @@ pub struct PreRefund {
 }
 
 impl CreditToken {
-    pub fn prove_spend(&self, _charge: Scalar, _public_key: &PublicKey, mut _rng: impl CryptoRngCore) -> (SpendProof, PreRefund) {
+    pub fn prove_spend(&self, s: Scalar, public_key: &PublicKey, mut rng: impl CryptoRngCore) -> (SpendProof, PreRefund) {
+        let params = Params::default();
+
+        let r1 = Scalar::random(&mut rng);
+        let r2 = Scalar::random(&mut rng);
+        let c_prime = Scalar::random(&mut rng);
+        let r_prime = Scalar::random(&mut rng);
+        let e_prime = Scalar::random(&mut rng);
+        let r2_prime = Scalar::random(&mut rng);
+        let r3_prime = Scalar::random(&mut rng);
+
+        let b = RistrettoPoint::generator() + params.h1 * self.c + params.h2 * self.k + params.h3 * self.r;
+        let a_prime = self.a * (r1 * r2);
+        let b_bar = b * r1;
+        let r3 = r1.invert();
+        let a1 = a_prime * e_prime + b_bar * r2_prime;
+        let a2 = b_bar * r3_prime + params.h1 * c_prime + params.h3 * r_prime;
+
         todo!()
+
     }
 }
 
