@@ -290,7 +290,7 @@ impl PrivateKey {
         big_c_prime[0][0] = params.h2 * spend_proof.w00 + params.h3 * spend_proof.z[0][0]
             - big_c[0][0] * spend_proof.gamma0[0];
         big_c_prime[0][1] = params.h2 * spend_proof.w01 + params.h3 * spend_proof.z[0][1]
-            - big_c[0][1] * gamma01[1];
+            - big_c[0][1] * gamma01[0];
         for j in 1..L {
             gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
             big_c[j][0] = spend_proof.com[j];
@@ -306,7 +306,7 @@ impl PrivateKey {
         let com_ = params.h1 * spend_proof.s + k_prime;
         let big_c = params.h1 * spend_proof.c_bar
             + params.h2 * spend_proof.k_bar
-            + params.h3 * spend_proof.s_bar
+            + params.h3 * spend_proof.s_bar // TODO in the paper, this says h2, but that must be wrong?
             - com_ * spend_proof.gamma;
 
         let gamma = Transcript::with(b"spend", |transcript| {
@@ -391,7 +391,6 @@ impl CreditToken {
         }
         let mut big_c = [[RistrettoPoint::identity(); 2]; L];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-        let mut gamma = [Scalar::ZERO; L];
 
         big_c[0][0] = com[0];
         big_c[0][1] = com[0] - params.h1;
@@ -401,32 +400,46 @@ impl CreditToken {
             s_i_prime[i] = Scalar::random(&mut rng);
         }
         let mut gamma_i = [Scalar::ZERO; L];
-        gamma_i[0] = Scalar::random(&mut rng);
+        for i in 0..L {
+            gamma_i[i] = Scalar::random(&mut rng);
+        }
         let w0 = Scalar::random(&mut rng);
         let mut z = [Scalar::ZERO; L];
-        z[0] = Scalar::random(&mut rng);
+        for i in 0..L {
+            z[i] = Scalar::random(&mut rng);
+        }
 
-        let b0 = params.h2 * k0_prime + params.h3 * s_i_prime[0];
-        let b1 = params.h2 * w0 + params.h3 * z[0] - big_c[0][0] * gamma_i[0];
+        big_c_prime[0][0] = RistrettoPoint::conditional_select(
+            &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
+            &(params.h2 * w0 + params.h3 * z[0] - big_c[0][0] * gamma_i[0]),
+            i[0].ct_eq(&Scalar::ZERO)
+        );
 
-        big_c_prime[0][0] = RistrettoPoint::conditional_select(&b0, &b1, i[0].ct_eq(&Scalar::ZERO));
-
-        big_c_prime[0][1] = RistrettoPoint::conditional_select(&b1, &b0, i[0].ct_eq(&Scalar::ZERO));
+        big_c_prime[0][1] = RistrettoPoint::conditional_select(
+            &(params.h2 * w0 + params.h3 * z[0] - big_c[0][1] * gamma_i[0]),
+            &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
+            i[0].ct_eq(&Scalar::ZERO)
+        );
 
         for j in 1..L {
             big_c[j][0] = com[j];
             big_c[j][1] = com[j] - params.h1;
-            let s_j_prime = Scalar::random(&mut rng);
-            gamma_i[j] = Scalar::random(&mut rng);
-            z[j] = Scalar::random(&mut rng);
 
-            let b0 = params.h3 * s_j_prime;
+            let b0 = params.h3 * s_i_prime[j];
             let b1 = params.h3 * z[j] - big_c[j][0] * gamma_i[j];
 
             big_c_prime[j][0] =
-                RistrettoPoint::conditional_select(&b0, &b1, i[j].ct_eq(&Scalar::ZERO));
+                RistrettoPoint::conditional_select(
+                    &(params.h3 * s_i_prime[j]),
+                    &(params.h3 * z[j] - big_c[j][0] * gamma_i[j]),
+                    i[j].ct_eq(&Scalar::ZERO)
+            );
             big_c_prime[j][1] =
-                RistrettoPoint::conditional_select(&b1, &b0, i[j].ct_eq(&Scalar::ZERO));
+                RistrettoPoint::conditional_select(
+                    &(params.h3 * z[j] - big_c[j][1] * gamma_i[j]),
+                    &(params.h3 * s_i_prime[j]),
+                    i[j].ct_eq(&Scalar::ZERO)
+            );
         }
         let r_star = (0..L)
             .map(|i| s_i[i] * Scalar::from(2u32.pow(i as u32)))
@@ -447,8 +460,8 @@ impl CreditToken {
         });
 
         let e_bar = gamma.neg() * self.e + e_prime;
-        let r2_bar = gamma.neg() * r2 + r2_prime;
-        let r3_bar = gamma.neg() * r3 + r3_prime;
+        let r2_bar = gamma * r2 + r2_prime;
+        let r3_bar = gamma * r3 + r3_prime;
         let c_bar = gamma.neg() * self.c + c_prime;
         let r_bar = gamma.neg() * self.r + r_prime;
         let mut gamma00 = [Scalar::ZERO; L];
@@ -475,7 +488,7 @@ impl CreditToken {
         );
         z00[0][1] = Scalar::conditional_select(
             &z[0],
-            &(gamma00[0] * s_i[0] + s_i_prime[0]),
+            &((gamma - gamma00[0]) * s_i[0] + s_i_prime[0]),
             i[0].ct_eq(&Scalar::ZERO),
         );
         for j in 1..L {
@@ -491,12 +504,13 @@ impl CreditToken {
             );
             z00[j][1] = Scalar::conditional_select(
                 &z[j],
-                &(gamma00[j] * s_i[j] + s_i_prime[j]),
+                &((gamma - gamma00[j]) * s_i[j] + s_i_prime[j]),
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
         let k_bar = gamma * k_star + k_prime;
-        let s_bar = gamma * r_star + s_prime;
+        let s_bar = gamma * r_star + s_prime; // TODO r_star is s_star in the paper, but there is no
+                                              // s_star
 
         let prerefund = PreRefund {
             k: k_star,
