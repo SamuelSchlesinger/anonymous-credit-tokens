@@ -295,13 +295,19 @@ impl PrivateKey {
             gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
             big_c[j][0] = spend_proof.com[j];
             big_c[j][1] = spend_proof.com[j] - params.h1;
-            big_c_prime[j][0] = params.h3 * spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
+            big_c_prime[j][0] =
+                params.h3 * spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
             big_c_prime[j][1] = params.h3 * spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
         }
 
-        let k_prime = (0..L).map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32))).fold(RistrettoPoint::identity(), |a, b| a + b);
+        let k_prime = (0..L)
+            .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
+            .fold(RistrettoPoint::identity(), |a, b| a + b);
         let com_ = params.h1 * spend_proof.s + k_prime;
-        let big_c = params.h1 * spend_proof.c_bar + params.h2 * spend_proof.k_bar + params.h3 * spend_proof.s_bar - com_ * spend_proof.gamma;
+        let big_c = params.h1 * spend_proof.c_bar
+            + params.h2 * spend_proof.k_bar
+            + params.h3 * spend_proof.s_bar
+            - com_ * spend_proof.gamma;
 
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
@@ -314,7 +320,10 @@ impl PrivateKey {
             transcript.add_element(&big_c);
         });
 
-        assert_eq!(gamma, spend_proof.gamma);
+        // TODO go through each of the fields to see which aren't being computed correctly
+        if gamma != spend_proof.gamma {
+            return None;
+        }
 
         todo!()
     }
