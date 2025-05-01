@@ -450,3 +450,168 @@ fn large_amount_issuance() {
     // The new token should have the expected balance
     assert_eq!(new_token.c, expected_remaining, "New token balance incorrect");
 }
+
+#[test]
+fn invalid_token_verification() {
+    // Create a private key and token
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let response = private_key.issue(&request, Scalar::from(50u64), OsRng).unwrap();
+    
+    // Tamper with the response
+    let tampered_response = IssuanceResponse {
+        gamma: response.gamma,
+        a: response.a,
+        e: response.e + Scalar::ONE, // Modify the e value
+        z: response.z,
+        c: response.c,
+    };
+    
+    // The client should reject the tampered response
+    let token_result = preissuance.to_credit_token(
+        private_key.public(),
+        &request,
+        &tampered_response
+    );
+    assert!(token_result.is_none(), "Tampered response should be rejected");
+    
+    // The original response should be accepted
+    let token_result = preissuance.to_credit_token(
+        private_key.public(),
+        &request,
+        &response
+    );
+    assert!(token_result.is_some(), "Valid response should be accepted");
+}
+
+#[test]
+fn transcript_add_elements_test() {
+    use curve25519_dalek::RistrettoPoint;
+    
+    // Create points to add to the transcript
+    let point1 = RistrettoPoint::generator();
+    let point2 = RistrettoPoint::generator() * Scalar::from(2u64);
+    let point3 = RistrettoPoint::generator() * Scalar::from(3u64);
+    
+    // Create a transcript and add elements using add_elements
+    let mut transcript1 = Transcript::new(b"test");
+    transcript1.add_elements([&point1, &point2, &point3].into_iter());
+    let challenge1 = transcript1.challenge();
+    
+    // Create another transcript and add the same elements one by one
+    let mut transcript2 = Transcript::new(b"test");
+    transcript2.add_element(&point1);
+    transcript2.add_element(&point2);
+    transcript2.add_element(&point3);
+    let challenge2 = transcript2.challenge();
+    
+    // The challenges should be identical
+    assert_eq!(challenge1, challenge2, "add_elements should produce the same result as multiple add_element calls");
+}
+
+#[test]
+fn tampered_refund_verification() {
+    // Setup
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let response = private_key.issue(&request, Scalar::from(50u64), OsRng).unwrap();
+    let token = preissuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    
+    // Create a valid spend
+    let spend_amount = Scalar::from(20u64);
+    let (spend_proof, prerefund) = token.prove_spend(spend_amount, OsRng);
+    
+    // Get a valid refund
+    let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    
+    // Tamper with the refund
+    let tampered_refund = Refund {
+        a: refund.a,
+        e: refund.e + Scalar::ONE, // Modify the e value
+        gamma: refund.gamma,
+        z: refund.z,
+    };
+    
+    // The client should reject the tampered refund
+    let new_token_result = prerefund.to_credit_token(&spend_proof, &tampered_refund, private_key.public());
+    assert!(new_token_result.is_none(), "Tampered refund should be rejected");
+    
+    // The original refund should be accepted
+    let new_token_result = prerefund.to_credit_token(&spend_proof, &refund, private_key.public());
+    assert!(new_token_result.is_some(), "Valid refund should be accepted");
+}
+
+#[test]
+fn zero_e_signature_attack() {
+    // Test if a zero e value in the signature can be exploited
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
+    
+    // Create a tampered response with e = 0
+    let tampered_response = IssuanceResponse {
+        a: response.a,
+        e: Scalar::ZERO, // Set e to zero
+        gamma: response.gamma,
+        z: response.z,
+        c: response.c,
+    };
+    
+    // The client should reject this (though the actual signature verification may fail in different ways)
+    let token_result = preissuance.to_credit_token(
+        private_key.public(),
+        &request,
+        &tampered_response
+    );
+    assert!(token_result.is_none(), "Zero e value should be rejected");
+}
+
+#[test]
+fn spend_with_identity_a_prime() {
+    // Create a token
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
+    let token = preissuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    
+    // Create a valid spend proof
+    let (mut spend_proof, _) = token.prove_spend(Scalar::from(10u64), OsRng);
+    
+    // Tamper with the proof - set a_prime to identity
+    spend_proof.a_prime = RistrettoPoint::identity();
+    
+    // The issuer should reject this proof
+    let refund_result = private_key.refund(&spend_proof, OsRng);
+    assert!(refund_result.is_none(), "Spend proof with identity a_prime should be rejected");
+}
+
+#[test]
+fn token_with_zero_credit() {
+    // Create a token with zero credits
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let zero_amount = Scalar::ZERO;
+    let response = private_key.issue(&request, zero_amount, OsRng).unwrap();
+    let token = preissuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    
+    // Token should have zero balance
+    assert_eq!(token.c, Scalar::ZERO, "Token should have zero balance");
+    
+    // Attempting to spend from this token should fail
+    let spend_amount = Scalar::from(10u64);
+    let (spend_proof, _) = token.prove_spend(spend_amount, OsRng);
+    let refund_result = private_key.refund(&spend_proof, OsRng);
+    assert!(refund_result.is_none(), "Spending from a zero-balance token should fail");
+    
+    // But spending zero from it should work
+    let zero_spend = Scalar::ZERO;
+    let (spend_proof, prerefund) = token.prove_spend(zero_spend, OsRng);
+    let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    let new_token = prerefund.to_credit_token(&spend_proof, &refund, private_key.public()).unwrap();
+    assert_eq!(new_token.c, Scalar::ZERO, "New token should still have zero balance");
+}
