@@ -316,7 +316,7 @@ impl PrivateKey {
             .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
             .fold(RistrettoPoint::identity(), |a, b| a + b);
         let com_ = params.h1 * spend_proof.s + k_prime;
-        let big_c = params.h1 * spend_proof.c_bar
+        let big_c = params.h1 * spend_proof.c_bar.neg()
             + params.h2 * spend_proof.k_bar
             + params.h3 * spend_proof.s_bar
             - com_ * spend_proof.gamma;
@@ -492,7 +492,7 @@ impl CreditToken {
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
-        let c_ = params.h1 * c_prime + params.h2 * k_prime + params.h3 * s_prime;
+        let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
 
         println!("PROVER HASHES:");
         println!("a1: {}", hash_point(&a1));
