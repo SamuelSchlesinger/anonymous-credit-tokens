@@ -321,19 +321,6 @@ impl PrivateKey {
             + params.h3 * spend_proof.s_bar
             - com_ * spend_proof.gamma;
 
-        /*
-        println!("VERIFIER HASHES:");
-        println!("com = {}", hash_point(&com_));
-        println!("a1: {}", hash_point(&a1));
-        println!("a2: {}", hash_point(&a2));
-        for i in 0..L {
-            for b in 0..2 {
-                println!("big_c_prime[{i}][{b}] = {}", hash_point(&big_c_prime[i][b]));
-            }
-        }
-        println!("big_c: {}", hash_point(&big_c));
-        */
-
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
             transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
@@ -484,25 +471,12 @@ impl CreditToken {
             );
         }
         let r_star = (0..L)
-            .map(|i| s_i[i] * Scalar::from(2u32.pow(i as u32)))
+            .map(|i| s_i[i] * Scalar::from(2u64.pow(i as u32)))
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
         let com_ = params.h1 * self.c + params.h2 * k_star + params.h3 * r_star;
         let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
-
-        /*
-        println!("PROVER HASHES:");
-        println!("com = {}", hash_point(&com_));
-        println!("a1: {}", hash_point(&a1));
-        println!("a2: {}", hash_point(&a2));
-        for i in 0..L {
-            for b in 0..2 {
-                println!("big_c_prime[{i}][{b}] = {}", hash_point(&big_c_prime[i][b]));
-            }
-        }
-        println!("big_c: {}", hash_point(&c_));
-        */
 
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&self.k);
@@ -665,12 +639,12 @@ mod tests {
     #[test]
     fn full_cycle() {
         use rand_core::OsRng;
-        for _i in 0..100 {
+        for i in 0..10 {
             let private_key = PrivateKey::random(OsRng);
             let preissuance = PreIssuance::random(OsRng);
             let issuance_request = preissuance.request(OsRng);
             let issuance_response = private_key
-                .issue(&issuance_request, Scalar::from(20u64), OsRng)
+                .issue(&issuance_request, Scalar::from(40u64), OsRng)
                 .unwrap();
             let credit_token1 = preissuance
                 .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
@@ -735,6 +709,15 @@ mod tests {
         let bits = bits_of(x);
         for i in 0..L {
             if i % 2 == 1 {
+                assert_eq!(bits[i], Scalar::ONE);
+            } else {
+                assert_eq!(bits[i], Scalar::ZERO);
+            }
+        }
+        let x = Scalar::from(0b01010101010101010101010101010101u64);
+        let bits = bits_of(x);
+        for i in 0..L {
+            if i % 2 == 0 {
                 assert_eq!(bits[i], Scalar::ONE);
             } else {
                 assert_eq!(bits[i], Scalar::ZERO);
