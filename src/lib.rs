@@ -1,3 +1,25 @@
+//! # Anonymous Credits
+//! 
+//! A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
+//! privacy-preserving payment systems.
+//!
+//! ## Overview
+//!
+//! This library implements the Anonymous Credit Scheme designed by Jonathan Katz
+//! and Samuel Schlesinger. The system allows:
+//!
+//! - An issuer to issue credit tokens to clients
+//! - Clients to spend these credits anonymously
+//! - Prevention of double-spending through nullifiers
+//! - Privacy-preserving refunds for unspent credits
+//!
+//! The implementation uses Ristretto points over Curve25519 and zero-knowledge 
+//! proofs to ensure both security and privacy.
+//!
+//! ## Usage Examples
+//!
+//! See the README.md file for comprehensive usage examples.
+
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use group::Group;
 use rand_chacha::ChaCha20Rng;
@@ -7,57 +29,45 @@ use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use std::ops::Neg;
 
+/// The bit length used for binary decomposition of values in range proofs.
+/// This defines the maximum value (2^32 - 1) that can be represented.
 pub const L: usize = 32;
 
-struct Transcript {
-    hasher: blake3::Hasher,
-}
+mod transcript;
+use transcript::Transcript;
 
-impl Transcript {
-    fn new(label: &[u8]) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(label);
-        Transcript { hasher }
-    }
-
-    fn with(label: &[u8], f: impl FnOnce(&mut Transcript)) -> Scalar {
-        let mut transcript = Transcript::new(label);
-        f(&mut transcript);
-        transcript.challenge()
-    }
-
-    fn add_element(&mut self, element: &RistrettoPoint) {
-        self.hasher
-            .update(&bincode::serde::encode_to_vec(element, bincode::config::standard()).unwrap());
-    }
-
-    fn add_elements<'a>(&mut self, elements: impl Iterator<Item = &'a RistrettoPoint>) {
-        for element in elements {
-            self.add_element(element);
-        }
-    }
-
-    fn add_scalar(&mut self, scalar: &Scalar) {
-        self.hasher
-            .update(&bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap());
-    }
-
-    fn rng(self) -> ChaCha20Rng {
-        ChaCha20Rng::from_seed(*self.hasher.finalize().as_bytes())
-    }
-
-    fn challenge(self) -> Scalar {
-        Scalar::random(&mut self.rng())
-    }
-}
-
+/// The private key of the issuer, used to issue and refund credit tokens.
+///
+/// This key should be kept secure, as it allows the owner to create new tokens
+/// and process refunds. The private key includes the corresponding public key
+/// that can be shared with clients.
 #[derive(Serialize, Deserialize)]
 pub struct PrivateKey {
+    /// The secret scalar used in cryptographic operations
     x: Scalar,
+    /// The corresponding public key that can be shared with clients
     public: PublicKey,
 }
 
 impl PrivateKey {
+    /// Creates a new random private key using the provided cryptographically secure random number generator.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// A new `PrivateKey` with a randomly generated secret scalar and the corresponding public key
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anoncreds_rs::PrivateKey;
+    /// use rand_core::OsRng;
+    ///
+    /// let private_key = PrivateKey::random(OsRng);
+    /// ```
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         let x = Scalar::random(&mut rng);
         let public = PublicKey {
@@ -66,25 +76,46 @@ impl PrivateKey {
         PrivateKey { x, public }
     }
 
+    /// Returns a reference to the public key associated with this private key.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the `PublicKey`
     pub fn public(&self) -> &PublicKey {
         &self.public
     }
 }
 
-/// The public key of the issuer.
+/// The public key of the issuer, used to verify credit tokens.
+///
+/// This key is shared with clients so they can validate tokens and create spending proofs.
+/// It contains a Ristretto point that serves as the public component of the issuer's keypair.
 #[derive(Serialize, Deserialize)]
 pub struct PublicKey {
+    /// The public point derived from the secret scalar in the private key
     w: RistrettoPoint,
 }
 
+/// System parameters that define the cryptographic setup for the anonymous credentials scheme.
+///
+/// These parameters are used in various cryptographic operations throughout the protocol.
+/// By default, they are deterministically generated from a fixed seed.
 #[derive(Serialize, Deserialize)]
 struct Params {
+    /// First generator point used in commitment schemes
     h1: RistrettoPoint,
+    /// Second generator point used in commitment schemes
     h2: RistrettoPoint,
+    /// Third generator point used in commitment schemes
     h3: RistrettoPoint,
 }
 
 impl Default for Params {
+    /// Creates the default system parameters using a deterministic seed.
+    ///
+    /// This ensures that all parties use the same parameters without requiring
+    /// a trusted setup ceremony. The seed "INNOCENCE" is hashed with BLAKE3 to
+    /// create a deterministic random number generator.
     fn default() -> Self {
         let rng = ChaCha20Rng::from_seed(*blake3::hash(b"INNOCENCE").as_bytes());
         Self::random(rng)
@@ -92,6 +123,17 @@ impl Default for Params {
 }
 
 impl Params {
+    /// Generates random system parameters using the provided random number generator.
+    ///
+    /// This is used internally to create the default parameters with a deterministic seed.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// A new `Params` instance with randomly generated points
     fn random(mut rng: impl CryptoRngCore) -> Self {
         Params {
             h1: RistrettoPoint::random(&mut rng),
@@ -101,36 +143,81 @@ impl Params {
     }
 }
 
-/// The state held onto by the client while they await issuance.
+/// Client state maintained during the issuance protocol.
+///
+/// This structure holds the client's secret values that are needed to complete
+/// the issuance protocol and eventually construct a valid credit token. The client
+/// must keep this information private during the issuance process.
 #[derive(Serialize, Deserialize)]
 pub struct PreIssuance {
+    /// A random scalar used as a blinding factor
     r: Scalar,
+    /// A random scalar representing the credit token's identifier
     k: Scalar,
 }
 
-/// A request made by the client for an issuance.
+/// A request sent by the client to the issuer to obtain a credit token.
+///
+/// This contains the cryptographic commitments and proof values required for the issuer
+/// to create a valid credit token while maintaining the client's privacy. The client
+/// generates this request using their `PreIssuance` state.
 #[derive(Serialize, Deserialize)]
 pub struct IssuanceRequest {
+    /// A commitment to the client's identifier and blinding factor
     big_k: RistrettoPoint,
+    /// A challenge value generated as part of the proof protocol
     gamma: Scalar,
+    /// A response value for the identifier commitment
     k_bar: Scalar,
+    /// A response value for the blinding factor
     r_bar: Scalar,
 }
 
-/// The credit token itself, from which we can spend credits and receive a refund.
+/// The credit token used to store and spend anonymous credits.
+///
+/// This token represents the client's anonymous credits. It contains the cryptographic
+/// elements needed to prove ownership and spend credits without revealing the client's
+/// identity. The token includes a credit value `c` that represents the total amount
+/// of credits available to spend.
 #[derive(Serialize, Deserialize)]
 pub struct CreditToken {
+    /// A Ristretto point representing the BBS+ signature component
     a: RistrettoPoint,
+    /// A random scalar used in the BBS+ signature
     e: Scalar,
+    /// The token's unique identifier (used to prevent double-spending)
     k: Scalar,
+    /// A blinding factor used to protect the token's privacy
     r: Scalar,
+    /// The amount of credits available in this token
     c: Scalar,
 }
 
 impl PreIssuance {
-    /// Generate a new, random [`PreIssuance`]. Be absolutely sure to use high quality randomness
-    /// here, or else your [`k`] might overlap with a previously used one, rendering your
-    /// [`CreditToken`] unspendable..
+    /// Creates a new random `PreIssuance` state to initiate the credit issuance protocol.
+    ///
+    /// # Security Warning
+    ///
+    /// It is critical to use high-quality randomness for this operation. If the `k` value
+    /// collides with a previously used one, the resulting credit token could become unspendable
+    /// due to double-spending prevention mechanisms.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// A new `PreIssuance` instance with randomly generated values
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anoncreds_rs::PreIssuance;
+    /// use rand_core::OsRng;
+    ///
+    /// let pre_issuance = PreIssuance::random(OsRng);
+    /// ```
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         PreIssuance {
             r: Scalar::random(&mut rng),
@@ -138,19 +225,46 @@ impl PreIssuance {
         }
     }
 
-    /// Build a request for credits.
+    /// Creates an issuance request to obtain credits from the issuer.
+    ///
+    /// This method generates a zero-knowledge proof that allows the issuer to verify the
+    /// integrity of the request without learning the client's secret values. The resulting
+    /// request can be sent to the issuer for processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// An `IssuanceRequest` that can be sent to the issuer
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anoncreds_rs::PreIssuance;
+    /// use rand_core::OsRng;
+    ///
+    /// let pre_issuance = PreIssuance::random(OsRng);
+    /// let request = pre_issuance.request(OsRng);
+    /// ```
     pub fn request(&self, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         let params = Params::default();
 
+        // Create a commitment to the client's identifier and blinding factor
         let big_k = params.h2 * self.k + params.h3 * self.r;
+        
+        // Generate random values for the zero-knowledge proof
         let k_prime = Scalar::random(&mut rng);
         let r_prime = Scalar::random(&mut rng);
         let k1 = params.h2 * k_prime + params.h3 * r_prime;
 
+        // Generate the challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(b"request", |transcript| {
             transcript.add_elements([&big_k, &k1].into_iter());
         });
 
+        // Calculate the response values for the zero-knowledge proof
         let k_bar = k_prime + self.k * gamma;
         let r_bar = r_prime + self.r * gamma;
 
@@ -162,7 +276,43 @@ impl PreIssuance {
         }
     }
 
-    /// Construct the [`CreditToken`] from the given request, response pair.
+    /// Constructs a credit token from the issuer's response to an issuance request.
+    ///
+    /// This method verifies the issuer's response and, if valid, creates a credit token
+    /// that the client can use to spend credits. The method validates the cryptographic
+    /// proof from the issuer to ensure the response is legitimate.
+    ///
+    /// # Arguments
+    ///
+    /// * `public` - The issuer's public key
+    /// * `request` - The original issuance request sent to the issuer
+    /// * `response` - The issuer's response containing the signature components
+    ///
+    /// # Returns
+    ///
+    /// * `Some(CreditToken)` - A valid credit token if the issuer's response is verified
+    /// * `None` - If the verification fails, indicating a potential invalid response
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use curve25519_dalek::Scalar;
+    /// # use rand_core::OsRng;
+    /// #
+    /// # let private_key = PrivateKey::random(OsRng);
+    /// # let public_key = private_key.public();
+    /// # let pre_issuance = PreIssuance::random(OsRng);
+    /// # let request = pre_issuance.request(OsRng);
+    /// # let credit_amount = Scalar::from(20u64);
+    /// # let response = private_key.issue(&request, credit_amount, OsRng).unwrap();
+    /// #
+    /// let credit_token = pre_issuance.to_credit_token(
+    ///     public_key,
+    ///     &request,
+    ///     &response
+    /// ).unwrap();
+    /// ```
     pub fn to_credit_token(
         &self,
         public: &PublicKey,
@@ -171,20 +321,26 @@ impl PreIssuance {
     ) -> Option<CreditToken> {
         let params = Params::default();
 
+        // Reconstruct the signature base points for verification
         let x_a = RistrettoPoint::generator() + params.h1 * response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
+        
+        // Verify the response by checking the BBS+ signature proof
         let y_a = response.a * response.z + x_a * response.gamma.neg();
         let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
 
+        // Generate the expected challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(b"respond", |transcript| {
             transcript.add_scalar(&response.e);
             transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
+        // Verify that the challenge matches the expected value
         if gamma != response.gamma {
             return None;
         }
 
+        // Construct the credit token with the verified signature
         Some(CreditToken {
             a: response.a,
             e: response.e,
@@ -195,18 +351,61 @@ impl PreIssuance {
     }
 }
 
-/// A response to the client's request for issuance.
+/// The issuer's response to a client's issuance request.
+///
+/// This response contains the cryptographic signature components and proof
+/// values that allow the client to construct a valid credit token. It includes
+/// the credit amount (`c`) assigned by the issuer and the BBS+ signature
+/// elements that authenticate this amount.
 #[derive(Serialize, Deserialize)]
 pub struct IssuanceResponse {
+    /// The BBS+ signature's main component
     a: RistrettoPoint,
+    /// A random scalar used in the BBS+ signature
     e: Scalar,
+    /// A challenge value generated as part of the proof protocol
     gamma: Scalar,
+    /// A response value for the proof of knowledge of the signature
     z: Scalar,
+    /// The amount of credits being issued
     c: Scalar,
 }
 
 impl PrivateKey {
-    /// Issues credits in response to a request from the client.
+    /// Issues credits to a client in response to their issuance request.
+    ///
+    /// This method verifies the client's request for legitimacy and, if valid, creates
+    /// a cryptographic signature binding the specified credit amount to the client's
+    /// commitment. The response contains a BBS+ signature and a zero-knowledge proof
+    /// that allows the client to verify the signature's authenticity without revealing
+    /// the issuer's private key.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The client's issuance request
+    /// * `c` - The amount of credits to issue
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// * `Some(IssuanceResponse)` - The response containing the signature if the request is valid
+    /// * `None` - If the request verification fails
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use curve25519_dalek::Scalar;
+    /// # use rand_core::OsRng;
+    /// #
+    /// # let private_key = PrivateKey::random(OsRng);
+    /// # let pre_issuance = PreIssuance::random(OsRng);
+    /// # let request = pre_issuance.request(OsRng);
+    /// #
+    /// // Issue 20 credits to the client
+    /// let credit_amount = Scalar::from(20u64);
+    /// let response = private_key.issue(&request, credit_amount, OsRng).unwrap();
+    /// ```
     pub fn issue(
         &self,
         request: &IssuanceRequest,
@@ -214,74 +413,159 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Option<IssuanceResponse> {
         let params = Params::default();
+        
+        // Verify the client's zero-knowledge proof
         let k1 =
             (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
 
+        // Generate the expected challenge value
         let gamma = Transcript::with(b"request", |transcript| {
             transcript.add_elements([&request.big_k, &k1].into_iter());
         });
 
+        // Verify that the client's proof is valid
         if gamma != request.gamma {
             return None;
         }
 
+        // Create a BBS+ signature on the client's commitment and credit amount
         let e = Scalar::random(&mut rng);
         let x_a = RistrettoPoint::generator() + params.h1 * c + request.big_k;
         let a = x_a * (e + self.x).invert();
         let x_g = RistrettoPoint::generator() * e + self.public.w;
+        
+        // Generate a zero-knowledge proof that the signature is valid
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
         let y_g = RistrettoPoint::generator() * alpha;
 
+        // Generate the challenge for the proof using the Fiat-Shamir transform
         let gamma = Transcript::with(b"respond", |transcript| {
             transcript.add_scalar(&e);
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
+        // Calculate the response value for the proof
         let z = gamma * (self.x + e) + alpha;
 
         Some(IssuanceResponse { a, e, gamma, z, c })
     }
 }
 
-/// A proof that we can spend our private [`CreditToken`], sharing the nullifier to prevent double
-/// spends.
+/// A zero-knowledge proof that allows spending credits anonymously.
+///
+/// This proof demonstrates that the client possesses a valid credit token with 
+/// sufficient balance to spend the requested amount, without revealing the token itself.
+/// The proof includes a nullifier that prevents double-spending, and a range proof 
+/// that ensures the remaining balance is non-negative.
 #[derive(Serialize, Deserialize)]
 pub struct SpendProof {
+    /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
+    /// The amount being spent in this transaction
     s: Scalar,
+    /// The blinded signature component
     a_prime: RistrettoPoint,
+    /// A blinded token component
     b_bar: RistrettoPoint,
+    /// Commitments for the binary decomposition of the remaining balance
     com: [RistrettoPoint; L],
+    /// The challenge value for the zero-knowledge proof
     gamma: Scalar,
+    /// Response value for the signature proof
     e_bar: Scalar,
+    /// Response value for signature transformations
     r2_bar: Scalar,
+    /// Response value for signature transformations
     r3_bar: Scalar,
+    /// Response value for the credit amount
     c_bar: Scalar,
+    /// Response value for the blinding factor
     r_bar: Scalar,
+    /// Response value for the range proof (bit 0, value 0)
     w00: Scalar,
+    /// Response value for the range proof (bit 0, value 1)
     w01: Scalar,
+    /// Challenge values for each bit in the range proof
     gamma0: [Scalar; L],
+    /// Response values for the range proof bit commitments
     z: [[Scalar; 2]; L],
+    /// Response value for the credit identifier
     k_bar: Scalar,
+    /// Response value for the range proof sum commitment
     s_bar: Scalar,
 }
 
 impl SpendProof {
-    /// The nullifier associated with this spend.
+    /// Returns the nullifier associated with this spend.
+    ///
+    /// The nullifier is a unique identifier for this spend that should be recorded
+    /// by the issuer to prevent double-spending. If the same nullifier is seen twice,
+    /// the second spend attempt should be rejected.
+    ///
+    /// # Returns
+    ///
+    /// The nullifier as a `Scalar` value
     pub fn nullifier(&self) -> Scalar {
         self.k
     }
 
-    /// The amount this proof is trying to spend.
+    /// Returns the amount of credits being spent in this transaction.
+    ///
+    /// # Returns
+    ///
+    /// The credit amount as a `Scalar` value
     pub fn charge(&self) -> Scalar {
         self.s
     }
 }
 
 impl PrivateKey {
-    /// Issues a refund to a spend proof, aborting if invalid. Critically, you must check that
-    /// you've never seen this nullifier before. This function does not do that for you.
+    /// Processes a spend proof and issues a refund token for the remaining credits.
+    ///
+    /// This method verifies the validity of a spend proof and, if valid, issues a refund
+    /// token for the remaining balance. The refund token can be used by the client to
+    /// construct a new credit token with the remaining balance.
+    ///
+    /// # Security Warning
+    ///
+    /// This method does NOT verify that the nullifier has not been seen before. The caller
+    /// MUST check that the nullifier returned by `spend_proof.nullifier()` has not been
+    /// previously processed to prevent double-spending.
+    ///
+    /// # Arguments
+    ///
+    /// * `spend_proof` - The client's proof of valid spending
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Refund)` - The refund token if the spend proof is valid
+    /// * `None` - If the spend proof verification fails
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use curve25519_dalek::Scalar;
+    /// # use rand_core::OsRng;
+    /// #
+    /// # // Setup (normally these would come from previous steps)
+    /// # let private_key = PrivateKey::random(OsRng);
+    /// # let pre_issuance = PreIssuance::random(OsRng);
+    /// # let request = pre_issuance.request(OsRng);
+    /// # let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    /// # let spend_amount = Scalar::from(10u64);
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend(spend_amount, OsRng);
+    /// #
+    /// // First check if we've seen this nullifier before
+    /// let nullifier = spend_proof.nullifier();
+    /// // ... check nullifier database
+    ///
+    /// // Then process the refund
+    /// let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    /// ```
     pub fn refund(&self, spend_proof: &SpendProof, mut rng: impl CryptoRngCore) -> Option<Refund> {
         let params = Params::default();
 
@@ -367,33 +651,95 @@ impl PrivateKey {
     }
 }
 
-/// The data the client keeps after they make a spending attempt and they're waiting for their
-/// refund.
+/// Client state maintained during the refund protocol.
+///
+/// This structure holds the client's secret values that are needed to complete
+/// the refund protocol and construct a new credit token with the remaining balance.
+/// The client must keep this information private after spending credits and while
+/// awaiting a refund.
 #[derive(Serialize, Deserialize)]
 pub struct PreRefund {
+    /// A random blinding factor for the new credit token
     r: Scalar,
+    /// A random identifier for the new credit token
     k: Scalar,
+    /// The remaining balance after spending
     m: Scalar,
 }
 
+/// Decomposes a scalar value into its binary representation.
+///
+/// This helper function converts a scalar value into an array of L scalars,
+/// where each scalar is either 0 or 1, representing the binary decomposition
+/// of the input value. This is used in range proofs to demonstrate that a value
+/// falls within a certain range.
+///
+/// # Arguments
+///
+/// * `s` - The scalar value to decompose
+///
+/// # Returns
+///
+/// An array of L scalars (0 or 1) representing the binary bits of the input
 fn bits_of(s: Scalar) -> [Scalar; L] {
     let bytes = s.as_bytes();
     let mut result = [Scalar::ZERO; L];
 
+    // Extract each bit from the scalar's byte representation
     for i in 0..L {
-        let b = i / 8;
-        let j = i % 8;
-        let bit = (bytes[b] >> j) & 0b1;
-        result[i] = Scalar::from(bit as u64);
+        let b = i / 8;     // Byte index
+        let j = i % 8;     // Bit position within the byte
+        let bit = (bytes[b] >> j) & 0b1;  // Extract the bit
+        result[i] = Scalar::from(bit as u64);  // Convert to scalar (0 or 1)
     }
 
     result
 }
 
 impl CreditToken {
-    /// Prove that you're able to spend the given amount of credits from the [`CreditToken`].
+    /// Creates a zero-knowledge proof for spending credits from this token.
     ///
-    /// Precondition: 2^L > self.c >= s
+    /// This method generates a proof that the client possesses a valid credit token with
+    /// sufficient balance to spend the requested amount, without revealing the token itself.
+    /// The proof includes a range proof to demonstrate that the remaining balance is
+    /// non-negative, and a nullifier to prevent double-spending.
+    ///
+    /// # Precondition
+    ///
+    /// This function requires that `2^L > self.c >= s`. If this condition is not met,
+    /// the proof will be invalid and will be rejected by the issuer.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The amount of credits to spend
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * `SpendProof` - The proof of valid spending to send to the issuer
+    /// * `PreRefund` - The client's state to keep for later creating a new credit token
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use anoncreds_rs::{CreditToken, PrivateKey, PreIssuance};
+    /// # use curve25519_dalek::Scalar;
+    /// # use rand_core::OsRng;
+    /// #
+    /// # // Create a valid credit token with 20 credits
+    /// # let private_key = PrivateKey::random(OsRng);
+    /// # let pre_issuance = PreIssuance::random(OsRng);
+    /// # let request = pre_issuance.request(OsRng);
+    /// # let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    /// #
+    /// // Spend 10 credits (where 10 <= token balance < 2^32)
+    /// let spend_amount = Scalar::from(10u64);
+    /// let (spend_proof, prerefund) = credit_token.prove_spend(spend_amount, OsRng);
+    ///
+    /// // Send spend_proof to the issuer and keep prerefund for later
+    /// ```
     pub fn prove_spend(
         &self,
         s: Scalar,
@@ -579,17 +925,66 @@ impl CreditToken {
     }
 }
 
-/// The response to a spend attempt, contains the data required to extract a new [`CreditToken`].
+/// The issuer's response to a spending proof, used to create a new credit token.
+///
+/// This response contains the cryptographic signature components needed for the client
+/// to construct a new credit token with the remaining balance. It includes a BBS+
+/// signature on the remaining balance and proof values that authenticate the response.
 #[derive(Serialize, Deserialize)]
 pub struct Refund {
+    /// The BBS+ signature's main component for the new credit token
     a: RistrettoPoint,
+    /// A random scalar used in the BBS+ signature
     e: Scalar,
+    /// A challenge value generated as part of the proof protocol
     gamma: Scalar,
+    /// A response value for the proof of knowledge of the signature
     z: Scalar,
 }
 
 impl PreRefund {
-    /// Construct a new [`CreditToken`] from the transcript of the spend protocol.
+    /// Constructs a new credit token from the refund response.
+    ///
+    /// This method verifies the issuer's refund response and, if valid, creates a new
+    /// credit token with the remaining balance. This completes the spending protocol
+    /// by providing the client with a new token for their unspent credits.
+    ///
+    /// # Arguments
+    ///
+    /// * `spend_proof` - The original spending proof sent to the issuer
+    /// * `refund` - The issuer's refund response
+    /// * `public_key` - The issuer's public key
+    ///
+    /// # Returns
+    ///
+    /// * `Some(CreditToken)` - A new credit token with the remaining balance if the refund is valid
+    /// * `None` - If the verification fails
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use curve25519_dalek::Scalar;
+    /// # use rand_core::OsRng;
+    /// #
+    /// # // Setup (normally these would come from previous steps)
+    /// # let private_key = PrivateKey::random(OsRng);
+    /// # let public_key = private_key.public();
+    /// # let pre_issuance = PreIssuance::random(OsRng);
+    /// # let request = pre_issuance.request(OsRng);
+    /// # let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(public_key, &request, &response).unwrap();
+    /// # let spend_amount = Scalar::from(10u64);
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend(spend_amount, OsRng);
+    /// # let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    /// #
+    /// // Construct the new credit token with the remaining balance
+    /// let new_credit_token = prerefund.to_credit_token(
+    ///     &spend_proof,
+    ///     &refund,
+    ///     public_key
+    /// ).unwrap();
+    /// ```
     pub fn to_credit_token(
         &self,
         spend_proof: &SpendProof,
@@ -626,111 +1021,4 @@ impl PreRefund {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn issuance() {
-        use rand_core::OsRng;
-        for _i in 0..100 {
-            let private_key = PrivateKey::random(OsRng);
-            let preissuance = PreIssuance::random(OsRng);
-            let issuance_request = preissuance.request(OsRng);
-            let issuance_response = private_key
-                .issue(&issuance_request, Scalar::from(20u64), OsRng)
-                .unwrap();
-            let _credit_token1 = preissuance
-                .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn full_cycle() {
-        use rand_core::OsRng;
-        for i in 0..10 {
-            let private_key = PrivateKey::random(OsRng);
-            let preissuance = PreIssuance::random(OsRng);
-            let issuance_request = preissuance.request(OsRng);
-            let issuance_response = private_key
-                .issue(&issuance_request, Scalar::from(40u64), OsRng)
-                .unwrap();
-            let credit_token1 = preissuance
-                .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
-                .unwrap();
-            let charge = Scalar::from(20u64);
-            let (spend_proof, prerefund) =
-                credit_token1.prove_spend(charge, OsRng);
-            let refund = private_key.refund(&spend_proof, OsRng).unwrap();
-            let credit_token2 = prerefund
-                .to_credit_token(&spend_proof, &refund, private_key.public())
-                .unwrap();
-            let charge = Scalar::from(20u64);
-            let (spend_proof, prerefund) =
-                credit_token2.prove_spend(charge, OsRng);
-            let refund = private_key.refund(&spend_proof, OsRng).unwrap();
-            let _credit_token3 = prerefund
-                .to_credit_token(&spend_proof, &refund, private_key.public())
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn bits_of_() {
-        let x = Scalar::from(2u64.pow(L as u32) - 1);
-        let bits = bits_of(x);
-        for i in 0..L {
-            assert_eq!(bits[i], Scalar::ONE);
-        }
-        let x = Scalar::from(0u64);
-        let bits = bits_of(x);
-        for i in 0..L {
-            assert_eq!(bits[i], Scalar::ZERO);
-        }
-        let x = Scalar::from(0b001u64);
-        let bits = bits_of(x);
-        for i in 0..L {
-            if i == 0 {
-                assert_eq!(bits[i], Scalar::ONE);
-            } else {
-                assert_eq!(bits[i], Scalar::ZERO);
-            }
-        }
-        let x = Scalar::from(0b100000000u64);
-        let bits = bits_of(x);
-        for i in 0..L {
-            if i == 8 {
-                assert_eq!(bits[i], Scalar::ONE);
-            } else {
-                assert_eq!(bits[i], Scalar::ZERO);
-            }
-        }
-        let x = Scalar::from(7u64);
-        let bits = bits_of(x);
-        for i in 0..L {
-            if i <= 2 {
-                assert_eq!(bits[i], Scalar::ONE);
-            } else {
-                assert_eq!(bits[i], Scalar::ZERO);
-            }
-        }
-        let x = Scalar::from(0b10101010101010101010101010101010u64);
-        let bits = bits_of(x);
-        for i in 0..L {
-            if i % 2 == 1 {
-                assert_eq!(bits[i], Scalar::ONE);
-            } else {
-                assert_eq!(bits[i], Scalar::ZERO);
-            }
-        }
-        let x = Scalar::from(0b01010101010101010101010101010101u64);
-        let bits = bits_of(x);
-        for i in 0..L {
-            if i % 2 == 0 {
-                assert_eq!(bits[i], Scalar::ONE);
-            } else {
-                assert_eq!(bits[i], Scalar::ZERO);
-            }
-        }
-    }
-}
+mod tests;
