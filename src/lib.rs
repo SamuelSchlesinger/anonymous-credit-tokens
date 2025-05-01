@@ -321,7 +321,9 @@ impl PrivateKey {
             + params.h3 * spend_proof.s_bar
             - com_ * spend_proof.gamma;
 
+        /*
         println!("VERIFIER HASHES:");
+        println!("com = {}", hash_point(&com_));
         println!("a1: {}", hash_point(&a1));
         println!("a2: {}", hash_point(&a2));
         for i in 0..L {
@@ -330,6 +332,7 @@ impl PrivateKey {
             }
         }
         println!("big_c: {}", hash_point(&big_c));
+        */
 
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
@@ -342,14 +345,7 @@ impl PrivateKey {
             transcript.add_element(&big_c);
         });
 
-        println!(
-            "VERIFICATION: computed gamma = {}, spend_proof.gamma = {}",
-            hash_scalar(&gamma),
-            hash_scalar(&spend_proof.gamma)
-        );
-
         if gamma != spend_proof.gamma {
-            println!("Verification failed: gamma mismatch");
             return None;
         }
 
@@ -393,7 +389,7 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
     for i in 0..L {
         let b = i / 8;
         let j = i % 8;
-        let bit = (bytes[b] >> j) & 1;
+        let bit = (bytes[b] >> j) & 0b1;
         result[i] = Scalar::from(bit as u64);
     }
 
@@ -492,9 +488,12 @@ impl CreditToken {
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
+        let com_ = params.h1 * self.c + params.h2 * k_star + params.h3 * r_star;
         let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
 
+        /*
         println!("PROVER HASHES:");
+        println!("com = {}", hash_point(&com_));
         println!("a1: {}", hash_point(&a1));
         println!("a2: {}", hash_point(&a2));
         for i in 0..L {
@@ -503,6 +502,7 @@ impl CreditToken {
             }
         }
         println!("big_c: {}", hash_point(&c_));
+        */
 
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&self.k);
@@ -704,6 +704,41 @@ mod tests {
         for i in 0..L {
             assert_eq!(bits[i], Scalar::ZERO);
         }
-
+        let x = Scalar::from(0b001u64);
+        let bits = bits_of(x);
+        for i in 0..L {
+            if i == 0 {
+                assert_eq!(bits[i], Scalar::ONE);
+            } else {
+                assert_eq!(bits[i], Scalar::ZERO);
+            }
+        }
+        let x = Scalar::from(0b100000000u64);
+        let bits = bits_of(x);
+        for i in 0..L {
+            if i == 8 {
+                assert_eq!(bits[i], Scalar::ONE);
+            } else {
+                assert_eq!(bits[i], Scalar::ZERO);
+            }
+        }
+        let x = Scalar::from(7u64);
+        let bits = bits_of(x);
+        for i in 0..L {
+            if i <= 2 {
+                assert_eq!(bits[i], Scalar::ONE);
+            } else {
+                assert_eq!(bits[i], Scalar::ZERO);
+            }
+        }
+        let x = Scalar::from(0b10101010101010101010101010101010u64);
+        let bits = bits_of(x);
+        for i in 0..L {
+            if i % 2 == 1 {
+                assert_eq!(bits[i], Scalar::ONE);
+            } else {
+                assert_eq!(bits[i], Scalar::ZERO);
+            }
+        }
     }
 }
