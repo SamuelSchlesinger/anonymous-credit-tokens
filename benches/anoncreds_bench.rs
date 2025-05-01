@@ -1,4 +1,4 @@
-use anoncreds_rs::{PreIssuance, PrivateKey};
+use anonymous_credits::{PreIssuance, PrivateKey};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;

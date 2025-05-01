@@ -63,7 +63,7 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// use anoncreds_rs::PrivateKey;
+    /// use anonymous_credits::PrivateKey;
     /// use rand_core::OsRng;
     ///
     /// let private_key = PrivateKey::random(OsRng);
@@ -213,7 +213,7 @@ impl PreIssuance {
     /// # Example
     ///
     /// ```
-    /// use anoncreds_rs::PreIssuance;
+    /// use anonymous_credits::PreIssuance;
     /// use rand_core::OsRng;
     ///
     /// let pre_issuance = PreIssuance::random(OsRng);
@@ -242,7 +242,7 @@ impl PreIssuance {
     /// # Example
     ///
     /// ```
-    /// use anoncreds_rs::PreIssuance;
+    /// use anonymous_credits::PreIssuance;
     /// use rand_core::OsRng;
     ///
     /// let pre_issuance = PreIssuance::random(OsRng);
@@ -296,7 +296,7 @@ impl PreIssuance {
     /// # Example
     ///
     /// ```
-    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use anonymous_credits::{PrivateKey, PreIssuance};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
@@ -394,7 +394,7 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use anonymous_credits::{PrivateKey, PreIssuance};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
@@ -546,7 +546,7 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use anonymous_credits::{PrivateKey, PreIssuance};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
@@ -723,7 +723,7 @@ impl CreditToken {
     /// # Example
     ///
     /// ```
-    /// # use anoncreds_rs::{CreditToken, PrivateKey, PreIssuance};
+    /// # use anonymous_credits::{CreditToken, PrivateKey, PreIssuance};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
@@ -963,7 +963,7 @@ impl PreRefund {
     /// # Example
     ///
     /// ```
-    /// # use anoncreds_rs::{PrivateKey, PreIssuance};
+    /// # use anonymous_credits::{PrivateKey, PreIssuance};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #

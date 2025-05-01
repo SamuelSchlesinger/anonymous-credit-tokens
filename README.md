@@ -31,7 +31,7 @@ security and privacy.
 The issuer must generate a keypair:
 
 ```rust
-use anoncreds_rs::PrivateKey;
+use anonymous_credits::PrivateKey;
 use rand_core::OsRng;
 
 // Issuer generates a keypair
@@ -44,7 +44,7 @@ let public_key = private_key.public();
 To issue credits to a client:
 
 ```rust
-use anoncreds_rs::{PreIssuance, PrivateKey};
+use anonymous_credits::{PreIssuance, PrivateKey};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
@@ -90,7 +90,7 @@ let new_credit_token = prerefund
 ### Complete Transaction Cycle
 
 ```rust
-use anoncreds_rs::{PrivateKey, PreIssuance};
+use anonymous_credits::{PrivateKey, PreIssuance};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
