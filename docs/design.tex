@@ -176,7 +176,7 @@ Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
         Finally, it sets  
         $r^* := \sum_{j=0}^{\ell-1} 2^j s_j$.
         
-    \item The client chooses $k', s'\leftarrow \Z_q$ and sets $C:=h_1^{c'}h_2^{k'} h_3^{s'}$ and $\hash:=\hash\|C$. Then it computes $\gamma := H(\send_1\|\hash) \in \Z_q$.
+    \item The client chooses $k', s'\leftarrow \Z_q$ and sets $C:=h_1^{-c'}h_2^{k'} h_3^{s'}$ and $\hash:=\hash\|C$. Then it computes $\gamma := H(\send_1\|\hash) \in \Z_q$.
         \item The client computes $\bar e := -\gamma \cdot e + e'$, $\bar r_2 := \gamma r_2 + r'_2$, $\bar r_3:=\gamma r_3 + r'_3$, $\bar c:=-\gamma c+c'$, $\bar r:=-\gamma r + r'$, and $\send_2:=\send_2\|\bar e\| \bar r_2 \| \bar r_3 \| \bar c \| \bar r$. 
         Then
   \begin{enumerate}
@@ -220,7 +220,7 @@ It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially emp
            \item Set $C'_{j,0}:=h_3^{z_{j,0}} C_{j,0}^{-\gamma_{j,0}}$ and $C'_{j,1}:=h_3^{z_{j,1}}C_{j,1}^{-\gamma_{j,1}}$.
            \item Set $\hash:=\hash\|C'_{j,0}\|C'_{j,1}$.
        \end{enumerate}
-       \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{\bar c} h_2^{\bar k} h_3^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
+       \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{-\bar c} h_2^{\bar k} h_3^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
 \end{enumerate}
 
 \item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step. The issuer does the following (note this is almost identical to the issuance protocol described earlier):
