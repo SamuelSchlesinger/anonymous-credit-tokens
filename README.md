@@ -4,10 +4,31 @@ An (incomplete) implementation of Anonymous Credits in Rust.
 
 ## Completed
 
-Issuance
+- Issuance
+- Spending protocol
 
 ## TODO
 
-Implement the spending protocol. The hardest part here is going to be the range proof,
-we're going to use the bit-sum-decomposition approach rather than SHARP so its easier
-to make it constant time.
+- Implement the refund protocol
+
+## Benchmarks
+
+The project uses [Criterion.rs](https://github.com/bheisler/criterion.rs) for benchmarking. The following operations are benchmarked:
+
+- Key generation
+- Parameters generation
+- Pre-issuance
+- Issuance request
+- Issuance
+- Token creation
+- Spending proof
+- Full issuance flow
+- Full spending flow
+
+To run the benchmarks:
+
+```bash
+cargo bench
+```
+
+Benchmark results will be available in the `target/criterion` directory as HTML reports.
