@@ -522,45 +522,45 @@ impl CreditToken {
         let r_bar = gamma.neg() * self.r + r_prime;
         let mut gamma00 = [Scalar::ZERO; L];
         gamma00[0] = Scalar::conditional_select(
-            &(gamma - gamma_i[0]),
             &gamma_i[0],
+            &(gamma - gamma_i[0]),
             i[0].ct_eq(&Scalar::ZERO),
         );
         let w00 = Scalar::conditional_select(
-            &(gamma00[0] * k_star + k0_prime),
             &w0,
+            &(gamma00[0] * k_star + k0_prime),
             i[0].ct_eq(&Scalar::ZERO),
         );
         let w01 = Scalar::conditional_select(
-            &w0,
             &((gamma - gamma00[0]) * k_star + k0_prime),
+            &w0,
             i[0].ct_eq(&Scalar::ZERO),
         );
         let mut z00 = [[Scalar::ZERO; 2]; L];
         z00[0][0] = Scalar::conditional_select(
-            &(gamma00[0] * s_i[0] + s_i_prime[0]),
             &z[0],
+            &(gamma00[0] * s_i[0] + s_i_prime[0]),
             i[0].ct_eq(&Scalar::ZERO),
         );
         z00[0][1] = Scalar::conditional_select(
-            &z[0],
             &((gamma - gamma00[0]) * s_i[0] + s_i_prime[0]),
+            &z[0],
             i[0].ct_eq(&Scalar::ZERO),
         );
         for j in 1..L {
             gamma00[j] = Scalar::conditional_select(
-                &(gamma - gamma_i[j]),
                 &gamma_i[j],
+                &(gamma - gamma_i[j]),
                 i[j].ct_eq(&Scalar::ZERO),
             );
             z00[j][0] = Scalar::conditional_select(
-                &(gamma00[j] * s_i[j] + s_i_prime[j]),
                 &z[j],
+                &(gamma00[j] * s_i[j] + s_i_prime[j]),
                 i[j].ct_eq(&Scalar::ZERO),
             );
             z00[j][1] = Scalar::conditional_select(
-                &z[j],
                 &((gamma - gamma00[j]) * s_i[j] + s_i_prime[j]),
+                &z[j],
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
@@ -613,9 +613,6 @@ impl PreRefund {
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Option<CreditToken> {
-        let params = Params::default();
-
-        // Verify the proof from the issuer
         let x_a = RistrettoPoint::generator()
             + (0..L)
                 .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
