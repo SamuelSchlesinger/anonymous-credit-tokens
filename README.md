@@ -1,17 +1,21 @@
 # Anonymous Credits
 
-A Rust implementation of an Anonymous Credit Scheme (ACS) that enables privacy-preserving payment systems.
+A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
+privacy-preserving payment systems.
 
 ## Overview
 
-This library implements the Anonymous Credit Scheme designed by Jonathan Katz and Samuel Schlesinger (see [design document](docs/design.pdf)). The system allows:
+This library implements the Anonymous Credit Scheme designed by Jonathan Katz
+and Samuel Schlesinger (see [design document](docs/design.pdf)). The system
+allows:
 
 - An issuer to issue credit tokens to clients
 - Clients to spend these credits anonymously
 - Prevention of double-spending through nullifiers
 - Privacy-preserving refunds for unspent credits
 
-The implementation uses BBS signatures and zero-knowledge proofs to ensure both security and privacy.
+The implementation uses BBS signatures and zero-knowledge proofs to ensure both
+security and privacy.
 
 ## Features
 
@@ -171,10 +175,15 @@ To prevent double-spending, issuers must:
 2. Check each spend request against this database before processing
 3. Use high-quality randomness for key generation
 
+To ensure their credit tokens are secure (and not already spent), clients must
+use high-quality randomness for all operations.
+
 ## License
 
 See the [LICENSE](LICENSE) file for details.
 
 ## References
 
-The implementation is based on the Anonymous Credit Scheme designed by Jonathan Katz and Samuel Schlesinger. For more details, see the [design document](docs/design.pdf).
+The implementation is based on the Anonymous Credit Scheme designed by Jonathan
+Katz and Samuel Schlesinger. For more details, see the [design
+document](docs/design.pdf).
