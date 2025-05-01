@@ -101,7 +101,7 @@ Spending $s$ credits using a $c$-credit token (with $c \geq s$) associated with 
     \item The client sends $k$ to the issuer, and proves possession of a BBS signature on $(c, k)$ with~$c \geq s$. (We currently use binary decomposition to prove the latter; other methods could also be used.)
     \item The client obtains a fresh BBS signature from the issuer on $(c-s, k^*)$ for a fresh~$k^*$. (Note this must be done even when $c-s=0$ if the client wants to maintain anonymity.)
 \end{enumerate}
-The purpose of the nullifier is to prevent double spending: the issuer can store a database of previously used nullifiers, and reject a spend attempt if $k$ has been used before. This check is not included in the description below.
+The purpose of the nullifier is to prevent double spending: the issuer can store a database of previously used nullifiers, and reject a spend attempt if $k$ has been used before. (This check is not included in the description below.)
 
 \subsection{Technical Details}
 We now provide the details of our scheme. We remark that, in contrast to the informal description in the previous section, our scheme actually uses BBS signatures on vectors of three attributes, with one of the attributes serving as a randomizer to prevent linkability.
@@ -110,13 +110,13 @@ We now provide the details of our scheme. We remark that, in contrast to the inf
 {\bf Setup.}
 Fix a group $\G$ of prime order $q$ with generator~$g$, along with
 (random) generators $h_1, h_2, h_3 \in \G$. (These could be chosen by the issuer, or fixed public values.) 
-Finally, we assume the number of credits a token can contain (and hence the maximum possible spend amount) is strictly less than $2^\ell$ for known~$\ell$.\footnote{While one can consider a non-power-of-two bound, it is not clear that there is any advantage to doing so here.}
+We assume the number of credits a token can contain (and hence the maximum possible spend amount) is strictly less than $2^\ell<q/2$ for some known~$\ell$.\footnote{While one can consider a non-power-of-two bound, it is not clear that there is any advantage to doing so here.}
 
 \medskip\noindent{\bf Key generation.}
 An issuer chooses a secret key $x \leftarrow \Z_q$; the associated public key is~$w:=g^x$. 
 
 \medskip\noindent{\bf Token issuance.} 
-To issue a token for~$c$ credits to some client, the client and issuer run the following protocol:
+To issue a token for~$c>0$ credits to some client, the client and issuer run the following protocol:
 \begin{enumerate}
     \item The client chooses $k, r \leftarrow \Z_q$,  sets $K:=h_2^k h_3^r$, and computes a non-interactive proof of knowledge of~$k, r$ as follows: 
     \begin{enumerate}
@@ -129,7 +129,7 @@ To issue a token for~$c$ credits to some client, the client and issuer run the f
     \begin{itemize} 
     \item ({\bf Verification.}) Compute $K_1:= h_2^{\bar k} h_3^{\bar r} K^{-\gamma}$ and check that $H(K\|K_1) \isequal \gamma$.
 
-\item ({\bf Issuance.}) The issuer then chooses
+\item ({\bf Issuance.}) The issuer chooses
 $e \leftarrow \Z_q$ and sends
 $(A, e) = \left(\left(g \cdot h_1^c \cdot K\right)^{1/(e+x)}, e\right)$
 to the client. 
@@ -158,7 +158,7 @@ To spend $s<2^\ell$ credits using a token $(A, e, k, r)$ for $c$ credits (with $
 The client chooses $k^*, s_0, \ldots, s_{\ell-1} \leftarrow \Z_q$ and sets
 $\com_0:=h_1^{i_0} h_2^{k^*} h_3^{s_0}$ and
 $\com_j:=h_1^{i_j} h_3^{s_j}$ for $j=1, \ldots, \ell-1$; it then sets $\send_1:=\send_1\|\com_0\|\cdots \|\com_{\ell-1}$.
-It then does:
+It then proves that each $\com_j$ is of the correct form (in particular, that $i_j \in \bool$) as follows:
 \begin{enumerate}
         \item Set $C_{0,0}:=\com_0$ and $C_{0,1} :=\com_0/h_1$.     
         \item Choose $k'_0, s'_0, \gamma_0, w_0, z_0 \leftarrow \Z_q$.
@@ -175,8 +175,11 @@ Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
         \end{enumerate}
         Finally, it sets  
         $r^* := \sum_{j=0}^{\ell-1} 2^j s_j$.
+     
+         \medskip\noindent{\bf Note:} If we let $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$ and $\com:=h_1^s\cdot K'$ (both values that can be computed by the verifier), then $K'=h_1^{c-s} h_2^{k^*} h_3^{r^*}$ with $c-s\geq 0$ and $\com=h_1^c h_2^{k^*} h_3^{r^*}$. In the next step the client proves that $\com$ is a commitment to the same value $c$ as in its token.
         
     \item The client chooses $k', s'\leftarrow \Z_q$ and sets $C:=h_1^{-c'}h_2^{k'} h_3^{s'}$ and $\hash:=\hash\|C$. Then it computes $\gamma := H(\send_1\|\hash) \in \Z_q$.
+    
         \item The client computes $\bar e := -\gamma \cdot e + e'$, $\bar r_2 := \gamma r_2 + r'_2$, $\bar r_3:=\gamma r_3 + r'_3$, $\bar c:=-\gamma c+c'$, $\bar r:=-\gamma r + r'$, and $\send_2:=\send_2\|\bar e\| \bar r_2 \| \bar r_3 \| \bar c \| \bar r$. 
         Then
   \begin{enumerate}
@@ -195,8 +198,7 @@ Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
     $z_{j,0}:=z_j$, and $z_{j,1}:=(\gamma-\gamma_{j,0}) \cdot s_j+s'_j$. 
     \item Set $\send_2:=\send_2\|\gamma_{j,0}\|z_{j,0}\|z_{j,1}$.
 \end{enumerate}
-\item The client sets $\bar k:= \gamma k^* + k'$, $\bar s := \gamma r^* + s'$ and $\send_2:=\send_2\|\bar k\|\bar s$.
-Finally, the client sends $\send_1, \gamma, \send_2$ to the issuer.
+\item The client sets $\bar k:= \gamma k^* + k'$, $\bar s := \gamma r^* + s'$ and $\send_2:=\send_2\|\bar k\|\bar s$, and then sends $\send_1, \gamma, \send_2$ to the issuer.
 The client stores $c-s, k^*, r^*$ to be used later below.
 
 
@@ -223,13 +225,14 @@ It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially emp
        \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{-\bar c} h_2^{\bar k} h_3^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
 \end{enumerate}
 
-\item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step. The issuer does the following (note this is almost identical to the issuance protocol described earlier):
+\item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step, and recall that $K'=h_1^{c-s} h_2^{k^*} h_3^{r^*}$. Thus, the issuer can use this value to issue a new token.
+Specifically, the issuer does the following (note this is almost identical to the issuance protocol described earlier):
 Choose
-$e \leftarrow \Z_q$ and send
-$(A, e) = \left(\left(g \cdot K'\right)^{1/(e+x)}, e\right)$
+$e^* \leftarrow \Z_q$ and send
+$(A^*, e^*) = \left(\left(g \cdot K'\right)^{1/(e^*+x)}, e^*\right)$
 to the client. 
-Also prove that it computed this value correctly by proving that $\log_A \left(g \cdot K'\right) = \log_g \left(g^e \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof. 
-That is, let $X_A = g \cdot K'$ and $X_g = g^e \cdot w$. The issuer does:
+Also prove that it computed this value correctly by proving that $\log_{A^*} \left(g \cdot K'\right) = \log_g \left(g^{e^*} \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof. 
+That is, let $X_{A^*} = g \cdot K'$ and $X_g = g^{e^*} \cdot w$. The issuer does:
 \begin{enumerate}
     \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= A^{\alpha}$ and $Y_g:=g^\alpha$.
     \item Compute $\gamma:=H(A\|e\|Y_A\|Y_g)$.
