@@ -9,18 +9,6 @@ use std::ops::Neg;
 
 pub const L: usize = 32;
 
-fn hash_scalar(scalar: &Scalar) -> String {
-    let bytes = bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap();
-    let hash = blake3::hash(&bytes);
-    hash.to_hex()[..8].to_string()
-}
-
-fn hash_point(point: &RistrettoPoint) -> String {
-    let bytes = bincode::serde::encode_to_vec(point, bincode::config::standard()).unwrap();
-    let hash = blake3::hash(&bytes);
-    hash.to_hex()[..8].to_string()
-}
-
 struct Transcript {
     hasher: blake3::Hasher,
 }
@@ -388,7 +376,6 @@ impl CreditToken {
     pub fn prove_spend(
         &self,
         s: Scalar,
-        public_key: &PublicKey,
         mut rng: impl CryptoRngCore,
     ) -> (SpendProof, PreRefund) {
         let params = Params::default();
@@ -475,7 +462,6 @@ impl CreditToken {
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
-        let com_ = params.h1 * self.c + params.h2 * k_star + params.h3 * r_star;
         let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
 
         let gamma = Transcript::with(b"spend", |transcript| {
@@ -651,14 +637,14 @@ mod tests {
                 .unwrap();
             let charge = Scalar::from(20u64);
             let (spend_proof, prerefund) =
-                credit_token1.prove_spend(charge, private_key.public(), OsRng);
+                credit_token1.prove_spend(charge, OsRng);
             let refund = private_key.refund(&spend_proof, OsRng).unwrap();
             let credit_token2 = prerefund
                 .to_credit_token(&spend_proof, &refund, private_key.public())
                 .unwrap();
             let charge = Scalar::from(20u64);
             let (spend_proof, prerefund) =
-                credit_token2.prove_spend(charge, private_key.public(), OsRng);
+                credit_token2.prove_spend(charge, OsRng);
             let refund = private_key.refund(&spend_proof, OsRng).unwrap();
             let _credit_token3 = prerefund
                 .to_credit_token(&spend_proof, &refund, private_key.public())
