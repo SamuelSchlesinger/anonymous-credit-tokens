@@ -233,17 +233,13 @@ impl PrivateKey {
     }
 }
 
-// (10 + 3*L) * 32 + 2 * 48 =  96 * L + 416
-//
-// For L = 32, 3488
-// For L = 16, 1952
-// For L = 8, 1184
 #[derive(Serialize, Deserialize)]
 pub struct SpendProof {
     k: Scalar,
     s: Scalar,
     a_prime: RistrettoPoint,
     b_bar: RistrettoPoint,
+    com: [RistrettoPoint; L],
     gamma: Scalar,
     e_bar: Scalar,
     r2_bar: Scalar,
@@ -254,6 +250,8 @@ pub struct SpendProof {
     w01: Scalar,
     gamma0: [Scalar; L],
     z: [[Scalar; 2]; L],
+    k_bar: Scalar,
+    s_bar: Scalar,
 }
 
 impl SpendProof {
@@ -267,11 +265,57 @@ impl SpendProof {
 }
 
 impl PrivateKey {
-    pub fn refund(
-        &self,
-        _spend_proof: &SpendProof,
-        mut _rng: impl CryptoRngCore,
-    ) -> Option<Refund> {
+    pub fn refund(&self, spend_proof: &SpendProof, mut rng: impl CryptoRngCore) -> Option<Refund> {
+        let params = Params::default();
+
+        if spend_proof.a_prime == RistrettoPoint::generator() {
+            return None;
+        }
+
+        let a_bar = spend_proof.a_prime * self.x;
+        let big_h1 = RistrettoPoint::generator() + params.h2 * spend_proof.k;
+        let a1 = spend_proof.a_prime * spend_proof.e_bar
+            + spend_proof.b_bar * spend_proof.r2_bar
+            + a_bar * spend_proof.gamma.neg();
+        let a2 = spend_proof.b_bar * spend_proof.r3_bar
+            + params.h1 * spend_proof.c_bar
+            + params.h3 * spend_proof.r_bar
+            + big_h1 * spend_proof.gamma.neg();
+        let mut gamma01 = [Scalar::ZERO; L];
+        gamma01[0] = spend_proof.gamma - spend_proof.gamma0[0];
+        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
+        big_c[0][0] = spend_proof.com[0];
+        big_c[0][1] = spend_proof.com[0] - params.h1;
+        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+        big_c_prime[0][0] = params.h2 * spend_proof.w00 + params.h3 * spend_proof.z[0][0]
+            - big_c[0][0] * spend_proof.gamma0[0];
+        big_c_prime[0][1] = params.h2 * spend_proof.w01 + params.h3 * spend_proof.z[0][1]
+            - big_c[0][1] * gamma01[1];
+        for j in 1..L {
+            gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
+            big_c[j][0] = spend_proof.com[j];
+            big_c[j][1] = spend_proof.com[j] - params.h1;
+            big_c_prime[j][0] = params.h3 * spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
+            big_c_prime[j][1] = params.h3 * spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
+        }
+
+        let k_prime = (0..L).map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32))).fold(RistrettoPoint::identity(), |a, b| a + b);
+        let com_ = params.h1 * spend_proof.s + k_prime;
+        let big_c = params.h1 * spend_proof.c_bar + params.h2 * spend_proof.k_bar + params.h3 * spend_proof.s_bar - com_ * spend_proof.gamma;
+
+        let gamma = Transcript::with(b"spend", |transcript| {
+            transcript.add_scalar(&spend_proof.k);
+            transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
+            transcript.add_elements([&a1, &a2].into_iter());
+            transcript.add_elements(spend_proof.com.iter());
+            for i in 0..L {
+                transcript.add_elements(big_c_prime[i].iter());
+            }
+            transcript.add_element(&big_c);
+        });
+
+        assert_eq!(gamma, spend_proof.gamma);
+
         todo!()
     }
 }
@@ -331,10 +375,10 @@ impl CreditToken {
         for _ in 0..L {
             s_i.push(Scalar::random(&mut rng));
         }
-        let mut com = Vec::with_capacity(L);
-        com.push(params.h1 * i[0] + params.h2 * k_star + params.h3 * s_i[0]);
+        let mut com = [RistrettoPoint::identity(); L];
+        com[0] = params.h1 * i[0] + params.h2 * k_star + params.h3 * s_i[0];
         for j in 1..L {
-            com.push(params.h1 * i[j] + params.h3 * s_i[j]);
+            com[j] = params.h1 * i[j] + params.h3 * s_i[j];
         }
         let mut big_c = [[RistrettoPoint::identity(); 2]; L];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
@@ -457,6 +501,7 @@ impl CreditToken {
                 s,
                 a_prime,
                 b_bar,
+                com,
                 gamma,
                 e_bar,
                 r2_bar,
@@ -467,6 +512,8 @@ impl CreditToken {
                 w01,
                 gamma0: gamma00,
                 z: z00,
+                k_bar,
+                s_bar,
             },
             prerefund,
         )
