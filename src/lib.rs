@@ -9,6 +9,18 @@ use std::ops::Neg;
 
 pub const L: usize = 32;
 
+fn hash_scalar(scalar: &Scalar) -> String {
+    let bytes = bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap();
+    let hash = blake3::hash(&bytes);
+    hash.to_hex()[..8].to_string()
+}
+
+fn hash_point(point: &RistrettoPoint) -> String {
+    let bytes = bincode::serde::encode_to_vec(point, bincode::config::standard()).unwrap();
+    let hash = blake3::hash(&bytes);
+    hash.to_hex()[..8].to_string()
+}
+
 struct Transcript {
     hasher: blake3::Hasher,
 }
@@ -306,8 +318,18 @@ impl PrivateKey {
         let com_ = params.h1 * spend_proof.s + k_prime;
         let big_c = params.h1 * spend_proof.c_bar
             + params.h2 * spend_proof.k_bar
-            + params.h3 * spend_proof.s_bar // TODO in the paper, this says h2, but that must be wrong?
+            + params.h3 * spend_proof.s_bar
             - com_ * spend_proof.gamma;
+
+        println!("VERIFIER HASHES:");
+        println!("a1: {}", hash_point(&a1));
+        println!("a2: {}", hash_point(&a2));
+        for i in 0..L {
+            for b in 0..2 {
+                println!("big_c_prime[{i}][{b}] = {}", hash_point(&big_c_prime[i][b]));
+            }
+        }
+        println!("big_c: {}", hash_point(&big_c));
 
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
@@ -320,12 +342,40 @@ impl PrivateKey {
             transcript.add_element(&big_c);
         });
 
-        // TODO go through each of the fields to see which aren't being computed correctly
+        println!(
+            "VERIFICATION: computed gamma = {}, spend_proof.gamma = {}",
+            hash_scalar(&gamma),
+            hash_scalar(&spend_proof.gamma)
+        );
+
         if gamma != spend_proof.gamma {
+            println!("Verification failed: gamma mismatch");
             return None;
         }
 
-        todo!()
+        let e = Scalar::random(&mut rng);
+
+        let x_a = RistrettoPoint::generator() + k_prime;
+        let a = x_a * (e + self.x).invert();
+
+        let x_g = RistrettoPoint::generator() * e + self.public.w;
+        let alpha = Scalar::random(&mut rng);
+        let y_a = a * alpha;
+        let y_g = RistrettoPoint::generator() * alpha;
+
+        let refund_gamma = Transcript::with(b"refund", |transcript| {
+            transcript.add_scalar(&e);
+            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
+        });
+
+        let z = refund_gamma * (self.x + e) + alpha;
+
+        Some(Refund {
+            a,
+            e,
+            gamma: refund_gamma,
+            z,
+        })
     }
 }
 
@@ -343,7 +393,8 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
     for i in 0..L {
         let b = i / 8;
         let j = i % 8;
-        result[i] = Scalar::from((bytes[b] & (0b00000001 << j)) as u64);
+        let bit = (bytes[b] >> j) & 1;
+        result[i] = Scalar::from(bit as u64);
     }
 
     result
@@ -410,35 +461,30 @@ impl CreditToken {
         }
 
         big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
             &(params.h2 * w0 + params.h3 * z[0] - big_c[0][0] * gamma_i[0]),
-            i[0].ct_eq(&Scalar::ZERO)
+            &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
+            i[0].ct_eq(&Scalar::ZERO),
         );
 
         big_c_prime[0][1] = RistrettoPoint::conditional_select(
-            &(params.h2 * w0 + params.h3 * z[0] - big_c[0][1] * gamma_i[0]),
             &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
-            i[0].ct_eq(&Scalar::ZERO)
+            &(params.h2 * w0 + params.h3 * z[0] - big_c[0][1] * gamma_i[0]),
+            i[0].ct_eq(&Scalar::ZERO),
         );
 
         for j in 1..L {
             big_c[j][0] = com[j];
             big_c[j][1] = com[j] - params.h1;
 
-            let b0 = params.h3 * s_i_prime[j];
-            let b1 = params.h3 * z[j] - big_c[j][0] * gamma_i[j];
-
-            big_c_prime[j][0] =
-                RistrettoPoint::conditional_select(
-                    &(params.h3 * s_i_prime[j]),
-                    &(params.h3 * z[j] - big_c[j][0] * gamma_i[j]),
-                    i[j].ct_eq(&Scalar::ZERO)
+            big_c_prime[j][0] = RistrettoPoint::conditional_select(
+                &(params.h3 * z[j] - big_c[j][0] * gamma_i[j]),
+                &(params.h3 * s_i_prime[j]),
+                i[j].ct_eq(&Scalar::ZERO),
             );
-            big_c_prime[j][1] =
-                RistrettoPoint::conditional_select(
-                    &(params.h3 * z[j] - big_c[j][1] * gamma_i[j]),
-                    &(params.h3 * s_i_prime[j]),
-                    i[j].ct_eq(&Scalar::ZERO)
+            big_c_prime[j][1] = RistrettoPoint::conditional_select(
+                &(params.h3 * s_i_prime[j]),
+                &(params.h3 * z[j] - big_c[j][1] * gamma_i[j]),
+                i[j].ct_eq(&Scalar::ZERO),
             );
         }
         let r_star = (0..L)
@@ -447,6 +493,16 @@ impl CreditToken {
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
         let c_ = params.h1 * c_prime + params.h2 * k_prime + params.h3 * s_prime;
+
+        println!("PROVER HASHES:");
+        println!("a1: {}", hash_point(&a1));
+        println!("a2: {}", hash_point(&a2));
+        for i in 0..L {
+            for b in 0..2 {
+                println!("big_c_prime[{i}][{b}] = {}", hash_point(&big_c_prime[i][b]));
+            }
+        }
+        println!("big_c: {}", hash_point(&c_));
 
         let gamma = Transcript::with(b"spend", |transcript| {
             transcript.add_scalar(&self.k);
@@ -472,7 +528,7 @@ impl CreditToken {
         );
         let w00 = Scalar::conditional_select(
             &(gamma00[0] * k_star + k0_prime),
-            &z[0],
+            &w0,
             i[0].ct_eq(&Scalar::ZERO),
         );
         let w01 = Scalar::conditional_select(
@@ -509,8 +565,7 @@ impl CreditToken {
             );
         }
         let k_bar = gamma * k_star + k_prime;
-        let s_bar = gamma * r_star + s_prime; // TODO r_star is s_star in the paper, but there is no
-                                              // s_star
+        let s_bar = gamma * r_star + s_prime;
 
         let prerefund = PreRefund {
             k: k_star,
@@ -544,16 +599,49 @@ impl CreditToken {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Refund {}
+pub struct Refund {
+    a: RistrettoPoint,
+    e: Scalar,
+    gamma: Scalar,
+    z: Scalar,
+}
 
 impl PreRefund {
     pub fn to_credit_token(
         &self,
-        _spend_proof: &SpendProof,
-        _refund: &Refund,
-        _public_key: &PublicKey,
+        spend_proof: &SpendProof,
+        refund: &Refund,
+        public_key: &PublicKey,
     ) -> Option<CreditToken> {
-        todo!()
+        let params = Params::default();
+
+        // Verify the proof from the issuer
+        let x_a = RistrettoPoint::generator()
+            + (0..L)
+                .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
+                .fold(RistrettoPoint::identity(), |a, b| a + b);
+
+        let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
+        let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
+        let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
+
+        let gamma = Transcript::with(b"refund", |transcript| {
+            transcript.add_scalar(&refund.e);
+            transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
+        });
+
+        if gamma != refund.gamma {
+            return None;
+        }
+
+        // The client now has a new credit token
+        Some(CreditToken {
+            a: refund.a,
+            e: refund.e,
+            k: self.k,
+            r: self.r,
+            c: self.m,
+        })
     }
 }
 
@@ -605,5 +693,20 @@ mod tests {
                 .to_credit_token(&spend_proof, &refund, private_key.public())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn bits_of_() {
+        let x = Scalar::from(2u64.pow(L as u32) - 1);
+        let bits = bits_of(x);
+        for i in 0..L {
+            assert_eq!(bits[i], Scalar::ONE);
+        }
+        let x = Scalar::from(0u64);
+        let bits = bits_of(x);
+        for i in 0..L {
+            assert_eq!(bits[i], Scalar::ZERO);
+        }
+
     }
 }
