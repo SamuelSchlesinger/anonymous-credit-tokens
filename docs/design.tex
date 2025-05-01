@@ -147,7 +147,7 @@ $H( A\|e\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $((A, e, k,
 \end{enumerate}
 
 \medskip\noindent{\bf Spending.}
-To spend $s\leq B$ credits using a token $(A, e, k, r)$ for $c$ credits (with $s \leq c\leq B$), the client and issuer do the following ($\send_1, \send_2$, and $\hash$ are initially empty):
+To spend $s<2^\ell$ credits using a token $(A, e, k, r)$ for $c$ credits (with $s \leq c< 2^\ell$), the client and issuer do the following ($\send_1, \send_2$, and $\hash$ are initially empty):
 \begin{itemize}
     \item ({\bf Client spend.}) The client reveals $k$ and proves knowledge of a BBS signature on a vector of the form $(c, k, r)$ for some $c, r$ with $c \geq s$. This is done as follows:
     \begin{enumerate}
@@ -182,9 +182,9 @@ Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
   \begin{enumerate}
     \item If $i_0=0$ set $\gamma_{0,0}:=\gamma-\gamma_0$, $w_{0,0}:=\gamma_{0,0} \cdot k^*+k'_0$, 
     $w_{0,1}:=w_0$,
-    $z_{0,0}:=\gamma_{0,0}\cdot s_0+s'_j$, and $z_{0,1}:=z_0$.\\
+    $z_{0,0}:=\gamma_{0,0}\cdot s_0+s'_0$, and $z_{0,1}:=z_0$.\\
     %
-    If $i_0=1$ set $\gamma_{0,0}:=\gamma_0$, $w_{0,0}:=z_0$, $w_{0,1}:= (\gamma-\gamma_{0,0}) \cdot k^*+k'_0$,
+    If $i_0=1$ set $\gamma_{0,0}:=\gamma_0$, $w_{0,0}:=w_0$, $w_{0,1}:= (\gamma-\gamma_{0,0}) \cdot k^*+k'_0$,
     $z_{0,0}:=z_0$, and $z_{0,1}:=(\gamma-\gamma_{0,0}) \cdot s_0+s'_0$. 
     \item Set $\send_2:=\send_2\|w_{0,0}\|w_{0,1}\|\gamma_{0,0}\|z_{0,0}\|z_{0,1}$.
 \end{enumerate}      
@@ -195,7 +195,7 @@ Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
     $z_{j,0}:=z_j$, and $z_{j,1}:=(\gamma-\gamma_{j,0}) \cdot s_j+s'_j$. 
     \item Set $\send_2:=\send_2\|\gamma_{j,0}\|z_{j,0}\|z_{j,1}$.
 \end{enumerate}
-\item The client sets $\bar k:= \gamma k^* + k'$, $\bar s := \gamma s^* + s'$ and $\send_2:=\send_2\|\bar k\|\bar s$.
+\item The client sets $\bar k:= \gamma k^* + k'$, $\bar s := \gamma r^* + s'$ and $\send_2:=\send_2\|\bar k\|\bar s$.
 Finally, the client sends $\send_1, \gamma, \send_2$ to the issuer.
 The client stores $c-s, k^*, r^*$ to be used later below.
 
@@ -216,11 +216,11 @@ It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially emp
        \end{enumerate}
        Then for $j=1, \ldots, \ell-1$ do:
               \begin{enumerate}
-           \item Set $\gamma_{0,1}:=\gamma-\gamma_{0,0}$, $C_{0,0}:=\com_0$, and  $C_{0,1}:=\com_0/h_1$.
+           \item Set $\gamma_{j,1}:=\gamma-\gamma_{j,0}$, $C_{j,0}:=\com_j$, and  $C_{j,1}:=\com_j/h_1$.
            \item Set $C'_{j,0}:=h_3^{z_{j,0}} C_{j,0}^{-\gamma_{j,0}}$ and $C'_{j,1}:=h_3^{z_{j,1}}C_{j,1}^{-\gamma_{j,1}}$.
            \item Set $\hash:=\hash\|C'_{j,0}\|C'_{j,1}$.
        \end{enumerate}
-       \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{\bar c} h_2^{\bar k} h_2^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
+       \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{\bar c} h_2^{\bar k} h_3^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
 \end{enumerate}
 
 \item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step. The issuer does the following (note this is almost identical to the issuance protocol described earlier):
