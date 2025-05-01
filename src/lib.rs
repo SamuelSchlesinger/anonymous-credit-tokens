@@ -71,13 +71,14 @@ impl PrivateKey {
     }
 }
 
+/// The public key of the issuer.
 #[derive(Serialize, Deserialize)]
 pub struct PublicKey {
     w: RistrettoPoint,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Params {
+struct Params {
     h1: RistrettoPoint,
     h2: RistrettoPoint,
     h3: RistrettoPoint,
@@ -100,12 +101,14 @@ impl Params {
     }
 }
 
+/// The state held onto by the client while they await issuance.
 #[derive(Serialize, Deserialize)]
 pub struct PreIssuance {
     r: Scalar,
     k: Scalar,
 }
 
+/// A request made by the client for an issuance.
 #[derive(Serialize, Deserialize)]
 pub struct IssuanceRequest {
     big_k: RistrettoPoint,
@@ -114,6 +117,7 @@ pub struct IssuanceRequest {
     r_bar: Scalar,
 }
 
+/// The credit token itself, from which we can spend credits and receive a refund.
 #[derive(Serialize, Deserialize)]
 pub struct CreditToken {
     a: RistrettoPoint,
@@ -124,6 +128,9 @@ pub struct CreditToken {
 }
 
 impl PreIssuance {
+    /// Generate a new, random [`PreIssuance`]. Be absolutely sure to use high quality randomness
+    /// here, or else your [`k`] might overlap with a previously used one, rendering your
+    /// [`CreditToken`] unspendable..
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         PreIssuance {
             r: Scalar::random(&mut rng),
@@ -131,6 +138,7 @@ impl PreIssuance {
         }
     }
 
+    /// Build a request for credits.
     pub fn request(&self, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         let params = Params::default();
 
@@ -154,6 +162,7 @@ impl PreIssuance {
         }
     }
 
+    /// Construct the [`CreditToken`] from the given request, response pair.
     pub fn to_credit_token(
         &self,
         public: &PublicKey,
@@ -186,6 +195,7 @@ impl PreIssuance {
     }
 }
 
+/// A response to the client's request for issuance.
 #[derive(Serialize, Deserialize)]
 pub struct IssuanceResponse {
     a: RistrettoPoint,
@@ -196,6 +206,7 @@ pub struct IssuanceResponse {
 }
 
 impl PrivateKey {
+    /// Issues credits in response to a request from the client.
     pub fn issue(
         &self,
         request: &IssuanceRequest,
@@ -233,6 +244,8 @@ impl PrivateKey {
     }
 }
 
+/// A proof that we can spend our private [`CreditToken`], sharing the nullifier to prevent double
+/// spends.
 #[derive(Serialize, Deserialize)]
 pub struct SpendProof {
     k: Scalar,
@@ -255,16 +268,20 @@ pub struct SpendProof {
 }
 
 impl SpendProof {
-    pub fn nonce(&self) -> Scalar {
+    /// The nullifier associated with this spend.
+    pub fn nullifier(&self) -> Scalar {
         self.k
     }
 
+    /// The amount this proof is trying to spend.
     pub fn charge(&self) -> Scalar {
         self.s
     }
 }
 
 impl PrivateKey {
+    /// Issues a refund to a spend proof, aborting if invalid. Critically, you must check that
+    /// you've never seen this nullifier before. This function does not do that for you.
     pub fn refund(&self, spend_proof: &SpendProof, mut rng: impl CryptoRngCore) -> Option<Refund> {
         let params = Params::default();
 
@@ -350,6 +367,8 @@ impl PrivateKey {
     }
 }
 
+/// The data the client keeps after they make a spending attempt and they're waiting for their
+/// refund.
 #[derive(Serialize, Deserialize)]
 pub struct PreRefund {
     r: Scalar,
@@ -372,7 +391,9 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
 }
 
 impl CreditToken {
-    // precondition: 2^L > self.c >= s
+    /// Prove that you're able to spend the given amount of credits from the [`CreditToken`].
+    ///
+    /// Precondition: 2^L > self.c >= s
     pub fn prove_spend(
         &self,
         s: Scalar,
@@ -558,6 +579,7 @@ impl CreditToken {
     }
 }
 
+/// The response to a spend attempt, contains the data required to extract a new [`CreditToken`].
 #[derive(Serialize, Deserialize)]
 pub struct Refund {
     a: RistrettoPoint,
@@ -567,6 +589,7 @@ pub struct Refund {
 }
 
 impl PreRefund {
+    /// Construct a new [`CreditToken`] from the transcript of the spend protocol.
     pub fn to_credit_token(
         &self,
         spend_proof: &SpendProof,
