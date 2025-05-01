@@ -3,13 +3,11 @@ use group::Group;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
+use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use std::ops::Neg;
 
-pub const L: u32 = 32;
-
-// largest amount of credits which can be issued
-pub const B: u64 = 2u64.pow(L);
+pub const L: usize = 32;
 
 struct Transcript {
     hasher: blake3::Hasher,
@@ -148,7 +146,12 @@ impl PreIssuance {
         let k_bar = k_prime + self.k * gamma;
         let r_bar = r_prime + self.r * gamma;
 
-        IssuanceRequest { big_k, gamma, k_bar, r_bar }
+        IssuanceRequest {
+            big_k,
+            gamma,
+            k_bar,
+            r_bar,
+        }
     }
 
     pub fn to_credit_token(
@@ -200,7 +203,8 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Option<IssuanceResponse> {
         let params = Params::default();
-        let k1 = (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
+        let k1 =
+            (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
 
         let gamma = Transcript::with(b"request", |transcript| {
             transcript.add_elements([&request.big_k, &k1].into_iter());
@@ -229,10 +233,27 @@ impl PrivateKey {
     }
 }
 
+// (10 + 3*L) * 32 + 2 * 48 =  96 * L + 416
+//
+// For L = 32, 3488
+// For L = 16, 1952
+// For L = 8, 1184
 #[derive(Serialize, Deserialize)]
 pub struct SpendProof {
     k: Scalar,
-    c: Scalar,
+    s: Scalar,
+    a_prime: RistrettoPoint,
+    b_bar: RistrettoPoint,
+    gamma: Scalar,
+    e_bar: Scalar,
+    r2_bar: Scalar,
+    r3_bar: Scalar,
+    c_bar: Scalar,
+    r_bar: Scalar,
+    w00: Scalar,
+    w01: Scalar,
+    gamma0: [Scalar; L],
+    z: [[Scalar; 2]; L],
 }
 
 impl SpendProof {
@@ -241,12 +262,16 @@ impl SpendProof {
     }
 
     pub fn charge(&self) -> Scalar {
-        self.c
+        self.s
     }
 }
 
 impl PrivateKey {
-    pub fn refund(&self, _spend_proof: &SpendProof, mut _rng: impl CryptoRngCore) -> Option<Refund> {
+    pub fn refund(
+        &self,
+        _spend_proof: &SpendProof,
+        mut _rng: impl CryptoRngCore,
+    ) -> Option<Refund> {
         todo!()
     }
 }
@@ -258,8 +283,27 @@ pub struct PreRefund {
     m: Scalar,
 }
 
+fn bits_of(s: Scalar) -> [Scalar; L] {
+    let bytes = s.as_bytes();
+    let mut result = [Scalar::ZERO; L];
+
+    for i in 0..L {
+        let b = i / 8;
+        let j = i % 8;
+        result[i] = Scalar::from((bytes[b] & (0b00000001 << j)) as u64);
+    }
+
+    result
+}
+
 impl CreditToken {
-    pub fn prove_spend(&self, s: Scalar, public_key: &PublicKey, mut rng: impl CryptoRngCore) -> (SpendProof, PreRefund) {
+    // precondition: 2^L > self.c >= s
+    pub fn prove_spend(
+        &self,
+        s: Scalar,
+        public_key: &PublicKey,
+        mut rng: impl CryptoRngCore,
+    ) -> (SpendProof, PreRefund) {
         let params = Params::default();
 
         let r1 = Scalar::random(&mut rng);
@@ -270,24 +314,175 @@ impl CreditToken {
         let r2_prime = Scalar::random(&mut rng);
         let r3_prime = Scalar::random(&mut rng);
 
-        let b = RistrettoPoint::generator() + params.h1 * self.c + params.h2 * self.k + params.h3 * self.r;
+        let b = RistrettoPoint::generator()
+            + params.h1 * self.c
+            + params.h2 * self.k
+            + params.h3 * self.r;
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
         let r3 = r1.invert();
         let a1 = a_prime * e_prime + b_bar * r2_prime;
         let a2 = b_bar * r3_prime + params.h1 * c_prime + params.h3 * r_prime;
 
-        todo!()
+        let i = bits_of(self.c - s);
 
+        let k_star = Scalar::random(&mut rng);
+        let mut s_i = Vec::with_capacity(L);
+        for _ in 0..L {
+            s_i.push(Scalar::random(&mut rng));
+        }
+        let mut com = Vec::with_capacity(L);
+        com.push(params.h1 * i[0] + params.h2 * k_star + params.h3 * s_i[0]);
+        for j in 1..L {
+            com.push(params.h1 * i[j] + params.h3 * s_i[j]);
+        }
+        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
+        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+        let mut gamma = [Scalar::ZERO; L];
+
+        big_c[0][0] = com[0];
+        big_c[0][1] = com[0] - params.h1;
+        let k0_prime = Scalar::random(&mut rng);
+        let mut s_i_prime = [Scalar::ZERO; L];
+        for i in 0..L {
+            s_i_prime[i] = Scalar::random(&mut rng);
+        }
+        let mut gamma_i = [Scalar::ZERO; L];
+        gamma_i[0] = Scalar::random(&mut rng);
+        let w0 = Scalar::random(&mut rng);
+        let mut z = [Scalar::ZERO; L];
+        z[0] = Scalar::random(&mut rng);
+
+        let b0 = params.h2 * k0_prime + params.h3 * s_i_prime[0];
+        let b1 = params.h2 * w0 + params.h3 * z[0] - big_c[0][0] * gamma_i[0];
+
+        big_c_prime[0][0] = RistrettoPoint::conditional_select(&b0, &b1, i[0].ct_eq(&Scalar::ZERO));
+
+        big_c_prime[0][1] = RistrettoPoint::conditional_select(&b1, &b0, i[0].ct_eq(&Scalar::ZERO));
+
+        for j in 1..L {
+            big_c[j][0] = com[j];
+            big_c[j][1] = com[j] - params.h1;
+            let s_j_prime = Scalar::random(&mut rng);
+            gamma_i[j] = Scalar::random(&mut rng);
+            z[j] = Scalar::random(&mut rng);
+
+            let b0 = params.h3 * s_j_prime;
+            let b1 = params.h3 * z[j] - big_c[j][0] * gamma_i[j];
+
+            big_c_prime[j][0] =
+                RistrettoPoint::conditional_select(&b0, &b1, i[j].ct_eq(&Scalar::ZERO));
+            big_c_prime[j][1] =
+                RistrettoPoint::conditional_select(&b1, &b0, i[j].ct_eq(&Scalar::ZERO));
+        }
+        let r_star = (0..L)
+            .map(|i| s_i[i] * Scalar::from(2u32.pow(i as u32)))
+            .fold(Scalar::ZERO, |x, y| x + y);
+        let k_prime = Scalar::random(&mut rng);
+        let s_prime = Scalar::random(&mut rng);
+        let c_ = params.h1 * c_prime + params.h2 * k_prime + params.h3 * s_prime;
+
+        let gamma = Transcript::with(b"spend", |transcript| {
+            transcript.add_scalar(&self.k);
+            transcript.add_elements([&a_prime, &b_bar].into_iter());
+            transcript.add_elements([&a1, &a2].into_iter());
+            transcript.add_elements(com.iter());
+            for i in 0..L {
+                transcript.add_elements(big_c_prime[i].iter());
+            }
+            transcript.add_element(&c_);
+        });
+
+        let e_bar = gamma.neg() * self.e + e_prime;
+        let r2_bar = gamma.neg() * r2 + r2_prime;
+        let r3_bar = gamma.neg() * r3 + r3_prime;
+        let c_bar = gamma.neg() * self.c + c_prime;
+        let r_bar = gamma.neg() * self.r + r_prime;
+        let mut gamma00 = [Scalar::ZERO; L];
+        gamma00[0] = Scalar::conditional_select(
+            &(gamma - gamma_i[0]),
+            &gamma_i[0],
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        let w00 = Scalar::conditional_select(
+            &(gamma00[0] * k_star + k0_prime),
+            &z[0],
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        let w01 = Scalar::conditional_select(
+            &w0,
+            &((gamma - gamma00[0]) * k_star + k0_prime),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        let mut z00 = [[Scalar::ZERO; 2]; L];
+        z00[0][0] = Scalar::conditional_select(
+            &(gamma00[0] * s_i[0] + s_i_prime[0]),
+            &z[0],
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        z00[0][1] = Scalar::conditional_select(
+            &z[0],
+            &(gamma00[0] * s_i[0] + s_i_prime[0]),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        for j in 1..L {
+            gamma00[j] = Scalar::conditional_select(
+                &(gamma - gamma_i[j]),
+                &gamma_i[j],
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+            z00[j][0] = Scalar::conditional_select(
+                &(gamma00[j] * s_i[j] + s_i_prime[j]),
+                &z[j],
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+            z00[j][1] = Scalar::conditional_select(
+                &z[j],
+                &(gamma00[j] * s_i[j] + s_i_prime[j]),
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+        }
+        let k_bar = gamma * k_star + k_prime;
+        let s_bar = gamma * r_star + s_prime;
+
+        let prerefund = PreRefund {
+            k: k_star,
+            r: r_star,
+            m: self.c - s,
+        };
+
+        (
+            SpendProof {
+                k: self.k,
+                s,
+                a_prime,
+                b_bar,
+                gamma,
+                e_bar,
+                r2_bar,
+                r3_bar,
+                c_bar,
+                r_bar,
+                w00,
+                w01,
+                gamma0: gamma00,
+                z: z00,
+            },
+            prerefund,
+        )
     }
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Refund {
-}
+pub struct Refund {}
 
 impl PreRefund {
-    pub fn to_credit_token(&self, _spend_proof: &SpendProof, _refund: &Refund, _public_key: &PublicKey) -> Option<CreditToken> {
+    pub fn to_credit_token(
+        &self,
+        _spend_proof: &SpendProof,
+        _refund: &Refund,
+        _public_key: &PublicKey,
+    ) -> Option<CreditToken> {
         todo!()
     }
 }
@@ -309,10 +504,9 @@ mod tests {
             let _credit_token1 = preissuance
                 .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
                 .unwrap();
-            }
+        }
     }
 
-    /*
     #[test]
     fn full_cycle() {
         use rand_core::OsRng;
@@ -327,18 +521,19 @@ mod tests {
                 .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
                 .unwrap();
             let charge = Scalar::from(20u64);
-            let (spend_proof, prerefund) = credit_token1.prove_spend(charge, private_key.public(), OsRng);
+            let (spend_proof, prerefund) =
+                credit_token1.prove_spend(charge, private_key.public(), OsRng);
             let refund = private_key.refund(&spend_proof, OsRng).unwrap();
             let credit_token2 = prerefund
                 .to_credit_token(&spend_proof, &refund, private_key.public())
                 .unwrap();
             let charge = Scalar::from(20u64);
-            let (spend_proof, prerefund) = credit_token2.prove_spend(charge, private_key.public(), OsRng);
+            let (spend_proof, prerefund) =
+                credit_token2.prove_spend(charge, private_key.public(), OsRng);
             let refund = private_key.refund(&spend_proof, OsRng).unwrap();
             let _credit_token3 = prerefund
                 .to_credit_token(&spend_proof, &refund, private_key.public())
                 .unwrap();
         }
     }
-    */
 }
