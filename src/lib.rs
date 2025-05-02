@@ -42,7 +42,7 @@ use transcript::Transcript;
 /// This key should be kept secure, as it allows the owner to create new tokens
 /// and process refunds. The private key includes the corresponding public key
 /// that can be shared with clients.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct PrivateKey {
     /// The secret scalar used in cryptographic operations
     x: Scalar,
@@ -92,7 +92,7 @@ impl PrivateKey {
 ///
 /// This key is shared with clients so they can validate tokens and create spending proofs.
 /// It contains a Ristretto point that serves as the public component of the issuer's keypair.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct PublicKey {
     /// The public point derived from the secret scalar in the private key
     w: RistrettoPoint,
@@ -102,7 +102,7 @@ pub struct PublicKey {
 ///
 /// These parameters are used in various cryptographic operations throughout the protocol.
 /// By default, they are deterministically generated from a fixed seed.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct Params {
     /// First generator point used in commitment schemes
     h1: RistrettoPoint,
@@ -150,7 +150,7 @@ impl Params {
 /// This structure holds the client's secret values that are needed to complete
 /// the issuance protocol and eventually construct a valid credit token. The client
 /// must keep this information private during the issuance process.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct PreIssuance {
     /// A random scalar used as a blinding factor
     r: Scalar,
@@ -163,7 +163,7 @@ pub struct PreIssuance {
 /// This contains the cryptographic commitments and proof values required for the issuer
 /// to create a valid credit token while maintaining the client's privacy. The client
 /// generates this request using their `PreIssuance` state.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct IssuanceRequest {
     /// A commitment to the client's identifier and blinding factor
     big_k: RistrettoPoint,
@@ -181,7 +181,7 @@ pub struct IssuanceRequest {
 /// elements needed to prove ownership and spend credits without revealing the client's
 /// identity. The token includes a credit value `c` that represents the total amount
 /// of credits available to spend.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct CreditToken {
     /// A Ristretto point representing the BBS+ signature component
     a: RistrettoPoint,
@@ -359,7 +359,7 @@ impl PreIssuance {
 /// values that allow the client to construct a valid credit token. It includes
 /// the credit amount (`c`) assigned by the issuer and the BBS+ signature
 /// elements that authenticate this amount.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct IssuanceResponse {
     /// The BBS+ signature's main component
     a: RistrettoPoint,
@@ -460,7 +460,7 @@ impl PrivateKey {
 /// sufficient balance to spend the requested amount, without revealing the token itself.
 /// The proof includes a nullifier that prevents double-spending, and a range proof 
 /// that ensures the remaining balance is non-negative.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct SpendProof {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
@@ -659,7 +659,7 @@ impl PrivateKey {
 /// the refund protocol and construct a new credit token with the remaining balance.
 /// The client must keep this information private after spending credits and while
 /// awaiting a refund.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct PreRefund {
     /// A random blinding factor for the new credit token
     r: Scalar,
@@ -932,7 +932,7 @@ impl CreditToken {
 /// This response contains the cryptographic signature components needed for the client
 /// to construct a new credit token with the remaining balance. It includes a BBS+
 /// signature on the remaining balance and proof values that authenticate the response.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct Refund {
     /// The BBS+ signature's main component for the new credit token
     a: RistrettoPoint,
