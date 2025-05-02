@@ -34,7 +34,7 @@ impl Transcript {
     /// A new `Transcript` instance initialized with the label
     pub(crate) fn new(label: &[u8]) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"RISTRETTO CURVE25519 ANONYMOUS-CREDENTIALS");
+        hasher.update(b"RISTRETTO CURVE25519 ANONYMOUS-CREDENTIALS v0.1");
         hasher.update(label);
         Transcript { hasher }
     }
