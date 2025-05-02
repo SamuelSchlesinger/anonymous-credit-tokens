@@ -3,6 +3,10 @@
 A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
 privacy-preserving payment systems.
 
+## WARNING
+
+This cryptography is experimental and unaudited.
+
 ## Overview
 
 This library implements the Anonymous Credit Scheme designed by Jonathan Katz
