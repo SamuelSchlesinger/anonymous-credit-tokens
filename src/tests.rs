@@ -829,3 +829,202 @@ fn exhaust_token_with_one_credit_spends() {
         "New token should still have zero balance"
     );
 }
+
+#[test]
+fn test_binary_decomposition_max_value() {
+    // Test with the maximum representable value (2^L - 1)
+    let max_value = Scalar::from(2u64.pow(L as u32) - 1);
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    
+    // Issue a token with the maximum value
+    let response = private_key
+        .issue(&request, max_value, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(private_key.public(), &request, &response)
+        .unwrap();
+    
+    // Verify the token has the correct balance
+    assert_eq!(token.c, max_value, "Token should have the maximum value");
+    
+    // Spend a small amount from this token
+    let spend_amount = Scalar::from(1u64);
+    let (spend_proof, prerefund) = token.prove_spend(spend_amount, OsRng);
+    
+    // Process the refund
+    let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    let new_token = prerefund
+        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .unwrap();
+    
+    // Verify the remaining balance
+    let expected_remaining = max_value - spend_amount;
+    assert_eq!(
+        new_token.c,
+        expected_remaining,
+        "Remaining balance incorrect after spending from max value"
+    );
+    
+    // Spend the entire remaining balance
+    let (spend_proof2, prerefund2) = new_token.prove_spend(expected_remaining, OsRng);
+    
+    // Process the refund
+    let refund2 = private_key.refund(&spend_proof2, OsRng).unwrap();
+    let final_token = prerefund2
+        .to_credit_token(&spend_proof2, &refund2, private_key.public())
+        .unwrap();
+    
+    // Verify the final token has zero balance
+    assert_eq!(
+        final_token.c,
+        Scalar::ZERO,
+        "Final token should have zero balance"
+    );
+}
+
+#[test]
+fn test_transcript_with_empty_input() {
+    // Test the transcript system with empty input
+    let label = b"empty_test";
+    
+    // Create a transcript with no elements
+    let gamma = Transcript::with(label, |_transcript| {
+        // No elements added
+    });
+    
+    // The challenge should still be a valid random-looking scalar
+    assert_ne!(gamma, Scalar::ZERO, "Challenge should not be zero");
+    assert_ne!(gamma, Scalar::ONE, "Challenge should not be one");
+    
+    // Create another transcript with the same empty input
+    let gamma2 = Transcript::with(label, |_transcript| {
+        // No elements added
+    });
+    
+    // The challenges should be the same (deterministic based on label)
+    assert_eq!(gamma, gamma2, "Challenges with same empty input should match");
+    
+    // Create a transcript with a different label
+    let gamma3 = Transcript::with(b"different_label", |_transcript| {
+        // No elements added
+    });
+    
+    // The challenge should be different from the first one
+    assert_ne!(gamma, gamma3, "Challenges with different labels should not match");
+}
+
+#[test]
+fn test_nullifier_collisions() {
+    // This test tries to detect nullifier collisions by generating many tokens
+    let mut nullifier_db = NullifierDb::new();
+    
+    // Create a single issuer
+    let private_key = PrivateKey::random(OsRng);
+    
+    // Number of tokens to create and check
+    let num_tokens = 100;
+    
+    // Generate multiple tokens and check their nullifiers
+    for i in 0..num_tokens {
+        let preissuance = PreIssuance::random(OsRng);
+        let request = preissuance.request(OsRng);
+        let credit_amount = Scalar::from(100u64);
+        
+        let response = private_key
+            .issue(&request, credit_amount, OsRng)
+            .unwrap();
+        let token = preissuance
+            .to_credit_token(private_key.public(), &request, &response)
+            .unwrap();
+        
+        // Generate a spend proof (doesn't matter what amount)
+        let (spend_proof, _) = token.prove_spend(Scalar::from(1u64), OsRng);
+        
+        // Check if we've seen this nullifier before
+        let nullifier = spend_proof.nullifier();
+        let is_duplicate = nullifier_db.is_spent(&nullifier);
+        
+        // If we've seen this nullifier before, the test should fail
+        assert!(!is_duplicate, "Detected nullifier collision at token {}", i);
+        
+        // Record this nullifier
+        nullifier_db.record_spent(&nullifier);
+    }
+    
+    // Check that we recorded the expected number of unique nullifiers
+    assert_eq!(
+        nullifier_db.used_nullifiers.len(),
+        num_tokens,
+        "Should have exactly {} unique nullifiers",
+        num_tokens
+    );
+}
+
+#[test]
+fn test_key_component_malleability() {
+    // Test for potential malleability in key components
+    
+    // Create a private key
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let credit_amount = Scalar::from(50u64);
+    
+    // Create a valid token
+    let response = private_key
+        .issue(&request, credit_amount, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(private_key.public(), &request, &response)
+        .unwrap();
+    
+    // Create a spend proof
+    let (spend_proof, prerefund) = token.prove_spend(Scalar::from(10u64), OsRng);
+    
+    // Process refund
+    let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    
+    // Test different tampering scenarios
+    
+    // 1. Tamper with the 'a' component in the refund
+    let tampered_refund1 = Refund {
+        a: refund.a + RistrettoPoint::generator(), // Change the a component
+        e: refund.e,
+        gamma: refund.gamma,
+        z: refund.z,
+    };
+    
+    // This should fail validation
+    let result1 = prerefund.to_credit_token(&spend_proof, &tampered_refund1, private_key.public());
+    assert!(result1.is_none(), "Tampered 'a' component should be rejected");
+    
+    // 2. Tamper with the 'gamma' component in the refund
+    let tampered_refund2 = Refund {
+        a: refund.a,
+        e: refund.e,
+        gamma: refund.gamma + Scalar::ONE, // Change the gamma component
+        z: refund.z,
+    };
+    
+    // This should fail validation
+    let result2 = prerefund.to_credit_token(&spend_proof, &tampered_refund2, private_key.public());
+    assert!(result2.is_none(), "Tampered 'gamma' component should be rejected");
+    
+    // 3. Tamper with the 'z' component in the refund
+    let tampered_refund3 = Refund {
+        a: refund.a,
+        e: refund.e,
+        gamma: refund.gamma,
+        z: refund.z + Scalar::ONE, // Change the z component
+    };
+    
+    // This should fail validation
+    let result3 = prerefund.to_credit_token(&spend_proof, &tampered_refund3, private_key.public());
+    assert!(result3.is_none(), "Tampered 'z' component should be rejected");
+    
+    // The original refund should still be valid
+    let result4 = prerefund.to_credit_token(&spend_proof, &refund, private_key.public());
+    assert!(result4.is_some(), "Original refund should be valid");
+}
