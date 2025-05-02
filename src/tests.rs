@@ -735,3 +735,97 @@ fn token_with_zero_credit() {
     let new_token = prerefund.to_credit_token(&spend_proof, &refund, private_key.public()).unwrap();
     assert_eq!(new_token.c, Scalar::ZERO, "New token should still have zero balance");
 }
+
+#[test]
+fn exhaust_token_with_one_credit_spends() {
+    // Create a nullifier database to track spent tokens
+    let mut nullifier_db = NullifierDb::new();
+    
+    // Create a token with exactly 10 credits
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(OsRng);
+    let initial_credits = 10u64;
+    let credit_amount = Scalar::from(initial_credits);
+    
+    let response = private_key
+        .issue(&request, credit_amount, OsRng)
+        .unwrap();
+    let mut current_token = preissuance
+        .to_credit_token(private_key.public(), &request, &response)
+        .unwrap();
+    
+    // Spend amount is always 1 credit
+    let spend_amount = Scalar::from(1u64);
+    let mut remaining_credits = initial_credits;
+    
+    // Exhaust the token with 1-credit spends until it's empty
+    for i in 1..=initial_credits {
+        
+        // Verify the current token has the expected balance
+        assert_eq!(
+            current_token.c,
+            Scalar::from(remaining_credits),
+            "Token should have {} credits before spend #{}",
+            remaining_credits,
+            i
+        );
+        
+        // Spend 1 credit
+        let (spend_proof, prerefund) = current_token.prove_spend(spend_amount, OsRng);
+        remaining_credits -= 1;
+        
+        // Verify remaining balance
+        assert_eq!(
+            prerefund.m,
+            Scalar::from(remaining_credits),
+            "Remaining balance should be {} after spend #{}",
+            remaining_credits,
+            i
+        );
+        
+        // Check and record nullifier
+        let nullifier = spend_proof.nullifier();
+        assert!(
+            !nullifier_db.is_spent(&nullifier),
+            "Nullifier already spent in iteration {}", 
+            i
+        );
+        nullifier_db.record_spent(&nullifier);
+        
+        // Get refund and create new token
+        let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+        current_token = prerefund
+            .to_credit_token(&spend_proof, &refund, private_key.public())
+            .unwrap();
+        
+    }
+    
+    // Verify final token is empty
+    assert_eq!(
+        current_token.c,
+        Scalar::ZERO,
+        "Final token should have zero balance"
+    );
+    
+    // Try to spend from empty token
+    let (spend_proof, _) = current_token.prove_spend(spend_amount, OsRng);
+    let refund_result = private_key.refund(&spend_proof, OsRng);
+    assert!(
+        refund_result.is_none(),
+        "Spending from an empty token should fail"
+    );
+    
+    // But spending zero from it should work
+    let zero_spend = Scalar::ZERO;
+    let (spend_proof, prerefund) = current_token.prove_spend(zero_spend, OsRng);
+    let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    let new_token = prerefund
+        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(
+        new_token.c,
+        Scalar::ZERO,
+        "New token should still have zero balance"
+    );
+}
