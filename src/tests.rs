@@ -28,12 +28,18 @@ impl NullifierDb {
 
 #[test]
 fn issuance() {
+    use rand::{Rng, thread_rng};
+    
     for _i in 0..100 {
         let private_key = PrivateKey::random(OsRng);
         let preissuance = PreIssuance::random(OsRng);
         let issuance_request = preissuance.request(OsRng);
+        
+        // Random credit amount between 1 and 1000
+        let credit_amount = Scalar::from(thread_rng().gen_range(1..1000) as u64);
+        
         let issuance_response = private_key
-            .issue(&issuance_request, Scalar::from(20u64), OsRng)
+            .issue(&issuance_request, credit_amount, OsRng)
             .unwrap();
         let _credit_token1 = preissuance
             .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
@@ -43,24 +49,39 @@ fn issuance() {
 
 #[test]
 fn full_cycle() {
+    use rand::{Rng, thread_rng};
+    
     for _i in 0..10 {
         let private_key = PrivateKey::random(OsRng);
         let preissuance = PreIssuance::random(OsRng);
         let issuance_request = preissuance.request(OsRng);
+        
+        // Random credit amount between 100 and 2000
+        let total_credits = thread_rng().gen_range(100..2000) as u64;
+        let credit_amount = Scalar::from(total_credits);
+        
         let issuance_response = private_key
-            .issue(&issuance_request, Scalar::from(40u64), OsRng)
+            .issue(&issuance_request, credit_amount, OsRng)
             .unwrap();
         let credit_token1 = preissuance
             .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
             .unwrap();
-        let charge = Scalar::from(20u64);
-        let (spend_proof, prerefund) = credit_token1.prove_spend(charge, OsRng);
+        
+        // First charge: random amount between 1 and 1/2 of total credits
+        let first_charge = thread_rng().gen_range(1..=(total_credits/2)) as u64;
+        let charge1 = Scalar::from(first_charge);
+        
+        let (spend_proof, prerefund) = credit_token1.prove_spend(charge1, OsRng);
         let refund = private_key.refund(&spend_proof, OsRng).unwrap();
         let credit_token2 = prerefund
             .to_credit_token(&spend_proof, &refund, private_key.public())
             .unwrap();
-        let charge = Scalar::from(20u64);
-        let (spend_proof, prerefund) = credit_token2.prove_spend(charge, OsRng);
+        
+        // Second charge: remaining credits
+        let remaining_credits = total_credits - first_charge;
+        let charge2 = Scalar::from(remaining_credits);
+        
+        let (spend_proof, prerefund) = credit_token2.prove_spend(charge2, OsRng);
         let refund = private_key.refund(&spend_proof, OsRng).unwrap();
         let _credit_token3 = prerefund
             .to_credit_token(&spend_proof, &refund, private_key.public())
@@ -70,6 +91,8 @@ fn full_cycle() {
 
 #[test]
 fn double_spend_prevention() {
+    use rand::{Rng, thread_rng};
+    
     // Initialize nullifier database
     let mut nullifier_db = NullifierDb::new();
     
@@ -77,15 +100,22 @@ fn double_spend_prevention() {
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(OsRng);
+    
+    // Random credit amount between 100 and 1000
+    let total_credits = thread_rng().gen_range(100..1000) as u64;
+    let credit_amount = Scalar::from(total_credits);
+    
     let issuance_response = private_key
-        .issue(&issuance_request, Scalar::from(100u64), OsRng)
+        .issue(&issuance_request, credit_amount, OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
         .unwrap();
     
-    // First spend is successful
-    let charge1 = Scalar::from(30u64);
+    // First spend is successful - random amount between 1 and 1/3 of total credits
+    let first_charge = thread_rng().gen_range(1..=(total_credits/3)) as u64;
+    let charge1 = Scalar::from(first_charge);
+    
     let (spend_proof1, prerefund1) = credit_token.prove_spend(charge1, OsRng);
     
     // Verify nullifier isn't already spent
@@ -104,7 +134,10 @@ fn double_spend_prevention() {
         .unwrap();
     
     // Attempt to use the same original token (double-spend attempt)
-    let charge2 = Scalar::from(40u64);
+    // Use a different amount than the first spend
+    let second_charge = thread_rng().gen_range(1..=(total_credits/2)) as u64;
+    let charge2 = Scalar::from(second_charge);
+    
     let (spend_proof2, _) = credit_token.prove_spend(charge2, OsRng);
     
     // Check nullifier - should detect double spend
@@ -112,7 +145,10 @@ fn double_spend_prevention() {
     assert!(nullifier_db.is_spent(&nullifier2), "Double-spend not detected");
     
     // Verify we can spend from the new token
-    let charge3 = Scalar::from(20u64);
+    let remaining_credits = total_credits - first_charge;
+    let third_charge = thread_rng().gen_range(1..remaining_credits) as u64;
+    let charge3 = Scalar::from(third_charge);
+    
     let (spend_proof3, _) = new_token.prove_spend(charge3, OsRng);
     let nullifier3 = spend_proof3.nullifier();
     
@@ -122,12 +158,17 @@ fn double_spend_prevention() {
 
 #[test]
 fn spend_exact_balance() {
+    use rand::{Rng, thread_rng};
+    
     // Test spending the exact balance amount
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(OsRng);
     
-    let credit_amount = Scalar::from(50u64);
+    // Random credit amount between 10 and 1000
+    let total_credits = thread_rng().gen_range(10..1000) as u64;
+    let credit_amount = Scalar::from(total_credits);
+    
     let issuance_response = private_key
         .issue(&issuance_request, credit_amount, OsRng)
         .unwrap();
@@ -153,13 +194,19 @@ fn spend_exact_balance() {
 
 #[test]
 fn sequential_spends() {
+    use rand::{Rng, thread_rng};
+    
     let mut nullifier_db = NullifierDb::new();
     
-    // Issue a token with a large balance
+    // Issue a token with a random large balance
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(OsRng);
-    let initial_amount = Scalar::from(100u64);
+    
+    // Random initial amount between 100 and 1000
+    let initial_credits = thread_rng().gen_range(100..1000) as u64;
+    let initial_amount = Scalar::from(initial_credits);
+    
     let issuance_response = private_key
         .issue(&issuance_request, initial_amount, OsRng)
         .unwrap();
@@ -167,14 +214,16 @@ fn sequential_spends() {
         .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
         .unwrap();
     
-    // Perform 5 sequential spends, each spending 10 credits
-    let spend_amount = Scalar::from(10u64);
-    let mut remaining = 100;
+    // Calculate per-spend amount: divide initial amount by 10 (ensuring at least 5 increments)
+    let per_spend_amount = initial_credits / 10;
+    let spend_amount = Scalar::from(per_spend_amount);
+    let mut remaining = initial_credits;
     
+    // Perform 5 sequential spends
     for i in 1..=5 {
         // Spend some credits
         let (spend_proof, prerefund) = current_token.prove_spend(spend_amount, OsRng);
-        remaining -= 10;
+        remaining -= per_spend_amount;
         
         // Check that the remaining amount is correct
         assert_eq!(
@@ -204,17 +253,28 @@ fn sequential_spends() {
         );
     }
     
-    // Verify final remaining balance is 50
-    assert_eq!(current_token.c, Scalar::from(50u64), "Final balance incorrect");
+    // Verify final remaining balance
+    let expected_final_balance = initial_credits - (5 * per_spend_amount);
+    assert_eq!(
+        current_token.c, 
+        Scalar::from(expected_final_balance), 
+        "Final balance incorrect"
+    );
 }
 
 #[test]
 fn attempt_overspend() {
-    // Create a token with 20 credits
+    use rand::{Rng, thread_rng};
+    
+    // Create a token with random credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(OsRng);
-    let credit_amount = Scalar::from(20u64);
+    
+    // Random credit amount between 20 and 500
+    let credit_value = thread_rng().gen_range(20..500) as u64;
+    let credit_amount = Scalar::from(credit_value);
+    
     let issuance_response = private_key
         .issue(&issuance_request, credit_amount, OsRng)
         .unwrap();
@@ -222,8 +282,9 @@ fn attempt_overspend() {
         .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
         .unwrap();
     
-    // Try to spend more than available (30 > 20)
-    let overspend_amount = Scalar::from(30u64);
+    // Try to spend more than available (random amount > credit_value)
+    let overspend_value = credit_value + thread_rng().gen_range(1..100) as u64;
+    let overspend_amount = Scalar::from(overspend_value);
     let (spend_proof, _) = credit_token.prove_spend(overspend_amount, OsRng);
     
     // The refund verification should fail when the issuer checks it
@@ -235,11 +296,17 @@ fn attempt_overspend() {
 
 #[test]
 fn zero_spend_scenario() {
-    // Create a token with 20 credits
+    use rand::{Rng, thread_rng};
+    
+    // Create a token with random credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(OsRng);
-    let credit_amount = Scalar::from(20u64);
+    
+    // Random credit amount between 10 and 1000
+    let credit_value = thread_rng().gen_range(10..1000) as u64;
+    let credit_amount = Scalar::from(credit_value);
+    
     let issuance_response = private_key
         .issue(&issuance_request, credit_amount, OsRng)
         .unwrap();
@@ -254,7 +321,7 @@ fn zero_spend_scenario() {
     // The refund should process successfully
     let refund = private_key.refund(&spend_proof, OsRng).unwrap();
     
-    // Remaining balance should still be 20
+    // Remaining balance should still be the original amount
     assert_eq!(prerefund.m, credit_amount, "Remaining balance should be unchanged");
     
     // Create new token
@@ -268,25 +335,47 @@ fn zero_spend_scenario() {
 
 #[test]
 fn multiple_tokens_with_same_issuer() {
+    use rand::{Rng, thread_rng};
+    
     let mut nullifier_db = NullifierDb::new();
     
     // Single issuer
     let private_key = PrivateKey::random(OsRng);
     
-    // Create two separate tokens for two different clients
+    // Create two separate tokens for two different clients with random amounts
+    
+    // First token: Random amount between 50 and 500
+    let credit_value1 = thread_rng().gen_range(50..500) as u64;
+    let credit_amount1 = Scalar::from(credit_value1);
+    
     let preissuance1 = PreIssuance::random(OsRng);
     let request1 = preissuance1.request(OsRng);
-    let response1 = private_key.issue(&request1, Scalar::from(50u64), OsRng).unwrap();
+    let response1 = private_key.issue(&request1, credit_amount1, OsRng).unwrap();
     let token1 = preissuance1.to_credit_token(private_key.public(), &request1, &response1).unwrap();
+    
+    // Second token: Random amount between 30 and 300
+    let credit_value2 = thread_rng().gen_range(30..300) as u64;
+    let credit_amount2 = Scalar::from(credit_value2);
     
     let preissuance2 = PreIssuance::random(OsRng);
     let request2 = preissuance2.request(OsRng);
-    let response2 = private_key.issue(&request2, Scalar::from(30u64), OsRng).unwrap();
+    let response2 = private_key.issue(&request2, credit_amount2, OsRng).unwrap();
     let token2 = preissuance2.to_credit_token(private_key.public(), &request2, &response2).unwrap();
     
-    // Both clients spend from their tokens
-    let (spend_proof1, prerefund1) = token1.prove_spend(Scalar::from(20u64), OsRng);
-    let (spend_proof2, prerefund2) = token2.prove_spend(Scalar::from(15u64), OsRng);
+    // Both clients spend from their tokens with random amounts
+    
+    // First spend: Random amount between 1 and credit_value1/2
+    let spend_value1 = thread_rng().gen_range(1..=(credit_value1/2)) as u64;
+    let spend_amount1 = Scalar::from(spend_value1);
+    let expected_remaining1 = credit_value1 - spend_value1;
+    
+    // Second spend: Random amount between 1 and credit_value2/2
+    let spend_value2 = thread_rng().gen_range(1..=(credit_value2/2)) as u64;
+    let spend_amount2 = Scalar::from(spend_value2);
+    let expected_remaining2 = credit_value2 - spend_value2;
+    
+    let (spend_proof1, prerefund1) = token1.prove_spend(spend_amount1, OsRng);
+    let (spend_proof2, prerefund2) = token2.prove_spend(spend_amount2, OsRng);
     
     // Get the nullifiers
     let nullifier1 = spend_proof1.nullifier();
@@ -308,8 +397,18 @@ fn multiple_tokens_with_same_issuer() {
     let new_token2 = prerefund2.to_credit_token(&spend_proof2, &refund2, private_key.public()).unwrap();
     
     // Check remaining balances
-    assert_eq!(new_token1.c, Scalar::from(30u64), "First token should have 30 credits remaining");
-    assert_eq!(new_token2.c, Scalar::from(15u64), "Second token should have 15 credits remaining");
+    assert_eq!(
+        new_token1.c, 
+        Scalar::from(expected_remaining1), 
+        "First token should have {} credits remaining", 
+        expected_remaining1
+    );
+    assert_eq!(
+        new_token2.c, 
+        Scalar::from(expected_remaining2), 
+        "Second token should have {} credits remaining", 
+        expected_remaining2
+    );
 }
 
 #[test]
@@ -401,19 +500,29 @@ fn invalid_issuance_request() {
 
 #[test]
 fn invalid_proof_verification() {
+    use rand::{Rng, thread_rng};
+    
     // Create a private key and token
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let request = preissuance.request(OsRng);
-    let response = private_key.issue(&request, Scalar::from(50u64), OsRng).unwrap();
+    
+    // Random credit amount between 50 and 500
+    let credit_value = thread_rng().gen_range(50..500) as u64;
+    let credit_amount = Scalar::from(credit_value);
+    
+    let response = private_key.issue(&request, credit_amount, OsRng).unwrap();
     let token = preissuance.to_credit_token(private_key.public(), &request, &response).unwrap();
     
-    // Create a valid spend proof
-    let (spend_proof, _) = token.prove_spend(Scalar::from(20u64), OsRng);
+    // Create a valid spend proof with a random amount
+    let spend_value = thread_rng().gen_range(10..credit_value/2) as u64;
+    let spend_amount = Scalar::from(spend_value);
+    let (spend_proof, _) = token.prove_spend(spend_amount, OsRng);
     
-    // Tamper with the proof by modifying the amount
+    // Tamper with the proof by modifying the amount to a different random value
+    let tampered_value = spend_value + thread_rng().gen_range(1..10) as u64;
     let tampered_proof = SpendProof {
-        s: Scalar::from(30u64), // Changed from 20 to 30
+        s: Scalar::from(tampered_value), // Changed to a different amount
         ..spend_proof
     };
     
@@ -424,19 +533,27 @@ fn invalid_proof_verification() {
 
 #[test]
 fn large_amount_issuance() {
+    use rand::{Rng, thread_rng};
+    
     // Test with a very large credit amount (but still within the L-bit range)
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let request = preissuance.request(OsRng);
     
     // Create a large amount, close to the maximum representable value
-    let large_amount = Scalar::from(2u64.pow(L as u32 - 1)); // 2^31
+    // Use a large amount that's near 2^31 but slightly randomized
+    let base_amount = 2u64.pow(L as u32 - 2); // 2^30
+    let variation = thread_rng().gen_range(0..base_amount) as u64;
+    let large_amount = Scalar::from(base_amount + variation);
     
     let response = private_key.issue(&request, large_amount, OsRng).unwrap();
     let token = preissuance.to_credit_token(private_key.public(), &request, &response).unwrap();
     
-    // Spend a portion of the large amount
-    let spend_amount = Scalar::from(1_000_000u64); // Spend 1 million credits
+    // Spend a random portion of the large amount
+    let max_spend = std::cmp::min(base_amount / 2, 5_000_000); // Cap at 5 million to keep test reasonable
+    let spend_value = thread_rng().gen_range(1..max_spend) as u64;
+    let spend_amount = Scalar::from(spend_value);
+    
     let (spend_proof, prerefund) = token.prove_spend(spend_amount, OsRng);
     
     // The remaining amount should be correct
@@ -591,6 +708,8 @@ fn spend_with_identity_a_prime() {
 
 #[test]
 fn token_with_zero_credit() {
+    use rand::{Rng, thread_rng};
+    
     // Create a token with zero credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
@@ -603,7 +722,8 @@ fn token_with_zero_credit() {
     assert_eq!(token.c, Scalar::ZERO, "Token should have zero balance");
     
     // Attempting to spend from this token should fail
-    let spend_amount = Scalar::from(10u64);
+    // Try to spend a random positive amount
+    let spend_amount = Scalar::from(thread_rng().gen_range(1..100) as u64);
     let (spend_proof, _) = token.prove_spend(spend_amount, OsRng);
     let refund_result = private_key.refund(&spend_proof, OsRng);
     assert!(refund_result.is_none(), "Spending from a zero-balance token should fail");

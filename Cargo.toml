@@ -1,5 +1,5 @@
 [package]
-name = "anonymous-credits"
+name = "anonymous-credit-tokens"
 version = "0.1.0"
 edition = "2024"
 
@@ -15,9 +15,10 @@ subtle = "2.6.1"
 zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
+rand = "0.8.5"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 criterion = "0.5.1"
 
 [[bench]]
-name = "anoncreds_bench"
+name = "benchmark"
 harness = false
