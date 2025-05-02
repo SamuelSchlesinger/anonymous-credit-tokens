@@ -9,6 +9,8 @@ use curve25519_dalek::Scalar;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+const PROTOCOL_LABEL: &[u8] = b"curve25519-ristretto anonymous-credentials v0.1";
+
 /// A transcript that accumulates cryptographic protocol messages and generates challenges.
 ///
 /// The `Transcript` is used to implement the Fiat-Shamir transform, which converts
@@ -34,7 +36,7 @@ impl Transcript {
     /// A new `Transcript` instance initialized with the label
     pub(crate) fn new(label: &[u8]) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"RISTRETTO CURVE25519 ANONYMOUS-CREDENTIALS v0.1");
+        hasher.update(PROTOCOL_LABEL);
         hasher.update(label);
         Transcript { hasher }
     }
