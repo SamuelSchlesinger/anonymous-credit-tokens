@@ -1,5 +1,5 @@
 //! # Anonymous Credits
-//! 
+//!
 //! A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
 //! privacy-preserving payment systems for web applications and services.
 //!
@@ -32,7 +32,7 @@
 //!
 //! See the README.md file for comprehensive usage examples and integration guidance.
 
-use curve25519_dalek::{RistrettoPoint, ristretto::RistrettoBasepointTable, Scalar};
+use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
 use group::Group;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRngCore, SeedableRng};
@@ -100,10 +100,9 @@ pub fn scalar_to_u32(scalar: &Scalar) -> Option<u32> {
     // Get the low 64 bits of the scalar
     let bytes = scalar.as_bytes();
     let value = u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]);
-    
+
     // Check if the scalar is within u32 range and the high bits are zero
     if value <= u32::MAX as u64 && bytes[8..].iter().all(|&b| b == 0) {
         Some(value as u32)
@@ -194,8 +193,7 @@ impl Default for Params {
     /// a trusted setup ceremony. The seed "INNOCENCE" is hashed with BLAKE3 to
     /// create a deterministic random number generator.
     fn default() -> Self {
-        let rng = ChaCha20Rng::from_seed(*blake3::hash(b"INNOCENCE").as_bytes());
-        Self::random(rng)
+        Self::nothing_up_my_sleeve(b"INNOCENCE")
     }
 }
 
@@ -211,12 +209,23 @@ impl Params {
     /// # Returns
     ///
     /// A new `Params` instance with randomly generated points
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    pub fn random(mut rng: impl CryptoRngCore) -> Self {
         Params {
             h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
         }
+    }
+
+    /// Creates the system parameters using a deterministic seed.
+    ///
+    /// This ensures that all parties use the same parameters without requiring
+    /// a trusted setup ceremony. The seed, which should be innocuous such that it
+    /// would be very difficult to imagine it being selected maliciously, is hashed with BLAKE3 to
+    /// create a deterministic random number generator.
+    pub fn nothing_up_my_sleeve(non_sneaky_input: &[u8]) -> Self {
+        let rng = ChaCha20Rng::from_seed(*blake3::hash(non_sneaky_input).as_bytes());
+        Self::random(rng)
     }
 }
 
@@ -329,7 +338,7 @@ impl PreIssuance {
     pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         // Create a commitment to the client's identifier and blinding factor
         let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
-        
+
         // Generate random values for the zero-knowledge proof
         let k_prime = Scalar::random(&mut rng);
         let r_prime = Scalar::random(&mut rng);
@@ -401,7 +410,7 @@ impl PreIssuance {
         // Reconstruct the signature base points for verification
         let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
-        
+
         // Verify the response by checking the BBS+ signature proof
         let y_a = response.a * response.z + x_a * response.gamma.neg();
         let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
@@ -492,8 +501,8 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Option<IssuanceResponse> {
         // Verify the client's zero-knowledge proof
-        let k1 =
-            (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar) - request.big_k * request.gamma;
+        let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
+            - request.big_k * request.gamma;
 
         // Generate the expected challenge value
         let gamma = Transcript::with(&params, b"request", |transcript| {
@@ -510,7 +519,7 @@ impl PrivateKey {
         let x_a = RistrettoPoint::generator() + &params.h1 * &c + request.big_k;
         let a = x_a * (e + self.x).invert();
         let x_g = RistrettoPoint::generator() * e + self.public.w;
-        
+
         // Generate a zero-knowledge proof that the signature is valid
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
@@ -531,9 +540,9 @@ impl PrivateKey {
 
 /// A zero-knowledge proof that allows spending credits anonymously.
 ///
-/// This proof demonstrates that the client possesses a valid credit token with 
+/// This proof demonstrates that the client possesses a valid credit token with
 /// sufficient balance to spend the requested amount, without revealing the token itself.
-/// The proof includes a nullifier that prevents double-spending, and a range proof 
+/// The proof includes a nullifier that prevents double-spending, and a range proof
 /// that ensures the remaining balance is non-negative.
 #[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
 pub struct SpendProof {
@@ -644,7 +653,12 @@ impl PrivateKey {
     /// // Then process the refund
     /// let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// ```
-    pub fn refund(&self, params: &Params, spend_proof: &SpendProof, mut rng: impl CryptoRngCore) -> Option<Refund> {
+    pub fn refund(
+        &self,
+        params: &Params,
+        spend_proof: &SpendProof,
+        mut rng: impl CryptoRngCore,
+    ) -> Option<Refund> {
         if spend_proof.a_prime == RistrettoPoint::generator() {
             return None;
         }
@@ -763,10 +777,10 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
 
     // Extract each bit from the scalar's byte representation
     for i in 0..L {
-        let b = i / 8;     // Byte index
-        let j = i % 8;     // Bit position within the byte
-        let bit = (bytes[b] >> j) & 0b1;  // Extract the bit
-        result[i] = Scalar::from(bit as u64);  // Convert to scalar (0 or 1)
+        let b = i / 8; // Byte index
+        let j = i % 8; // Bit position within the byte
+        let bit = (bytes[b] >> j) & 0b1; // Extract the bit
+        result[i] = Scalar::from(bit as u64); // Convert to scalar (0 or 1)
     }
 
     result
