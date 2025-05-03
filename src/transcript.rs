@@ -28,7 +28,7 @@ use curve25519_dalek::Scalar;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
-const PROTOCOL_LABEL: &[u8] = b"curve25519-ristretto anonymous-credentials v0.1";
+const PROTOCOL_LABEL: &[u8] = b"curve25519-ristretto anonymous-credentials v0.1.1";
 
 /// A transcript that accumulates cryptographic protocol messages and generates challenges.
 ///
@@ -125,6 +125,17 @@ impl Transcript {
     /// * `scalar` - A reference to a `Scalar` to add to the transcript
     pub(crate) fn add_scalar(&mut self, scalar: &Scalar) {
         self.update(&bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap());
+    }
+
+    /// Adds multiple Ristretto points to the transcript.
+    ///
+    /// # Arguments
+    ///
+    /// * `scalars` - An iterator over references to `RistrettoPoint`s to add to the transcript
+    pub(crate) fn add_scalars<'a>(&mut self, scalars: impl Iterator<Item = &'a Scalar>) {
+        for scalar in scalars {
+            self.add_scalar(scalar);
+        }
     }
 
     /// Creates a deterministic random number generator from the transcript state.

@@ -466,7 +466,7 @@ impl PreIssuance {
 
         // Generate the expected challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalar(&response.e);
+            transcript.add_scalars([&response.c, &response.e].into_iter());
             transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
@@ -576,7 +576,7 @@ impl PrivateKey {
 
         // Generate the challenge for the proof using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalar(&e);
+            transcript.add_scalars([&c, &e].into_iter());
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 

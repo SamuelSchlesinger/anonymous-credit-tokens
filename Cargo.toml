@@ -1,6 +1,6 @@
 [package]
 name = "anonymous-credit-tokens"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "An implementation of Anonymous Credit Tokens, an online variant of e-cash"
 license-file = "LICENSE"
