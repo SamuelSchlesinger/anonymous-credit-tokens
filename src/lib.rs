@@ -8,6 +8,51 @@
 //! This cryptography is experimental and unaudited. Do not use in production environments
 //! without thorough security review.
 //!
+//! ## Protocol Sequence Diagram
+//!
+//! ```text
+//! ┌──────┐                              ┌───────┐
+//! │Client│                              │Issuer │
+//! └──┬───┘                              └───┬───┘
+//!    │       ┌─────────────────┐            │
+//!    │       │ Issuance Phase  │            │
+//!    │       └─────────────────┘            │
+//!    │ 1. Generate PreIssuance(r,k)         │
+//!    │    [KEPT BY CLIENT]                  │
+//!    │                                      │
+//!    │ 2. Create IssuanceRequest            │
+//!    │    [SENT TO ISSUER]                  │
+//!    │ ──────────────────────────────────>  │
+//!    │                                      │ 3. Verify request
+//!    │                                      │ 4. Generate IssuanceResponse
+//!    │                                      │    [SENT TO CLIENT]
+//!    │ <─────────────────────────────────── │
+//!    │ 5. Convert PreIssuance+Response      │
+//!    │    to CreditToken                    │
+//!    │    [KEPT BY CLIENT]                  │
+//!    │                                      │
+//!    │       ┌─────────────────┐            │
+//!    │       │  Spending Phase │            │
+//!    │       └─────────────────┘            │
+//!    │ 6. Create SpendProof                 │
+//!    │    [SENT TO ISSUER]                  │
+//!    │    and PreRefund                     │
+//!    │    [KEPT BY CLIENT]                  │
+//!    │ ──────────────────────────────────>  │
+//!    │                                      │ 7. Verify SpendProof
+//!    │                                      │ 8. Check nullifier
+//!    │                                      │ 9. Generate Refund
+//!    │                                      │    [SENT TO CLIENT]
+//!    │ <─────────────────────────────────── │
+//!    │ 10. Convert PreRefund+Refund         │
+//!    │     to new CreditToken               │
+//!    │     with remaining balance           │
+//!    │     [KEPT BY CLIENT]                 │
+//! ┌──┴───┐                              ┌───┴───┐
+//! │Client│                              │Issuer │
+//! └──────┘                              └───────┘
+//! ```
+//!
 //! ## Overview
 //!
 //! This library implements the Anonymous Credit Scheme designed by Jonathan Katz
@@ -186,17 +231,6 @@ pub struct Params {
     h3: RistrettoBasepointTable,
 }
 
-impl Default for Params {
-    /// Creates the default system parameters using a deterministic seed.
-    ///
-    /// This ensures that all parties use the same parameters without requiring
-    /// a trusted setup ceremony. The seed "INNOCENCE" is hashed with BLAKE3 to
-    /// create a deterministic random number generator.
-    fn default() -> Self {
-        Self::nothing_up_my_sleeve(b"INNOCENCE")
-    }
-}
-
 impl Params {
     /// Generates random system parameters using the provided random number generator.
     ///
@@ -222,7 +256,8 @@ impl Params {
     /// This ensures that all parties use the same parameters without requiring
     /// a trusted setup ceremony. The seed, which should be innocuous such that it
     /// would be very difficult to imagine it being selected maliciously, is hashed with BLAKE3 to
-    /// create a deterministic random number generator.
+    /// create a deterministic random number generator. This seed should be scoped to your
+    /// specific deployment of Anonymous Credit Tokens.
     pub fn nothing_up_my_sleeve(non_sneaky_input: &[u8]) -> Self {
         let rng = ChaCha20Rng::from_seed(*blake3::hash(non_sneaky_input).as_bytes());
         Self::random(rng)
@@ -332,7 +367,7 @@ impl PreIssuance {
     /// use rand_core::OsRng;
     ///
     /// let pre_issuance = PreIssuance::random(OsRng);
-    /// let params = Params::default();
+    /// let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// let request = pre_issuance.request(&params, OsRng);
     /// ```
     pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
@@ -388,7 +423,7 @@ impl PreIssuance {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::default();
+    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let credit_amount = Scalar::from(20u64);
     /// # let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
@@ -486,7 +521,7 @@ impl PrivateKey {
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::default();
+    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
@@ -639,7 +674,7 @@ impl PrivateKey {
     /// # // Setup (normally these would come from previous steps)
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::default();
+    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
@@ -825,7 +860,7 @@ impl CreditToken {
     /// # // Create a valid credit token with 20 credits
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::default();
+    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
@@ -1066,7 +1101,7 @@ impl PreRefund {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::default();
+    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();

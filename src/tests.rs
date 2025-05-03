@@ -33,7 +33,7 @@ fn issuance() {
     for _i in 0..100 {
         let private_key = PrivateKey::random(OsRng);
         let preissuance = PreIssuance::random(OsRng);
-        let params = Params::default();
+        let params = Params::nothing_up_my_sleeve(b"innocence v1");
         let issuance_request = preissuance.request(&params, OsRng);
 
         // Random credit amount between 1 and 1000
@@ -57,7 +57,7 @@ fn issuance() {
 fn full_cycle() {
     use rand::{Rng, thread_rng};
 
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     for _i in 0..10 {
         let private_key = PrivateKey::random(OsRng);
         let preissuance = PreIssuance::random(OsRng);
@@ -111,7 +111,7 @@ fn double_spend_prevention() {
     // Setup issuer and client
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let issuance_request = preissuance.request(&params, OsRng);
 
     // Random credit amount between 100 and 1000
@@ -190,7 +190,7 @@ fn spend_exact_balance() {
     // Test spending the exact balance amount
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let issuance_request = preissuance.request(&params, OsRng);
 
     // Random credit amount between 10 and 1000
@@ -242,7 +242,7 @@ fn sequential_spends() {
     // Issue a token with a random large balance
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let issuance_request = preissuance.request(&params, OsRng);
 
     // Random initial amount between 100 and 1000
@@ -320,7 +320,7 @@ fn attempt_overspend() {
     // Create a token with random credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let issuance_request = preissuance.request(&params, OsRng);
 
     // Random credit amount between 20 and 500
@@ -361,7 +361,7 @@ fn zero_spend_scenario() {
     // Create a token with random credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let issuance_request = preissuance.request(&params, OsRng);
 
     // Random credit amount between 10 and 1000
@@ -413,7 +413,7 @@ fn multiple_tokens_with_same_issuer() {
 
     // Single issuer
     let private_key = PrivateKey::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
 
     // Create two separate tokens for two different clients with random amounts
 
@@ -562,7 +562,7 @@ fn bits_of_() {
 fn invalid_issuance_request() {
     // Create a private key
     let private_key = PrivateKey::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
 
     // Create a valid preissuance state
     let preissuance = PreIssuance::random(OsRng);
@@ -601,7 +601,7 @@ fn invalid_proof_verification() {
     // Create a private key and token
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
 
     // Random credit amount between 50 and 500
@@ -639,7 +639,7 @@ fn large_amount_issuance() {
     // Test with a very large credit amount (but still within the L-bit range)
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
 
     // Create a large amount, close to the maximum representable value
@@ -687,7 +687,7 @@ fn invalid_token_verification() {
     // Create a private key and token
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
         .issue(&params, &request, Scalar::from(50u64), OsRng)
@@ -751,7 +751,7 @@ fn tampered_refund_verification() {
     // Setup
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
         .issue(&params, &request, Scalar::from(50u64), OsRng)
@@ -801,7 +801,7 @@ fn zero_e_signature_attack() {
     // Test if a zero e value in the signature can be exploited
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
         .issue(&params, &request, Scalar::from(20u64), OsRng)
@@ -827,7 +827,7 @@ fn spend_with_identity_a_prime() {
     // Create a token
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
         .issue(&params, &request, Scalar::from(20u64), OsRng)
@@ -857,7 +857,7 @@ fn token_with_zero_credit() {
     // Create a token with zero credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let zero_amount = Scalar::ZERO;
     let response = private_key
@@ -902,7 +902,7 @@ fn exhaust_token_with_one_credit_spends() {
     // Create a token with exactly 10 credits
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let initial_credits = 10u64;
     let credit_amount = Scalar::from(initial_credits);
@@ -993,7 +993,7 @@ fn test_binary_decomposition_max_value() {
     let max_value = Scalar::from(2u64.pow(L as u32) - 1);
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
 
     // Issue a token with the maximum value
@@ -1087,7 +1087,7 @@ fn test_nullifier_collisions() {
 
     // Create a single issuer
     let private_key = PrivateKey::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
 
     // Number of tokens to create and check
     let num_tokens = 30;
@@ -1135,7 +1135,7 @@ fn test_key_component_malleability() {
     // Create a private key
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
     let credit_amount = Scalar::from(50u64);
 
@@ -1282,7 +1282,7 @@ fn test_credit_token_with_u32_conversion() {
     // Create a private key
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
-    let params = Params::default();
+    let params = Params::nothing_up_my_sleeve(b"innocence v1");
     let request = preissuance.request(&params, OsRng);
 
     // Use u32_to_scalar to convert a u32 credit amount
