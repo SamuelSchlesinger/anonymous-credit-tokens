@@ -1,24 +1,36 @@
 //! # Anonymous Credits
 //! 
 //! A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
-//! privacy-preserving payment systems.
+//! privacy-preserving payment systems for web applications and services.
+//!
+//! ## WARNING
+//!
+//! This cryptography is experimental and unaudited. Do not use in production environments
+//! without thorough security review.
 //!
 //! ## Overview
 //!
 //! This library implements the Anonymous Credit Scheme designed by Jonathan Katz
 //! and Samuel Schlesinger. The system allows:
 //!
-//! - An issuer to issue credit tokens to clients
-//! - Clients to spend these credits anonymously
-//! - Prevention of double-spending through nullifiers
-//! - Privacy-preserving refunds for unspent credits
+//! - **Credit Issuance**: Services can issue digital credit tokens to users
+//! - **Anonymous Spending**: Users can spend these credits without revealing their identity
+//! - **Double-Spend Prevention**: The system prevents credits from being used multiple times
+//! - **Privacy-Preserving Refunds**: Unspent credits can be refunded without compromising user privacy
 //!
-//! The implementation uses Ristretto points over Curve25519 and zero-knowledge 
-//! proofs to ensure both security and privacy.
+//! The implementation uses BBS signatures and zero-knowledge proofs to ensure both
+//! security and privacy, making it suitable for integration into web services and distributed systems.
+//!
+//! ## Key Concepts
+//!
+//! - **Issuer**: The service that creates and validates credit tokens (typically your backend server)
+//! - **Client**: The user who receives, holds, and spends credit tokens (typically your users)
+//! - **Credit Token**: A cryptographic token representing a certain amount of credits
+//! - **Nullifier**: A unique identifier used to prevent double-spending
 //!
 //! ## Usage Examples
 //!
-//! See the README.md file for comprehensive usage examples.
+//! See the README.md file for comprehensive usage examples and integration guidance.
 
 use curve25519_dalek::{RistrettoPoint, ristretto::RistrettoBasepointTable, Scalar};
 use group::Group;
@@ -168,11 +180,11 @@ pub struct PublicKey {
 #[derive(Clone)]
 pub struct Params {
     /// First generator point used in commitment schemes
-    pub h1: RistrettoBasepointTable,
+    h1: RistrettoBasepointTable,
     /// Second generator point used in commitment schemes
-    pub h2: RistrettoBasepointTable,
+    h2: RistrettoBasepointTable,
     /// Third generator point used in commitment schemes
-    pub h3: RistrettoBasepointTable,
+    h3: RistrettoBasepointTable,
 }
 
 impl Default for Params {
@@ -761,6 +773,11 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
 }
 
 impl CreditToken {
+    /// Returns the number of credits contained within this token.
+    pub fn credits(&self) -> Scalar {
+        self.c
+    }
+
     /// Creates a zero-knowledge proof for spending credits from this token.
     ///
     /// This method generates a proof that the client possesses a valid credit token with
