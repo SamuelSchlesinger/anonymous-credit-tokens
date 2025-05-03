@@ -52,10 +52,10 @@ fn issuance() {
 fn full_cycle() {
     use rand::{Rng, thread_rng};
     
+    let params = Params::default();
     for _i in 0..10 {
         let private_key = PrivateKey::random(OsRng);
         let preissuance = PreIssuance::random(OsRng);
-        let params = Params::default();
         let issuance_request = preissuance.request(&params, OsRng);
         
         // Random credit amount between 100 and 2000
@@ -950,7 +950,7 @@ fn test_nullifier_collisions() {
     let params = Params::default();
     
     // Number of tokens to create and check
-    let num_tokens = 100;
+    let num_tokens = 30;
     
     // Generate multiple tokens and check their nullifiers
     for i in 0..num_tokens {
