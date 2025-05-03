@@ -380,7 +380,7 @@ impl PreIssuance {
         let k1 = &params.h2 * &k_prime + &params.h3 * &r_prime;
 
         // Generate the challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(&params, b"request", |transcript| {
+        let gamma = Transcript::with(params, b"request", |transcript| {
             transcript.add_elements([&big_k, &k1].into_iter());
         });
 
@@ -540,7 +540,7 @@ impl PrivateKey {
             - request.big_k * request.gamma;
 
         // Generate the expected challenge value
-        let gamma = Transcript::with(&params, b"request", |transcript| {
+        let gamma = Transcript::with(params, b"request", |transcript| {
             transcript.add_elements([&request.big_k, &k1].into_iter());
         });
 
@@ -561,7 +561,7 @@ impl PrivateKey {
         let y_g = RistrettoPoint::generator() * alpha;
 
         // Generate the challenge for the proof using the Fiat-Shamir transform
-        let gamma = Transcript::with(&params, b"respond", |transcript| {
+        let gamma = Transcript::with(params, b"respond", |transcript| {
             transcript.add_scalar(&e);
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
@@ -735,7 +735,7 @@ impl PrivateKey {
             + &params.h3 * &spend_proof.s_bar
             - com_ * spend_proof.gamma;
 
-        let gamma = Transcript::with(&params, b"spend", |transcript| {
+        let gamma = Transcript::with(params, b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
             transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
@@ -760,7 +760,7 @@ impl PrivateKey {
         let y_a = a * alpha;
         let y_g = RistrettoPoint::generator() * alpha;
 
-        let refund_gamma = Transcript::with(&params, b"refund", |transcript| {
+        let refund_gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalar(&e);
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
@@ -961,7 +961,7 @@ impl CreditToken {
         let s_prime = Scalar::random(&mut rng);
         let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &s_prime;
 
-        let gamma = Transcript::with(&params, b"spend", |transcript| {
+        let gamma = Transcript::with(params, b"spend", |transcript| {
             transcript.add_scalar(&self.k);
             transcript.add_elements([&a_prime, &b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
@@ -1133,7 +1133,7 @@ impl PreRefund {
         let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
         let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
 
-        let gamma = Transcript::with(&params, b"refund", |transcript| {
+        let gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalar(&refund.e);
             transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });

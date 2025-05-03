@@ -41,15 +41,15 @@ impl Transcript {
         };
         t.update(PROTOCOL_LABEL);
         t.update(
-            &bincode::serde::encode_to_vec(&params.h1.basepoint(), bincode::config::standard())
+            &bincode::serde::encode_to_vec(params.h1.basepoint(), bincode::config::standard())
                 .unwrap(),
         );
         t.update(
-            &bincode::serde::encode_to_vec(&params.h2.basepoint(), bincode::config::standard())
+            &bincode::serde::encode_to_vec(params.h2.basepoint(), bincode::config::standard())
                 .unwrap(),
         );
         t.update(
-            &bincode::serde::encode_to_vec(&params.h3.basepoint(), bincode::config::standard())
+            &bincode::serde::encode_to_vec(params.h3.basepoint(), bincode::config::standard())
                 .unwrap(),
         );
         t.update(label);
@@ -70,7 +70,7 @@ impl Transcript {
     ///
     /// A `Scalar` representing the challenge derived from the transcript
     pub(crate) fn with(params: &Params, label: &[u8], f: impl FnOnce(&mut Transcript)) -> Scalar {
-        let mut transcript = Transcript::new(&params, label);
+        let mut transcript = Transcript::new(params, label);
         f(&mut transcript);
         transcript.challenge()
     }
