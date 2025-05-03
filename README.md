@@ -48,23 +48,24 @@ let public_key = private_key.public();
 To issue credits to a client:
 
 ```rust
-use anonymous_credits::{PreIssuance, PrivateKey};
+use anonymous_credits::{Params, PreIssuance, PrivateKey};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
 // Client prepares for issuance
 let preissuance = PreIssuance::random(OsRng);
-let issuance_request = preissuance.request(OsRng);
+let params = Params::default();
+let issuance_request = preissuance.request(&params, OsRng);
 
 // Issuer processes the request (credit amount: 20)
 let credit_amount = Scalar::from(20u64);
 let issuance_response = private_key
-    .issue(&issuance_request, credit_amount, OsRng)
+    .issue(&params, &issuance_request, credit_amount, OsRng)
     .unwrap();
 
 // Client constructs the credit token
 let credit_token = preissuance
-    .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
+    .to_credit_token(&params, private_key.public(), &issuance_request, &issuance_response)
     .unwrap();
 ```
 
@@ -75,7 +76,7 @@ A client can spend some credits and receive a refund token for the remainder:
 ```rust
 // Client creates a spending proof (spending 10 out of 20 credits)
 let charge = Scalar::from(10u64);
-let (spend_proof, prerefund) = credit_token.prove_spend(charge, OsRng);
+let (spend_proof, prerefund) = credit_token.prove_spend(&params, charge, OsRng);
 
 // Issuer verifies and processes the spending proof
 // The issuer should check that the nullifier hasn't been used before
@@ -83,11 +84,11 @@ let nullifier = spend_proof.nullifier();
 // ... (check nullifier database)
 
 // Issuer creates a refund
-let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
 
 // Client constructs a new credit token with remaining credits
 let new_credit_token = prerefund
-    .to_credit_token(&spend_proof, &refund, private_key.public())
+    .to_credit_token(&params, &spend_proof, &refund, private_key.public())
     .unwrap();
 ```
 
@@ -98,41 +99,44 @@ use anonymous_credits::{PrivateKey, PreIssuance};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
+/// Both parties agree on a set of parameters
+let params = Params::default();
+
 // Issuer generates a keypair
 let private_key = PrivateKey::random(OsRng);
 
 // Client prepares for issuance
 let preissuance = PreIssuance::random(OsRng);
-let issuance_request = preissuance.request(OsRng);
+let issuance_request = preissuance.request(&params, OsRng);
 
 // Issuer issues 40 credits
 let issuance_response = private_key
-    .issue(&issuance_request, Scalar::from(40u64), OsRng)
+    .issue(&params, &issuance_request, Scalar::from(40u64), OsRng)
     .unwrap();
 
 // Client receives the credit token
 let credit_token1 = preissuance
-    .to_credit_token(private_key.public(), &issuance_request, &issuance_response)
+    .to_credit_token(&params, private_key.public(), &issuance_request, &issuance_response)
     .unwrap();
 
 // Client spends 20 credits
 let charge = Scalar::from(20u64);
-let (spend_proof, prerefund) = credit_token1.prove_spend(charge, OsRng);
+let (spend_proof, prerefund) = credit_token1.prove_spend(&params, charge, OsRng);
 
 // Issuer processes the spending and issues a refund
-let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
 
 // Client receives a new credit token with 20 credits remaining
 let credit_token2 = prerefund
-    .to_credit_token(&spend_proof, &refund, private_key.public())
+    .to_credit_token(&params, &spend_proof, &refund, private_key.public())
     .unwrap();
 
 // Client can spend the remaining credits
 let charge = Scalar::from(20u64);
-let (spend_proof2, prerefund2) = credit_token2.prove_spend(charge, OsRng);
-let refund2 = private_key.refund(&spend_proof2, OsRng).unwrap();
+let (spend_proof2, prerefund2) = credit_token2.prove_spend(&params, charge, OsRng);
+let refund2 = private_key.refund(&params, &spend_proof2, OsRng).unwrap();
 let credit_token3 = prerefund2
-    .to_credit_token(&spend_proof2, &refund2, private_key.public())
+    .to_credit_token(&params, &spend_proof2, &refund2, private_key.public())
     .unwrap();
 ```
 

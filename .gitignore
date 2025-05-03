@@ -1,3 +1,5 @@
 /target
 docs/*.aux
 docs/*.log
+
+**/.claude/settings.local.json

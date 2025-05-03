@@ -102,14 +102,14 @@ pub struct PublicKey {
 ///
 /// These parameters are used in various cryptographic operations throughout the protocol.
 /// By default, they are deterministically generated from a fixed seed.
-#[derive(Serialize, Deserialize, Debug)]
-struct Params {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Params {
     /// First generator point used in commitment schemes
-    h1: RistrettoPoint,
+    pub h1: RistrettoPoint,
     /// Second generator point used in commitment schemes
-    h2: RistrettoPoint,
+    pub h2: RistrettoPoint,
     /// Third generator point used in commitment schemes
-    h3: RistrettoPoint,
+    pub h3: RistrettoPoint,
 }
 
 impl Default for Params {
@@ -244,15 +244,14 @@ impl PreIssuance {
     /// # Example
     ///
     /// ```
-    /// use anonymous_credit_tokens::PreIssuance;
+    /// use anonymous_credit_tokens::{PreIssuance, Params};
     /// use rand_core::OsRng;
     ///
     /// let pre_issuance = PreIssuance::random(OsRng);
-    /// let request = pre_issuance.request(OsRng);
+    /// let params = Params::default();
+    /// let request = pre_issuance.request(&params, OsRng);
     /// ```
-    pub fn request(&self, mut rng: impl CryptoRngCore) -> IssuanceRequest {
-        let params = Params::default();
-
+    pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         // Create a commitment to the client's identifier and blinding factor
         let big_k = params.h2 * self.k + params.h3 * self.r;
         
@@ -298,18 +297,20 @@ impl PreIssuance {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance};
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let request = pre_issuance.request(OsRng);
+    /// # let params = Params::default();
+    /// # let request = pre_issuance.request(&params, OsRng);
     /// # let credit_amount = Scalar::from(20u64);
-    /// # let response = private_key.issue(&request, credit_amount, OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
     /// #
     /// let credit_token = pre_issuance.to_credit_token(
+    ///     &params,
     ///     public_key,
     ///     &request,
     ///     &response
@@ -317,12 +318,11 @@ impl PreIssuance {
     /// ```
     pub fn to_credit_token(
         &self,
+        params: &Params,
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
     ) -> Option<CreditToken> {
-        let params = Params::default();
-
         // Reconstruct the signature base points for verification
         let x_a = RistrettoPoint::generator() + params.h1 * response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
@@ -396,26 +396,26 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance};
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let request = pre_issuance.request(OsRng);
+    /// # let params = Params::default();
+    /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
     /// let credit_amount = Scalar::from(20u64);
-    /// let response = private_key.issue(&request, credit_amount, OsRng).unwrap();
+    /// let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
     /// ```
     pub fn issue(
         &self,
+        params: &Params,
         request: &IssuanceRequest,
         c: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Option<IssuanceResponse> {
-        let params = Params::default();
-        
         // Verify the client's zero-knowledge proof
         let k1 =
             (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
@@ -548,29 +548,28 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance};
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
     /// # // Setup (normally these would come from previous steps)
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let request = pre_issuance.request(OsRng);
-    /// # let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    /// # let params = Params::default();
+    /// # let request = pre_issuance.request(&params, OsRng);
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u64);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend(spend_amount, OsRng);
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
     /// #
     /// // First check if we've seen this nullifier before
     /// let nullifier = spend_proof.nullifier();
     /// // ... check nullifier database
     ///
     /// // Then process the refund
-    /// let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    /// let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// ```
-    pub fn refund(&self, spend_proof: &SpendProof, mut rng: impl CryptoRngCore) -> Option<Refund> {
-        let params = Params::default();
-
+    pub fn refund(&self, params: &Params, spend_proof: &SpendProof, mut rng: impl CryptoRngCore) -> Option<Refund> {
         if spend_proof.a_prime == RistrettoPoint::generator() {
             return None;
         }
@@ -725,30 +724,30 @@ impl CreditToken {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{CreditToken, PrivateKey, PreIssuance};
+    /// # use anonymous_credit_tokens::{CreditToken, PrivateKey, PreIssuance, Params};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
     /// # // Create a valid credit token with 20 credits
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let request = pre_issuance.request(OsRng);
-    /// # let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(private_key.public(), &request, &response).unwrap();
+    /// # let params = Params::default();
+    /// # let request = pre_issuance.request(&params, OsRng);
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// #
     /// // Spend 10 credits (where 10 <= token balance < 2^32)
     /// let spend_amount = Scalar::from(10u64);
-    /// let (spend_proof, prerefund) = credit_token.prove_spend(spend_amount, OsRng);
+    /// let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
     /// ```
     pub fn prove_spend(
         &self,
+        params: &Params,
         s: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> (SpendProof, PreRefund) {
-        let params = Params::default();
-
         let r1 = Scalar::random(&mut rng);
         let r2 = Scalar::random(&mut rng);
         let c_prime = Scalar::random(&mut rng);
@@ -965,7 +964,7 @@ impl PreRefund {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance};
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
@@ -973,12 +972,13 @@ impl PreRefund {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let request = pre_issuance.request(OsRng);
-    /// # let response = private_key.issue(&request, Scalar::from(20u64), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(public_key, &request, &response).unwrap();
+    /// # let params = Params::default();
+    /// # let request = pre_issuance.request(&params, OsRng);
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u64);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend(spend_amount, OsRng);
-    /// # let refund = private_key.refund(&spend_proof, OsRng).unwrap();
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
+    /// # let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// #
     /// // Construct the new credit token with the remaining balance
     /// let new_credit_token = prerefund.to_credit_token(
