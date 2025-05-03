@@ -1,5 +1,7 @@
 # Anonymous Credit Tokens
 
+![crates.io](https://img.shields.io/crates/v/anonymous-credit-tokens.svg)
+
 A Rust implementation of an Anonymous Credit Scheme (ACS) that enables privacy-preserving payment systems for web applications and services.
 
 ## WARNING
