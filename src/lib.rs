@@ -70,7 +70,7 @@ use transcript::Transcript;
 /// let scalar = u32_to_scalar(42);
 /// ```
 pub fn u32_to_scalar(value: u32) -> Scalar {
-    Scalar::from(value as u64)
+    Scalar::from(value)
 }
 
 /// Attempts to convert a Scalar to a u32 value.
@@ -99,13 +99,13 @@ pub fn u32_to_scalar(value: u32) -> Scalar {
 pub fn scalar_to_u32(scalar: &Scalar) -> Option<u32> {
     // Get the low 64 bits of the scalar
     let bytes = scalar.as_bytes();
-    let value = u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    let value = u32::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3],
     ]);
 
     // Check if the scalar is within u32 range and the high bits are zero
-    if value <= u32::MAX as u64 && bytes[8..].iter().all(|&b| b == 0) {
-        Some(value as u32)
+    if bytes[4..].iter().all(|&b| b == 0) {
+        Some(value)
     } else {
         None
     }
