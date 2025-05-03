@@ -181,10 +181,10 @@ fn refund_token_creation_benchmark(c: &mut Criterion) {
                 
                 let (spend_proof, prerefund) = credit_token.prove_spend(&params, charge, OsRng);
                 let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
-                (prerefund, spend_proof, refund, private_key)
+                (prerefund, spend_proof, refund, private_key, params)
             },
-            |(prerefund, spend_proof, refund, private_key)| {
-                black_box(prerefund.to_credit_token(&spend_proof, &refund, private_key.public()).unwrap())
+            |(prerefund, spend_proof, refund, private_key, params)| {
+                black_box(prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public()).unwrap())
             },
             BatchSize::SmallInput
         )

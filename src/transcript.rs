@@ -4,6 +4,7 @@
 //! generate challenge values for zero-knowledge proofs. It uses the BLAKE3 hash
 //! function to accumulate transcript state and derive challenge values.
 
+use super::Params;
 use curve25519_dalek::RistrettoPoint;
 use curve25519_dalek::Scalar;
 use rand_chacha::ChaCha20Rng;
@@ -34,11 +35,12 @@ impl Transcript {
     /// # Returns
     ///
     /// A new `Transcript` instance initialized with the label
-    pub(crate) fn new(label: &[u8]) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(PROTOCOL_LABEL);
-        hasher.update(label);
-        Transcript { hasher }
+    pub(crate) fn new(params: &Params, label: &[u8]) -> Self {
+        let mut t = Transcript { hasher: blake3::Hasher::new() };
+        t.update(PROTOCOL_LABEL);
+        t.update(&bincode::serde::encode_to_vec(&params, bincode::config::standard()).unwrap());
+        t.update(label);
+        t
     }
 
     /// Executes a function on a new transcript and returns the resulting challenge.
@@ -54,10 +56,15 @@ impl Transcript {
     /// # Returns
     ///
     /// A `Scalar` representing the challenge derived from the transcript
-    pub(crate) fn with(label: &[u8], f: impl FnOnce(&mut Transcript)) -> Scalar {
-        let mut transcript = Transcript::new(label);
+    pub(crate) fn with(params: &Params, label: &[u8], f: impl FnOnce(&mut Transcript)) -> Scalar {
+        let mut transcript = Transcript::new(&params, label);
         f(&mut transcript);
         transcript.challenge()
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        self.hasher.update(&bytes.len().to_be_bytes());
+        self.hasher.update(bytes);
     }
 
     /// Adds a Ristretto point to the transcript.
@@ -66,8 +73,7 @@ impl Transcript {
     ///
     /// * `element` - A reference to a `RistrettoPoint` to add to the transcript
     pub(crate) fn add_element(&mut self, element: &RistrettoPoint) {
-        self.hasher
-            .update(&bincode::serde::encode_to_vec(element, bincode::config::standard()).unwrap());
+        self.update(&bincode::serde::encode_to_vec(element, bincode::config::standard()).unwrap());
     }
 
     /// Adds multiple Ristretto points to the transcript.
@@ -87,8 +93,7 @@ impl Transcript {
     ///
     /// * `scalar` - A reference to a `Scalar` to add to the transcript
     pub(crate) fn add_scalar(&mut self, scalar: &Scalar) {
-        self.hasher
-            .update(&bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap());
+        self.update(&bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap());
     }
 
     /// Creates a deterministic random number generator from the transcript state.

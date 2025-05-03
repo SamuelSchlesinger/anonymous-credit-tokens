@@ -37,6 +37,69 @@ pub const L: usize = 32;
 mod transcript;
 use transcript::Transcript;
 
+/// Converts a u32 value to a Scalar.
+///
+/// This function creates a Scalar representation of the provided u32 value.
+/// The conversion is done safely within the bounds of the scalar field.
+///
+/// # Arguments
+///
+/// * `value` - The u32 value to convert to a Scalar
+///
+/// # Returns
+///
+/// A `Scalar` representing the u32 value
+///
+/// # Example
+///
+/// ```
+/// use anonymous_credit_tokens::u32_to_scalar;
+///
+/// let scalar = u32_to_scalar(42);
+/// ```
+pub fn u32_to_scalar(value: u32) -> Scalar {
+    Scalar::from(value as u64)
+}
+
+/// Attempts to convert a Scalar to a u32 value.
+///
+/// This function attempts to extract a u32 value from a Scalar. Since Scalars can
+/// represent values much larger than a u32, this function returns None if the
+/// Scalar represents a value outside the u32 range.
+///
+/// # Arguments
+///
+/// * `scalar` - The Scalar value to convert to a u32
+///
+/// # Returns
+///
+/// * `Some(u32)` - The u32 value if the Scalar is within the u32 range
+/// * `None` - If the Scalar value is too large to fit in a u32
+///
+/// # Example
+///
+/// ```
+/// use anonymous_credit_tokens::{u32_to_scalar, scalar_to_u32};
+///
+/// let scalar = u32_to_scalar(42);
+/// assert_eq!(scalar_to_u32(&scalar), Some(42));
+/// ```
+pub fn scalar_to_u32(scalar: &Scalar) -> Option<u32> {
+    // Get the low 64 bits of the scalar
+    let bytes = scalar.as_bytes();
+    let value = u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    
+    // Check if the scalar is within u32 range and the high bits are zero
+    if value <= u32::MAX as u64 && bytes[8..].iter().all(|&b| b == 0) {
+        Some(value as u32)
+    } else {
+        None
+    }
+}
+
 /// The private key of the issuer, used to issue and refund credit tokens.
 ///
 /// This key should be kept secure, as it allows the owner to create new tokens
@@ -261,7 +324,7 @@ impl PreIssuance {
         let k1 = params.h2 * k_prime + params.h3 * r_prime;
 
         // Generate the challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(b"request", |transcript| {
+        let gamma = Transcript::with(&params, b"request", |transcript| {
             transcript.add_elements([&big_k, &k1].into_iter());
         });
 
@@ -332,7 +395,7 @@ impl PreIssuance {
         let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
 
         // Generate the expected challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(b"respond", |transcript| {
+        let gamma = Transcript::with(params, b"respond", |transcript| {
             transcript.add_scalar(&response.e);
             transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
@@ -421,7 +484,7 @@ impl PrivateKey {
             (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
 
         // Generate the expected challenge value
-        let gamma = Transcript::with(b"request", |transcript| {
+        let gamma = Transcript::with(&params, b"request", |transcript| {
             transcript.add_elements([&request.big_k, &k1].into_iter());
         });
 
@@ -442,7 +505,7 @@ impl PrivateKey {
         let y_g = RistrettoPoint::generator() * alpha;
 
         // Generate the challenge for the proof using the Fiat-Shamir transform
-        let gamma = Transcript::with(b"respond", |transcript| {
+        let gamma = Transcript::with(&params, b"respond", |transcript| {
             transcript.add_scalar(&e);
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
@@ -611,7 +674,7 @@ impl PrivateKey {
             + params.h3 * spend_proof.s_bar
             - com_ * spend_proof.gamma;
 
-        let gamma = Transcript::with(b"spend", |transcript| {
+        let gamma = Transcript::with(&params, b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
             transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
@@ -636,7 +699,7 @@ impl PrivateKey {
         let y_a = a * alpha;
         let y_g = RistrettoPoint::generator() * alpha;
 
-        let refund_gamma = Transcript::with(b"refund", |transcript| {
+        let refund_gamma = Transcript::with(&params, b"refund", |transcript| {
             transcript.add_scalar(&e);
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
@@ -832,7 +895,7 @@ impl CreditToken {
         let s_prime = Scalar::random(&mut rng);
         let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
 
-        let gamma = Transcript::with(b"spend", |transcript| {
+        let gamma = Transcript::with(&params, b"spend", |transcript| {
             transcript.add_scalar(&self.k);
             transcript.add_elements([&a_prime, &b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
@@ -982,6 +1045,7 @@ impl PreRefund {
     /// #
     /// // Construct the new credit token with the remaining balance
     /// let new_credit_token = prerefund.to_credit_token(
+    ///     &params,
     ///     &spend_proof,
     ///     &refund,
     ///     public_key
@@ -989,6 +1053,7 @@ impl PreRefund {
     /// ```
     pub fn to_credit_token(
         &self,
+        params: &Params,
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
@@ -1002,7 +1067,7 @@ impl PreRefund {
         let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
         let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
 
-        let gamma = Transcript::with(b"refund", |transcript| {
+        let gamma = Transcript::with(&params, b"refund", |transcript| {
             transcript.add_scalar(&refund.e);
             transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
