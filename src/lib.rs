@@ -20,7 +20,7 @@
 //!
 //! See the README.md file for comprehensive usage examples.
 
-use curve25519_dalek::{RistrettoPoint, Scalar};
+use curve25519_dalek::{RistrettoPoint, ristretto::RistrettoBasepointTable, Scalar};
 use group::Group;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRngCore, SeedableRng};
@@ -165,14 +165,14 @@ pub struct PublicKey {
 ///
 /// These parameters are used in various cryptographic operations throughout the protocol.
 /// By default, they are deterministically generated from a fixed seed.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Clone)]
 pub struct Params {
     /// First generator point used in commitment schemes
-    pub h1: RistrettoPoint,
+    pub h1: RistrettoBasepointTable,
     /// Second generator point used in commitment schemes
-    pub h2: RistrettoPoint,
+    pub h2: RistrettoBasepointTable,
     /// Third generator point used in commitment schemes
-    pub h3: RistrettoPoint,
+    pub h3: RistrettoBasepointTable,
 }
 
 impl Default for Params {
@@ -201,9 +201,9 @@ impl Params {
     /// A new `Params` instance with randomly generated points
     fn random(mut rng: impl CryptoRngCore) -> Self {
         Params {
-            h1: RistrettoPoint::random(&mut rng),
-            h2: RistrettoPoint::random(&mut rng),
-            h3: RistrettoPoint::random(&mut rng),
+            h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
+            h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
+            h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
         }
     }
 }
@@ -316,12 +316,12 @@ impl PreIssuance {
     /// ```
     pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         // Create a commitment to the client's identifier and blinding factor
-        let big_k = params.h2 * self.k + params.h3 * self.r;
+        let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
         
         // Generate random values for the zero-knowledge proof
         let k_prime = Scalar::random(&mut rng);
         let r_prime = Scalar::random(&mut rng);
-        let k1 = params.h2 * k_prime + params.h3 * r_prime;
+        let k1 = &params.h2 * &k_prime + &params.h3 * &r_prime;
 
         // Generate the challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(&params, b"request", |transcript| {
@@ -387,7 +387,7 @@ impl PreIssuance {
         response: &IssuanceResponse,
     ) -> Option<CreditToken> {
         // Reconstruct the signature base points for verification
-        let x_a = RistrettoPoint::generator() + params.h1 * response.c + request.big_k;
+        let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
         
         // Verify the response by checking the BBS+ signature proof
@@ -481,7 +481,7 @@ impl PrivateKey {
     ) -> Option<IssuanceResponse> {
         // Verify the client's zero-knowledge proof
         let k1 =
-            (params.h2 * request.k_bar + params.h3 * request.r_bar) - request.big_k * request.gamma;
+            (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar) - request.big_k * request.gamma;
 
         // Generate the expected challenge value
         let gamma = Transcript::with(&params, b"request", |transcript| {
@@ -495,7 +495,7 @@ impl PrivateKey {
 
         // Create a BBS+ signature on the client's commitment and credit amount
         let e = Scalar::random(&mut rng);
-        let x_a = RistrettoPoint::generator() + params.h1 * c + request.big_k;
+        let x_a = RistrettoPoint::generator() + &params.h1 * &c + request.big_k;
         let a = x_a * (e + self.x).invert();
         let x_g = RistrettoPoint::generator() * e + self.public.w;
         
@@ -638,40 +638,40 @@ impl PrivateKey {
         }
 
         let a_bar = spend_proof.a_prime * self.x;
-        let big_h1 = RistrettoPoint::generator() + params.h2 * spend_proof.k;
+        let big_h1 = RistrettoPoint::generator() + &params.h2 * &spend_proof.k;
         let a1 = spend_proof.a_prime * spend_proof.e_bar
             + spend_proof.b_bar * spend_proof.r2_bar
             + a_bar * spend_proof.gamma.neg();
         let a2 = spend_proof.b_bar * spend_proof.r3_bar
-            + params.h1 * spend_proof.c_bar
-            + params.h3 * spend_proof.r_bar
+            + &params.h1 * &spend_proof.c_bar
+            + &params.h3 * &spend_proof.r_bar
             + big_h1 * spend_proof.gamma.neg();
         let mut gamma01 = [Scalar::ZERO; L];
         gamma01[0] = spend_proof.gamma - spend_proof.gamma0[0];
         let mut big_c = [[RistrettoPoint::identity(); 2]; L];
         big_c[0][0] = spend_proof.com[0];
-        big_c[0][1] = spend_proof.com[0] - params.h1;
+        big_c[0][1] = spend_proof.com[0] - params.h1.basepoint();
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-        big_c_prime[0][0] = params.h2 * spend_proof.w00 + params.h3 * spend_proof.z[0][0]
+        big_c_prime[0][0] = &params.h2 * &spend_proof.w00 + &params.h3 * &spend_proof.z[0][0]
             - big_c[0][0] * spend_proof.gamma0[0];
-        big_c_prime[0][1] = params.h2 * spend_proof.w01 + params.h3 * spend_proof.z[0][1]
+        big_c_prime[0][1] = &params.h2 * &spend_proof.w01 + &params.h3 * &spend_proof.z[0][1]
             - big_c[0][1] * gamma01[0];
         for j in 1..L {
             gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
             big_c[j][0] = spend_proof.com[j];
-            big_c[j][1] = spend_proof.com[j] - params.h1;
+            big_c[j][1] = spend_proof.com[j] - params.h1.basepoint();
             big_c_prime[j][0] =
-                params.h3 * spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
-            big_c_prime[j][1] = params.h3 * spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
+                &params.h3 * &spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
+            big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
         }
 
         let k_prime = (0..L)
             .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
             .fold(RistrettoPoint::identity(), |a, b| a + b);
-        let com_ = params.h1 * spend_proof.s + k_prime;
-        let big_c = params.h1 * spend_proof.c_bar.neg()
-            + params.h2 * spend_proof.k_bar
-            + params.h3 * spend_proof.s_bar
+        let com_ = &params.h1 * &spend_proof.s + k_prime;
+        let big_c = &params.h1 * &spend_proof.c_bar.neg()
+            + &params.h2 * &spend_proof.k_bar
+            + &params.h3 * &spend_proof.s_bar
             - com_ * spend_proof.gamma;
 
         let gamma = Transcript::with(&params, b"spend", |transcript| {
@@ -820,14 +820,14 @@ impl CreditToken {
         let r3_prime = Scalar::random(&mut rng);
 
         let b = RistrettoPoint::generator()
-            + params.h1 * self.c
-            + params.h2 * self.k
-            + params.h3 * self.r;
+            + &params.h1 * &self.c
+            + &params.h2 * &self.k
+            + &params.h3 * &self.r;
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
         let r3 = r1.invert();
         let a1 = a_prime * e_prime + b_bar * r2_prime;
-        let a2 = b_bar * r3_prime + params.h1 * c_prime + params.h3 * r_prime;
+        let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
 
         let i = bits_of(self.c - s);
 
@@ -837,15 +837,15 @@ impl CreditToken {
             s_i.push(Scalar::random(&mut rng));
         }
         let mut com = [RistrettoPoint::identity(); L];
-        com[0] = params.h1 * i[0] + params.h2 * k_star + params.h3 * s_i[0];
+        com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &s_i[0];
         for j in 1..L {
-            com[j] = params.h1 * i[j] + params.h3 * s_i[j];
+            com[j] = &params.h1 * &i[j] + &params.h3 * &s_i[j];
         }
         let mut big_c = [[RistrettoPoint::identity(); 2]; L];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
 
         big_c[0][0] = com[0];
-        big_c[0][1] = com[0] - params.h1;
+        big_c[0][1] = com[0] - params.h1.basepoint();
         let k0_prime = Scalar::random(&mut rng);
         let mut s_i_prime = [Scalar::ZERO; L];
         for i in 0..L {
@@ -862,29 +862,29 @@ impl CreditToken {
         }
 
         big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(params.h2 * w0 + params.h3 * z[0] - big_c[0][0] * gamma_i[0]),
-            &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
+            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][0] * gamma_i[0]),
+            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
             i[0].ct_eq(&Scalar::ZERO),
         );
 
         big_c_prime[0][1] = RistrettoPoint::conditional_select(
-            &(params.h2 * k0_prime + params.h3 * s_i_prime[0]),
-            &(params.h2 * w0 + params.h3 * z[0] - big_c[0][1] * gamma_i[0]),
+            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
+            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][1] * gamma_i[0]),
             i[0].ct_eq(&Scalar::ZERO),
         );
 
         for j in 1..L {
             big_c[j][0] = com[j];
-            big_c[j][1] = com[j] - params.h1;
+            big_c[j][1] = com[j] - params.h1.basepoint();
 
             big_c_prime[j][0] = RistrettoPoint::conditional_select(
-                &(params.h3 * z[j] - big_c[j][0] * gamma_i[j]),
-                &(params.h3 * s_i_prime[j]),
+                &(&params.h3 * &z[j] - big_c[j][0] * gamma_i[j]),
+                &(&params.h3 * &s_i_prime[j]),
                 i[j].ct_eq(&Scalar::ZERO),
             );
             big_c_prime[j][1] = RistrettoPoint::conditional_select(
-                &(params.h3 * s_i_prime[j]),
-                &(params.h3 * z[j] - big_c[j][1] * gamma_i[j]),
+                &(&params.h3 * &s_i_prime[j]),
+                &(&params.h3 * &z[j] - big_c[j][1] * gamma_i[j]),
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
@@ -893,7 +893,7 @@ impl CreditToken {
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
-        let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
+        let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &s_prime;
 
         let gamma = Transcript::with(&params, b"spend", |transcript| {
             transcript.add_scalar(&self.k);

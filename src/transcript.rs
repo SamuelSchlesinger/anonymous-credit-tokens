@@ -38,7 +38,9 @@ impl Transcript {
     pub(crate) fn new(params: &Params, label: &[u8]) -> Self {
         let mut t = Transcript { hasher: blake3::Hasher::new() };
         t.update(PROTOCOL_LABEL);
-        t.update(&bincode::serde::encode_to_vec(&params, bincode::config::standard()).unwrap());
+        t.update(&bincode::serde::encode_to_vec(&params.h1.basepoint(), bincode::config::standard()).unwrap());
+        t.update(&bincode::serde::encode_to_vec(&params.h2.basepoint(), bincode::config::standard()).unwrap());
+        t.update(&bincode::serde::encode_to_vec(&params.h3.basepoint(), bincode::config::standard()).unwrap());
         t.update(label);
         t
     }
