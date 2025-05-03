@@ -1,4 +1,4 @@
-//! # Anonymous Credits
+//! # Anonymous Credit Tokens
 //!
 //! A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
 //! privacy-preserving payment systems for web applications and services.
@@ -740,8 +740,8 @@ impl PrivateKey {
             transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
             transcript.add_elements(spend_proof.com.iter());
-            for i in 0..L {
-                transcript.add_elements(big_c_prime[i].iter());
+            for c_prime in big_c_prime.iter() {
+                transcript.add_elements(c_prime.iter());
             }
             transcript.add_element(&big_c);
         });
@@ -811,11 +811,11 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
     let mut result = [Scalar::ZERO; L];
 
     // Extract each bit from the scalar's byte representation
-    for i in 0..L {
+    for (i, result_elem) in result.iter_mut().enumerate() {
         let b = i / 8; // Byte index
         let j = i % 8; // Bit position within the byte
         let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-        result[i] = Scalar::from(bit as u64); // Convert to scalar (0 or 1)
+        *result_elem = Scalar::from(bit as u64); // Convert to scalar (0 or 1)
     }
 
     result
@@ -914,17 +914,17 @@ impl CreditToken {
         big_c[0][1] = com[0] - params.h1.basepoint();
         let k0_prime = Scalar::random(&mut rng);
         let mut s_i_prime = [Scalar::ZERO; L];
-        for i in 0..L {
-            s_i_prime[i] = Scalar::random(&mut rng);
+        for s_prime in s_i_prime.iter_mut() {
+            *s_prime = Scalar::random(&mut rng);
         }
         let mut gamma_i = [Scalar::ZERO; L];
-        for i in 0..L {
-            gamma_i[i] = Scalar::random(&mut rng);
+        for gamma in gamma_i.iter_mut() {
+            *gamma = Scalar::random(&mut rng);
         }
         let w0 = Scalar::random(&mut rng);
         let mut z = [Scalar::ZERO; L];
-        for i in 0..L {
-            z[i] = Scalar::random(&mut rng);
+        for z_val in z.iter_mut() {
+            *z_val = Scalar::random(&mut rng);
         }
 
         big_c_prime[0][0] = RistrettoPoint::conditional_select(
@@ -966,8 +966,8 @@ impl CreditToken {
             transcript.add_elements([&a_prime, &b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
             transcript.add_elements(com.iter());
-            for i in 0..L {
-                transcript.add_elements(big_c_prime[i].iter());
+            for c_prime in big_c_prime.iter() {
+                transcript.add_elements(c_prime.iter());
             }
             transcript.add_element(&c_);
         });

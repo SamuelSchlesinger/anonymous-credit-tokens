@@ -3,6 +3,10 @@
 //! This module implements a simple transcript system that can be used to securely
 //! generate challenge values for zero-knowledge proofs. It uses the BLAKE3 hash
 //! function to accumulate transcript state and derive challenge values.
+//!
+//! The transcript system is used throughout the anonymous credit scheme to
+//! make interactive zero-knowledge protocols non-interactive by deriving
+//! challenge values deterministically from the protocol messages.
 
 use super::Params;
 use curve25519_dalek::RistrettoPoint;

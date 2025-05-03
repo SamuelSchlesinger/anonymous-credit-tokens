@@ -1,4 +1,4 @@
-# Anonymous Credits
+# Anonymous Credit Tokens
 
 A Rust implementation of an Anonymous Credit Scheme (ACS) that enables privacy-preserving payment systems for web applications and services.
 
@@ -43,18 +43,12 @@ The implementation uses BBS signatures and zero-knowledge proofs to ensure both 
 
 ## Server Integration Guide
 
-### Prerequisites
-
-- Rust 1.65 or later
-- A secure key management solution for issuer keys
-- A database for storing used nullifiers
-
 ### Key Management
 
 The issuer must securely generate and store a keypair:
 
 ```rust
-use anonymous_credits::PrivateKey;
+use anonymous_credit_tokens::PrivateKey;
 use rand_core::OsRng;
 
 // Generate a keypair on service startup
@@ -97,7 +91,7 @@ A typical service implementation would include these endpoints:
 ### Key Generation
 
 ```rust
-use anonymous_credits::PrivateKey;
+use anonymous_credit_tokens::PrivateKey;
 use rand_core::OsRng;
 
 // Generate a keypair for your service
@@ -105,16 +99,37 @@ let private_key = PrivateKey::random(OsRng);
 let public_key = private_key.public();
 ```
 
+### Scalar Conversion Utilities
+
+```rust
+use anonymous_credit_tokens::{u32_to_scalar, scalar_to_u32};
+
+// Convert u32 to Scalar for credit amounts
+let credit_amount_u32 = 500u32;
+let credit_amount_scalar = u32_to_scalar(credit_amount_u32);
+
+// Use the scalar for issuing credits
+// ...
+
+// Convert back to u32 for display or other purposes
+let amount_back = scalar_to_u32(&credit_amount_scalar).unwrap();
+assert_eq!(amount_back, credit_amount_u32);
+
+// Conversion will return None if the scalar is outside u32 range
+let large_scalar = // ... some large scalar
+let result = scalar_to_u32(&large_scalar); // Returns None if too large
+```
+
 ### Issuing Credits
 
 ```rust
-use anonymous_credits::{Params, PreIssuance, PrivateKey};
+use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
 // Client-side: Prepare for issuance
 let preissuance = PreIssuance::random(OsRng);
-let params = Params::default();
+let params = Params::nothing_up_my_sleeve(b"innocence v1");
 let issuance_request = preissuance.request(&params, OsRng);
 
 // Server-side: Process the request (credit amount: 20)
@@ -156,12 +171,12 @@ let new_credit_token = prerefund
 ### Complete Transaction Lifecycle
 
 ```rust
-use anonymous_credits::{PrivateKey, PreIssuance};
+use anonymous_credit_tokens::{PrivateKey, PreIssuance};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
 // 1. System Initialization
-let params = Params::default();
+let params = Params::nothing_up_my_sleeve(b"innocence v1");
 let private_key = PrivateKey::random(OsRng);
 
 // 2. User Registration/Credit Issuance
