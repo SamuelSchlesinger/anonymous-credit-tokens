@@ -2,6 +2,9 @@
 name = "anonymous-credit-tokens"
 version = "0.1.0"
 edition = "2024"
+description = "An implementation of Anonymous Credit Tokens, an online variant of e-cash"
+license-file = "LICENSE"
+repository = "https://github.com/SamuelSchlesinger/anonymous-credit-tokens"
 
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
