@@ -329,3 +329,9 @@ See the [LICENSE](LICENSE) file for details.
 ## References
 
 The implementation is based on the Anonymous Credit Scheme designed by Jonathan Katz and Samuel Schlesinger. For more details, see the [design document](docs/design.pdf).
+
+## Disclaimer
+
+This is not an officially supported Google product. This project is not
+eligible for the [Google Open Source Software Vulnerability Rewards
+Program](https://bughunters.google.com/open-source-security).
