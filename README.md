@@ -17,9 +17,7 @@ This library implements the Anonymous Credit Scheme designed by Jonathan Katz an
 
 The implementation uses BBS signatures and zero-knowledge proofs to ensure both security and privacy, making it suitable for integration into web services and distributed systems.
 
-## Key Concepts for Systems Engineers
-
-### System Components
+### Key Concepts
 
 1. **Issuer**: The service that creates and validates credit tokens (typically your backend server)
 2. **Client**: The user who receives, holds, and spends credit tokens (typically your users)
@@ -36,19 +34,11 @@ The implementation uses BBS signatures and zero-knowledge proofs to ensure both 
 └──────────┘     └──────────────┘     └─────────────┘
 ```
 
-### Performance Considerations
-
-- Credit issuance: Approximately 5-15ms per operation
-- Spending verification: Approximately 10-20ms per operation
-- Nullifier database lookups should be optimized for high throughput
-- See the [Benchmarks](#benchmarks) section for detailed performance metrics
-
 ## Features
 
-- **Anonymity**: Clients can spend credits without revealing their identity
-- **Unlinkability**: Spending activities cannot be linked to each other
-- **Double-spending prevention**: Each nullifier can only be used once
-- **Fiscally sound**: Clients cannot spend more credits than they have
+- **Anonymity**: Clients can spend credits without revealing their identity or linking their behavior over time
+- **Double-spending prevention**: Each nullifier can only be used once, meaning every credit token can be spent once
+- **Fiscally sound**: Clients cannot spend more credits than have been issued
 - **Efficient**: Optimized cryptographic operations for web service integration
 
 ## Server Integration Guide
