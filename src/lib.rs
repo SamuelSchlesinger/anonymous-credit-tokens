@@ -175,7 +175,7 @@ pub fn scalar_to_u32(scalar: &Scalar) -> Option<u32> {
 /// This key should be kept secure, as it allows the owner to create new tokens
 /// and process refunds. The private key includes the corresponding public key
 /// that can be shared with clients.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, Debug, Clone)]
 pub struct PrivateKey {
     /// The secret scalar used in cryptographic operations
     x: Scalar,
