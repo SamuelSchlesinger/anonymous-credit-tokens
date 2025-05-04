@@ -96,6 +96,7 @@ use group::Group;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
@@ -604,6 +605,7 @@ pub struct SpendProof {
     /// A blinded token component
     b_bar: RistrettoPoint,
     /// Commitments for the binary decomposition of the remaining balance
+    #[serde(with = "BigArray")]
     com: [RistrettoPoint; L],
     /// The challenge value for the zero-knowledge proof
     gamma: Scalar,
@@ -622,8 +624,10 @@ pub struct SpendProof {
     /// Response value for the range proof (bit 0, value 1)
     w01: Scalar,
     /// Challenge values for each bit in the range proof
+    #[serde(with = "BigArray")]
     gamma0: [Scalar; L],
     /// Response values for the range proof bit commitments
+    #[serde(with = "BigArray")]
     z: [[Scalar; 2]; L],
     /// Response value for the credit identifier
     k_bar: Scalar,

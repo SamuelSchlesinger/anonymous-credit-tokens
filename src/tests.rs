@@ -1374,3 +1374,263 @@ fn test_credit_token_with_u32_conversion() {
         );
     }
 }
+
+#[test]
+fn test_u32_scalar_conversion_boundary_cases() {
+    // Test boundary cases for u32<->Scalar conversion
+    
+    // Test specific edge values 
+    let edge_values = [
+        0u32,                // Zero
+        1u32,                // Smallest positive
+        0x7FFF_FFFFu32,      // Largest positive (31-bit)
+        0x8000_0000u32,      // 2^31
+        0xFFFF_FFFFu32,      // u32::MAX
+    ];
+    
+    for value in edge_values {
+        let scalar = u32_to_scalar(value);
+        let result = scalar_to_u32(&scalar);
+        
+        assert_eq!(
+            result, 
+            Some(value),
+            "Edge value {} failed round-trip conversion", 
+            value
+        );
+        
+        // Verify the actual scalar bytes to ensure correct representation
+        let bytes = scalar.as_bytes();
+        let expected_bytes = value.to_le_bytes();
+        
+        // Only the first 4 bytes (32 bits) should match the u32 value
+        for i in 0..4 {
+            assert_eq!(
+                bytes[i], 
+                expected_bytes[i],
+                "Byte {} mismatch for value {}", 
+                i, 
+                value
+            );
+        }
+        
+        // The rest of the bytes should be zero
+        for i in 4..32 {
+            assert_eq!(
+                bytes[i], 
+                0, 
+                "Byte {} should be zero for value {}", 
+                i, 
+                value
+            );
+        }
+    }
+    
+    // Test conversion with Scalar values just outside u32 range
+    let just_over_u32_max = Scalar::from(u32::MAX as u64 + 1);
+    let result = scalar_to_u32(&just_over_u32_max);
+    assert_eq!(
+        result, 
+        None,
+        "Value just over u32::MAX should return None"
+    );
+}
+
+#[test]
+fn test_u32_scalar_conversion_arithmetic() {
+    // Test that arithmetic operations maintain correctness after conversion
+    
+    // Test values
+    let a: u32 = 12345;
+    let b: u32 = 67890;
+    
+    // Convert to Scalar
+    let scalar_a = u32_to_scalar(a);
+    let scalar_b = u32_to_scalar(b);
+    
+    // Perform arithmetic in the Scalar domain
+    let sum_scalar = scalar_a + scalar_b;
+    let diff_scalar = scalar_b - scalar_a;
+    let prod_scalar = scalar_a * scalar_b;
+    
+    // Expected results (capped at u32::MAX)
+    let expected_sum = a as u64 + b as u64;
+    let expected_diff = b as u64 - a as u64;
+    let expected_prod = (a as u64) * (b as u64);
+    
+    // Check results
+    if expected_sum <= u32::MAX as u64 {
+        assert_eq!(
+            scalar_to_u32(&sum_scalar),
+            Some(expected_sum as u32),
+            "Sum conversion incorrect"
+        );
+    }
+    
+    if expected_diff <= u32::MAX as u64 {
+        assert_eq!(
+            scalar_to_u32(&diff_scalar),
+            Some(expected_diff as u32),
+            "Difference conversion incorrect"
+        );
+    }
+    
+    if expected_prod <= u32::MAX as u64 {
+        assert_eq!(
+            scalar_to_u32(&prod_scalar),
+            Some(expected_prod as u32),
+            "Product conversion incorrect"
+        );
+    } else {
+        // If the product exceeds u32::MAX, the conversion should return None
+        assert_eq!(
+            scalar_to_u32(&prod_scalar),
+            None,
+            "Product exceeding u32::MAX should return None"
+        );
+    }
+    
+    // Test with smaller numbers to ensure product fits in u32
+    let small_a: u32 = 100;
+    let small_b: u32 = 200;
+    let small_scalar_a = u32_to_scalar(small_a);
+    let small_scalar_b = u32_to_scalar(small_b);
+    let small_prod_scalar = small_scalar_a * small_scalar_b;
+    
+    assert_eq!(
+        scalar_to_u32(&small_prod_scalar),
+        Some(small_a * small_b),
+        "Small product conversion incorrect"
+    );
+}
+
+#[test]
+fn test_u32_scalar_conversion_bit_operations() {
+    // Test bit-level operations on converted values
+    
+    // Test powers of 2 to verify bit positions are preserved
+    for bit_pos in 0..32 {
+        let value = 1u32 << bit_pos;
+        let scalar = u32_to_scalar(value);
+        
+        // Convert back and verify
+        let result = scalar_to_u32(&scalar);
+        assert_eq!(
+            result,
+            Some(value),
+            "Bit position {} (value {}) failed conversion",
+            bit_pos,
+            value
+        );
+        
+        // Examine the bits directly via the bits_of function
+        let bits = bits_of(scalar);
+        
+        // Only the bit at position bit_pos should be set
+        for i in 0..32 {
+            if i == bit_pos {
+                assert_eq!(
+                    bits[i],
+                    Scalar::ONE,
+                    "Bit {} should be set for value {}",
+                    i,
+                    value
+                );
+            } else {
+                assert_eq!(
+                    bits[i],
+                    Scalar::ZERO,
+                    "Bit {} should be unset for value {}",
+                    i,
+                    value
+                );
+            }
+        }
+    }
+    
+    // Test bit patterns that alternate 1s and 0s
+    let alternating_bits1 = 0xAAAAAAAAu32; // 10101010...
+    let alternating_bits2 = 0x55555555u32; // 01010101...
+    
+    let scalar1 = u32_to_scalar(alternating_bits1);
+    let scalar2 = u32_to_scalar(alternating_bits2);
+    
+    assert_eq!(
+        scalar_to_u32(&scalar1),
+        Some(alternating_bits1),
+        "Alternating bits pattern 1 failed conversion"
+    );
+    
+    assert_eq!(
+        scalar_to_u32(&scalar2),
+        Some(alternating_bits2),
+        "Alternating bits pattern 2 failed conversion"
+    );
+    
+    // Verify binary decomposition
+    let bits1 = bits_of(scalar1);
+    let bits2 = bits_of(scalar2);
+    
+    for i in 0..32 {
+        // Pattern 1: bit is 1 at odd positions (0-indexed)
+        assert_eq!(
+            bits1[i],
+            if i % 2 == 1 { Scalar::ONE } else { Scalar::ZERO },
+            "Bit pattern 1 incorrect at position {}",
+            i
+        );
+        
+        // Pattern 2: bit is 1 at even positions (0-indexed)
+        assert_eq!(
+            bits2[i],
+            if i % 2 == 0 { Scalar::ONE } else { Scalar::ZERO },
+            "Bit pattern 2 incorrect at position {}",
+            i
+        );
+    }
+}
+
+#[test]
+fn test_scalar_to_u32_noncanonical_representations() {
+    use curve25519_dalek::constants::BASEPOINT_ORDER;
+    
+    // Test with non-canonical scalar representations
+    
+    // Start with a simple u32 value
+    let value: u32 = 42;
+    let scalar = u32_to_scalar(value);
+    
+    // Create a non-canonical representation by adding the scalar field order
+    let non_canonical = scalar + Scalar::from_bytes_mod_order(BASEPOINT_ORDER.to_bytes());
+    
+    // When we convert back, we should still get the same value due to modular reduction
+    assert_eq!(
+        scalar_to_u32(&non_canonical),
+        Some(value),
+        "Non-canonical representation should convert back to the canonical value"
+    );
+    
+    // Try with a more complex example: value + n*order for various n
+    for n in 1..=5 {
+        let multiple = Scalar::from(n as u64) * Scalar::from_bytes_mod_order(BASEPOINT_ORDER.to_bytes());
+        let non_canonical = scalar + multiple;
+        
+        assert_eq!(
+            scalar_to_u32(&non_canonical),
+            Some(value),
+            "Non-canonical representation with n={} should convert correctly",
+            n
+        );
+    }
+    
+    // Test with negative representations 
+    // (order - value) should be equivalent to -value mod order
+    let negative_rep = Scalar::from_bytes_mod_order(BASEPOINT_ORDER.to_bytes()) - scalar;
+    
+    // This should NOT convert to a u32 value because the representation uses high bits
+    assert_eq!(
+        scalar_to_u32(&negative_rep),
+        None,
+        "Negative representation should not convert to u32"
+    );
+}
