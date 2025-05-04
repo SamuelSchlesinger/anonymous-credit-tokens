@@ -225,7 +225,7 @@ impl PrivateKey {
 ///
 /// This key is shared with clients so they can validate tokens and create spending proofs.
 /// It contains a Ristretto point that serves as the public component of the issuer's keypair.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PublicKey {
     /// The public point derived from the secret scalar in the private key
     w: RistrettoPoint,
