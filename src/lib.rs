@@ -157,7 +157,7 @@ pub fn u128_to_scalar(value: u128) -> Scalar {
 /// assert_eq!(scalar_to_u128(&scalar), Some(42));
 /// ```
 pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
-    // Get the low 64 bits of the scalar
+    // Get the low 128 bits of the scalar
     let bytes = scalar.as_bytes();
     let value = u128::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3],

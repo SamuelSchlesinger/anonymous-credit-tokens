@@ -105,22 +105,22 @@ let public_key = private_key.public();
 ### Scalar Conversion Utilities
 
 ```rust
-use anonymous_credit_tokens::{u32_to_scalar, scalar_to_u32};
+use anonymous_credit_tokens::{u128_to_scalar, scalar_to_u128};
 
-// Convert u32 to Scalar for credit amounts
-let credit_amount_u32 = 500u32;
-let credit_amount_scalar = u32_to_scalar(credit_amount_u32);
+// Convert u128 to Scalar for credit amounts
+let credit_amount_u128 = 500u128;
+let credit_amount_scalar = u128_to_scalar(credit_amount_u128);
 
 // Use the scalar for issuing credits
 // ...
 
-// Convert back to u32 for display or other purposes
-let amount_back = scalar_to_u32(&credit_amount_scalar).unwrap();
-assert_eq!(amount_back, credit_amount_u32);
+// Convert back to u128 for display or other purposes
+let amount_back = scalar_to_uu128(&credit_amount_scalar).unwrap();
+assert_eq!(amount_back, credit_amount_u128);
 
-// Conversion will return None if the scalar is outside u32 range
+// Conversion will return None if the scalar is outside u128 range
 let large_scalar = // ... some large scalar
-let result = scalar_to_u32(&large_scalar); // Returns None if too large
+let result = scalar_to_u128(&large_scalar); // Returns None if too large
 ```
 
 ### Issuing Credits
