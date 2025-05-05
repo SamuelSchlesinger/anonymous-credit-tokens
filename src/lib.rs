@@ -109,30 +109,6 @@ pub const L: usize = 128;
 mod transcript;
 use transcript::Transcript;
 
-/// Converts a u128 value to a Scalar.
-///
-/// This function creates a Scalar representation of the provided u128 value.
-/// The conversion is done safely within the bounds of the scalar field.
-///
-/// # Arguments
-///
-/// * `value` - The u128 value to convert to a Scalar
-///
-/// # Returns
-///
-/// A `Scalar` representing the u128 value
-///
-/// # Example
-///
-/// ```
-/// use anonymous_credit_tokens::u128_to_scalar;
-///
-/// let scalar = u128_to_scalar(42);
-/// ```
-pub fn u128_to_scalar(value: u128) -> Scalar {
-    Scalar::from(value)
-}
-
 /// Attempts to convert a Scalar to a u128 value.
 ///
 /// This function attempts to extract a u128 value from a Scalar. Since Scalars can
@@ -151,9 +127,9 @@ pub fn u128_to_scalar(value: u128) -> Scalar {
 /// # Example
 ///
 /// ```
-/// use anonymous_credit_tokens::{u128_to_scalar, scalar_to_u128};
+/// use anonymous_credit_tokens::scalar_to_u128;
 ///
-/// let scalar = u128_to_scalar(42);
+/// let scalar = 42u128.into();
 /// assert_eq!(scalar_to_u128(&scalar), Some(42));
 /// ```
 pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
@@ -167,7 +143,7 @@ pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
     ]);
 
     // Check if the scalar is within u128 range and the high bits are zero
-    if bytes[4..].iter().all(|&b| b == 0) {
+    if bytes[16..].iter().all(|&b| b == 0) {
         Some(value)
     } else {
         None
