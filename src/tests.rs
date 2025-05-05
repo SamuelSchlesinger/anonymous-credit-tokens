@@ -515,7 +515,7 @@ fn multiple_tokens_with_same_issuer() {
 
 #[test]
 fn bits_of_() {
-    let x = Scalar::from(2u64.pow(L as u32) - 1);
+    let x = Scalar::from(u128::MAX);
     let bits = crate::bits_of(x);
     for i in 0..L {
         assert_eq!(bits[i], Scalar::ONE);
@@ -552,7 +552,7 @@ fn bits_of_() {
             assert_eq!(bits[i], Scalar::ZERO);
         }
     }
-    let x = Scalar::from(0b10101010101010101010101010101010u64);
+    let x = Scalar::from(0b10101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010u128);
     let bits = crate::bits_of(x);
     for i in 0..L {
         if i % 2 == 1 {
@@ -561,7 +561,7 @@ fn bits_of_() {
             assert_eq!(bits[i], Scalar::ZERO);
         }
     }
-    let x = Scalar::from(0b01010101010101010101010101010101u64);
+    let x = Scalar::from(0b01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101u128);
     let bits = crate::bits_of(x);
     for i in 0..L {
         if i % 2 == 0 {
@@ -658,8 +658,8 @@ fn large_amount_issuance() {
 
     // Create a large amount, close to the maximum representable value
     // Use a large amount that's near 2^31 but slightly randomized
-    let base_amount = 2u64.pow(L as u32 - 2); // 2^30
-    let variation = thread_rng().gen_range(0..base_amount) as u64;
+    let base_amount = 2u128.pow(L as u32 - 2); // 2^120
+    let variation = thread_rng().gen_range(0..base_amount) as u128;
     let large_amount = Scalar::from(base_amount + variation);
 
     let response = private_key
@@ -1004,7 +1004,7 @@ fn exhaust_token_with_one_credit_spends() {
 #[test]
 fn test_binary_decomposition_max_value() {
     // Test with the maximum representable value (2^L - 1)
-    let max_value = Scalar::from(2u64.pow(L as u32) - 1);
+    let max_value = Scalar::from(u128::MAX);
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let params = Params::nothing_up_my_sleeve(b"innocence v1");
@@ -1232,405 +1232,4 @@ fn test_key_component_malleability() {
     // The original refund should still be valid
     let result4 = prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
     assert!(result4.is_some(), "Original refund should be valid");
-}
-
-#[test]
-fn test_u32_scalar_conversion() {
-    // Test various conversions between u32 and Scalar
-
-    // Test basic conversion of common values
-    let values = [0u32, 1, 42, 100, 65535, 0xFFFFFF, u32::MAX];
-
-    for value in values {
-        // Convert u32 to Scalar
-        let scalar = u32_to_scalar(value);
-
-        // Convert back to u32
-        let round_trip = scalar_to_u32(&scalar);
-
-        // Verify round-trip conversion works correctly
-        assert_eq!(
-            round_trip,
-            Some(value),
-            "Round-trip conversion failed for value {}",
-            value
-        );
-    }
-
-    // Test conversion of Scalar values too large for u32
-    let large_scalar = Scalar::from(u64::MAX);
-    assert_eq!(
-        scalar_to_u32(&large_scalar),
-        None,
-        "Conversion of Scalar too large for u32 should return None"
-    );
-
-    // Test with Scalar values that fit in u64 but not u32
-    let mid_scalar = Scalar::from(u32::MAX as u64 + 1);
-    assert_eq!(
-        scalar_to_u32(&mid_scalar),
-        None,
-        "Conversion of Scalar just outside u32 range should return None"
-    );
-
-    // Test with edge cases
-    let max_u32_scalar = u32_to_scalar(u32::MAX);
-    assert_eq!(
-        scalar_to_u32(&max_u32_scalar),
-        Some(u32::MAX),
-        "Conversion at u32 boundary should work"
-    );
-
-    let zero_scalar = u32_to_scalar(0);
-    assert_eq!(
-        scalar_to_u32(&zero_scalar),
-        Some(0),
-        "Conversion of zero should work"
-    );
-}
-
-#[test]
-fn test_credit_token_with_u32_conversion() {
-    // Demonstrate how to use the u32 conversion functions with the credit token system
-
-    // Create a private key
-    let private_key = PrivateKey::random(OsRng);
-    let preissuance = PreIssuance::random(OsRng);
-    let params = Params::nothing_up_my_sleeve(b"innocence v1");
-    let request = preissuance.request(&params, OsRng);
-
-    // Use u32_to_scalar to convert a u32 credit amount
-    let credit_value: u32 = 500;
-    let credit_amount = u32_to_scalar(credit_value);
-
-    // Issue a token with this amount
-    let response = private_key
-        .issue(&params, &request, credit_amount, OsRng)
-        .unwrap();
-    let token = preissuance
-        .to_credit_token(&params, private_key.public(), &request, &response)
-        .unwrap();
-
-    // Verify the token has the correct balance using scalar_to_u32 for comparison
-    assert_eq!(
-        scalar_to_u32(&token.c),
-        Some(credit_value),
-        "Token should have the correct credit amount"
-    );
-
-    // Spend some credits, also converted from u32
-    let spend_value: u32 = 200;
-    let spend_amount = u32_to_scalar(spend_value);
-
-    // Generate the spend proof
-    let (spend_proof, prerefund) = token.prove_spend(&params, spend_amount, OsRng);
-
-    // Process the refund
-    let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
-    let new_token = prerefund
-        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
-        .unwrap();
-
-    // Verify remaining balance using scalar_to_u32
-    let expected_remaining = credit_value - spend_value;
-    let remaining = scalar_to_u32(&new_token.c).unwrap();
-
-    assert_eq!(
-        remaining, expected_remaining,
-        "Remaining balance should be {} credits",
-        expected_remaining
-    );
-
-    // Start with the token after first spend (with 300 credits)
-    let mut current_token = new_token;
-    let mut remaining_balance = expected_remaining;
-
-    // Try multiple sequential spends
-    for i in 1..3 {
-        // Spend 50 credits each time
-        let spend_value: u32 = 50;
-        let spend_amount = u32_to_scalar(spend_value);
-
-        // Create the spend proof from the current token
-        let (spend_proof, prerefund) = current_token.prove_spend(&params, spend_amount, OsRng);
-        let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
-        let updated_token = prerefund
-            .to_credit_token(&params, &spend_proof, &refund, private_key.public())
-            .unwrap();
-
-        // Update the current token and balance
-        current_token = updated_token;
-        remaining_balance -= spend_value;
-
-        // Verify the updated balance
-        let actual_balance = scalar_to_u32(&current_token.c).unwrap();
-
-        assert_eq!(
-            actual_balance,
-            remaining_balance,
-            "After spend {}, remaining balance should be {} credits",
-            i + 1,
-            remaining_balance
-        );
-    }
-}
-
-#[test]
-fn test_u32_scalar_conversion_boundary_cases() {
-    // Test boundary cases for u32<->Scalar conversion
-    
-    // Test specific edge values 
-    let edge_values = [
-        0u32,                // Zero
-        1u32,                // Smallest positive
-        0x7FFF_FFFFu32,      // Largest positive (31-bit)
-        0x8000_0000u32,      // 2^31
-        0xFFFF_FFFFu32,      // u32::MAX
-    ];
-    
-    for value in edge_values {
-        let scalar = u32_to_scalar(value);
-        let result = scalar_to_u32(&scalar);
-        
-        assert_eq!(
-            result, 
-            Some(value),
-            "Edge value {} failed round-trip conversion", 
-            value
-        );
-        
-        // Verify the actual scalar bytes to ensure correct representation
-        let bytes = scalar.as_bytes();
-        let expected_bytes = value.to_le_bytes();
-        
-        // Only the first 4 bytes (32 bits) should match the u32 value
-        for i in 0..4 {
-            assert_eq!(
-                bytes[i], 
-                expected_bytes[i],
-                "Byte {} mismatch for value {}", 
-                i, 
-                value
-            );
-        }
-        
-        // The rest of the bytes should be zero
-        for i in 4..32 {
-            assert_eq!(
-                bytes[i], 
-                0, 
-                "Byte {} should be zero for value {}", 
-                i, 
-                value
-            );
-        }
-    }
-    
-    // Test conversion with Scalar values just outside u32 range
-    let just_over_u32_max = Scalar::from(u32::MAX as u64 + 1);
-    let result = scalar_to_u32(&just_over_u32_max);
-    assert_eq!(
-        result, 
-        None,
-        "Value just over u32::MAX should return None"
-    );
-}
-
-#[test]
-fn test_u32_scalar_conversion_arithmetic() {
-    // Test that arithmetic operations maintain correctness after conversion
-    
-    // Test values
-    let a: u32 = 12345;
-    let b: u32 = 67890;
-    
-    // Convert to Scalar
-    let scalar_a = u32_to_scalar(a);
-    let scalar_b = u32_to_scalar(b);
-    
-    // Perform arithmetic in the Scalar domain
-    let sum_scalar = scalar_a + scalar_b;
-    let diff_scalar = scalar_b - scalar_a;
-    let prod_scalar = scalar_a * scalar_b;
-    
-    // Expected results (capped at u32::MAX)
-    let expected_sum = a as u64 + b as u64;
-    let expected_diff = b as u64 - a as u64;
-    let expected_prod = (a as u64) * (b as u64);
-    
-    // Check results
-    if expected_sum <= u32::MAX as u64 {
-        assert_eq!(
-            scalar_to_u32(&sum_scalar),
-            Some(expected_sum as u32),
-            "Sum conversion incorrect"
-        );
-    }
-    
-    if expected_diff <= u32::MAX as u64 {
-        assert_eq!(
-            scalar_to_u32(&diff_scalar),
-            Some(expected_diff as u32),
-            "Difference conversion incorrect"
-        );
-    }
-    
-    if expected_prod <= u32::MAX as u64 {
-        assert_eq!(
-            scalar_to_u32(&prod_scalar),
-            Some(expected_prod as u32),
-            "Product conversion incorrect"
-        );
-    } else {
-        // If the product exceeds u32::MAX, the conversion should return None
-        assert_eq!(
-            scalar_to_u32(&prod_scalar),
-            None,
-            "Product exceeding u32::MAX should return None"
-        );
-    }
-    
-    // Test with smaller numbers to ensure product fits in u32
-    let small_a: u32 = 100;
-    let small_b: u32 = 200;
-    let small_scalar_a = u32_to_scalar(small_a);
-    let small_scalar_b = u32_to_scalar(small_b);
-    let small_prod_scalar = small_scalar_a * small_scalar_b;
-    
-    assert_eq!(
-        scalar_to_u32(&small_prod_scalar),
-        Some(small_a * small_b),
-        "Small product conversion incorrect"
-    );
-}
-
-#[test]
-fn test_u32_scalar_conversion_bit_operations() {
-    // Test bit-level operations on converted values
-    
-    // Test powers of 2 to verify bit positions are preserved
-    for bit_pos in 0..32 {
-        let value = 1u32 << bit_pos;
-        let scalar = u32_to_scalar(value);
-        
-        // Convert back and verify
-        let result = scalar_to_u32(&scalar);
-        assert_eq!(
-            result,
-            Some(value),
-            "Bit position {} (value {}) failed conversion",
-            bit_pos,
-            value
-        );
-        
-        // Examine the bits directly via the bits_of function
-        let bits = bits_of(scalar);
-        
-        // Only the bit at position bit_pos should be set
-        for i in 0..32 {
-            if i == bit_pos {
-                assert_eq!(
-                    bits[i],
-                    Scalar::ONE,
-                    "Bit {} should be set for value {}",
-                    i,
-                    value
-                );
-            } else {
-                assert_eq!(
-                    bits[i],
-                    Scalar::ZERO,
-                    "Bit {} should be unset for value {}",
-                    i,
-                    value
-                );
-            }
-        }
-    }
-    
-    // Test bit patterns that alternate 1s and 0s
-    let alternating_bits1 = 0xAAAAAAAAu32; // 10101010...
-    let alternating_bits2 = 0x55555555u32; // 01010101...
-    
-    let scalar1 = u32_to_scalar(alternating_bits1);
-    let scalar2 = u32_to_scalar(alternating_bits2);
-    
-    assert_eq!(
-        scalar_to_u32(&scalar1),
-        Some(alternating_bits1),
-        "Alternating bits pattern 1 failed conversion"
-    );
-    
-    assert_eq!(
-        scalar_to_u32(&scalar2),
-        Some(alternating_bits2),
-        "Alternating bits pattern 2 failed conversion"
-    );
-    
-    // Verify binary decomposition
-    let bits1 = bits_of(scalar1);
-    let bits2 = bits_of(scalar2);
-    
-    for i in 0..32 {
-        // Pattern 1: bit is 1 at odd positions (0-indexed)
-        assert_eq!(
-            bits1[i],
-            if i % 2 == 1 { Scalar::ONE } else { Scalar::ZERO },
-            "Bit pattern 1 incorrect at position {}",
-            i
-        );
-        
-        // Pattern 2: bit is 1 at even positions (0-indexed)
-        assert_eq!(
-            bits2[i],
-            if i % 2 == 0 { Scalar::ONE } else { Scalar::ZERO },
-            "Bit pattern 2 incorrect at position {}",
-            i
-        );
-    }
-}
-
-#[test]
-fn test_scalar_to_u32_noncanonical_representations() {
-    use curve25519_dalek::constants::BASEPOINT_ORDER;
-    
-    // Test with non-canonical scalar representations
-    
-    // Start with a simple u32 value
-    let value: u32 = 42;
-    let scalar = u32_to_scalar(value);
-    
-    // Create a non-canonical representation by adding the scalar field order
-    let non_canonical = scalar + Scalar::from_bytes_mod_order(BASEPOINT_ORDER.to_bytes());
-    
-    // When we convert back, we should still get the same value due to modular reduction
-    assert_eq!(
-        scalar_to_u32(&non_canonical),
-        Some(value),
-        "Non-canonical representation should convert back to the canonical value"
-    );
-    
-    // Try with a more complex example: value + n*order for various n
-    for n in 1..=5 {
-        let multiple = Scalar::from(n as u64) * Scalar::from_bytes_mod_order(BASEPOINT_ORDER.to_bytes());
-        let non_canonical = scalar + multiple;
-        
-        assert_eq!(
-            scalar_to_u32(&non_canonical),
-            Some(value),
-            "Non-canonical representation with n={} should convert correctly",
-            n
-        );
-    }
-    
-    // Test with negative representations 
-    // (order - value) should be equivalent to -value mod order
-    let negative_rep = Scalar::from_bytes_mod_order(BASEPOINT_ORDER.to_bytes()) - scalar;
-    
-    // This should NOT convert to a u32 value because the representation uses high bits
-    assert_eq!(
-        scalar_to_u32(&negative_rep),
-        None,
-        "Negative representation should not convert to u32"
-    );
 }

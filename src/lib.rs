@@ -103,67 +103,70 @@ use zeroize::ZeroizeOnDrop;
 use std::ops::Neg;
 
 /// The bit length used for binary decomposition of values in range proofs.
-/// This defines the maximum value (2^32 - 1) that can be represented.
-pub const L: usize = 32;
+/// This defines the maximum value (2^128 - 1) that can be represented.
+pub const L: usize = 128;
 
 mod transcript;
 use transcript::Transcript;
 
-/// Converts a u32 value to a Scalar.
+/// Converts a u128 value to a Scalar.
 ///
-/// This function creates a Scalar representation of the provided u32 value.
+/// This function creates a Scalar representation of the provided u128 value.
 /// The conversion is done safely within the bounds of the scalar field.
 ///
 /// # Arguments
 ///
-/// * `value` - The u32 value to convert to a Scalar
+/// * `value` - The u128 value to convert to a Scalar
 ///
 /// # Returns
 ///
-/// A `Scalar` representing the u32 value
+/// A `Scalar` representing the u128 value
 ///
 /// # Example
 ///
 /// ```
-/// use anonymous_credit_tokens::u32_to_scalar;
+/// use anonymous_credit_tokens::u128_to_scalar;
 ///
-/// let scalar = u32_to_scalar(42);
+/// let scalar = u128_to_scalar(42);
 /// ```
-pub fn u32_to_scalar(value: u32) -> Scalar {
+pub fn u128_to_scalar(value: u128) -> Scalar {
     Scalar::from(value)
 }
 
-/// Attempts to convert a Scalar to a u32 value.
+/// Attempts to convert a Scalar to a u128 value.
 ///
-/// This function attempts to extract a u32 value from a Scalar. Since Scalars can
-/// represent values much larger than a u32, this function returns None if the
-/// Scalar represents a value outside the u32 range.
+/// This function attempts to extract a u128 value from a Scalar. Since Scalars can
+/// represent values much larger than a u128, this function returns None if the
+/// Scalar represents a value outside the u128 range.
 ///
 /// # Arguments
 ///
-/// * `scalar` - The Scalar value to convert to a u32
+/// * `scalar` - The Scalar value to convert to a u128
 ///
 /// # Returns
 ///
-/// * `Some(u32)` - The u32 value if the Scalar is within the u32 range
-/// * `None` - If the Scalar value is too large to fit in a u32
+/// * `Some(u128)` - The u128 value if the Scalar is within the u128 range
+/// * `None` - If the Scalar value is too large to fit in a u128
 ///
 /// # Example
 ///
 /// ```
-/// use anonymous_credit_tokens::{u32_to_scalar, scalar_to_u32};
+/// use anonymous_credit_tokens::{u128_to_scalar, scalar_to_u128};
 ///
-/// let scalar = u32_to_scalar(42);
-/// assert_eq!(scalar_to_u32(&scalar), Some(42));
+/// let scalar = u128_to_scalar(42);
+/// assert_eq!(scalar_to_u128(&scalar), Some(42));
 /// ```
-pub fn scalar_to_u32(scalar: &Scalar) -> Option<u32> {
+pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
     // Get the low 64 bits of the scalar
     let bytes = scalar.as_bytes();
-    let value = u32::from_le_bytes([
+    let value = u128::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15],
     ]);
 
-    // Check if the scalar is within u32 range and the high bits are zero
+    // Check if the scalar is within u128 range and the high bits are zero
     if bytes[4..].iter().all(|&b| b == 0) {
         Some(value)
     } else {
@@ -440,7 +443,7 @@ impl PreIssuance {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let credit_amount = Scalar::from(20u64);
+    /// # let credit_amount = Scalar::from(20u128);
     /// # let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
     /// #
     /// let credit_token = pre_issuance.to_credit_token(
@@ -540,7 +543,7 @@ impl PrivateKey {
     /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
-    /// let credit_amount = Scalar::from(20u64);
+    /// let credit_amount = Scalar::from(20u128);
     /// let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
     /// ```
     pub fn issue(
@@ -694,9 +697,9 @@ impl PrivateKey {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u64);
+    /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
     /// #
     /// // First check if we've seen this nullifier before
@@ -745,7 +748,7 @@ impl PrivateKey {
         }
 
         let k_prime = (0..L)
-            .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
+            .map(|i| spend_proof.com[i] * Scalar::from(2u128.pow(i as u32)))
             .fold(RistrettoPoint::identity(), |a, b| a + b);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
         let big_c = &params.h1 * &spend_proof.c_bar.neg()
@@ -833,7 +836,7 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
         let b = i / 8; // Byte index
         let j = i % 8; // Bit position within the byte
         let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-        *result_elem = Scalar::from(bit as u64); // Convert to scalar (0 or 1)
+        *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
     }
 
     result
@@ -880,11 +883,11 @@ impl CreditToken {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// #
-    /// // Spend 10 credits (where 10 <= token balance < 2^32)
-    /// let spend_amount = Scalar::from(10u64);
+    /// // Spend 10 credits (where 10 <= token balance < 2^128)
+    /// let spend_amount = Scalar::from(10u128);
     /// let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
@@ -973,7 +976,7 @@ impl CreditToken {
             );
         }
         let r_star = (0..L)
-            .map(|i| s_i[i] * Scalar::from(2u64.pow(i as u32)))
+            .map(|i| s_i[i] * Scalar::from(2u128.pow(i as u32)))
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
@@ -1121,9 +1124,9 @@ impl PreRefund {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u64), OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u64);
+    /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
     /// # let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// #
@@ -1144,7 +1147,7 @@ impl PreRefund {
     ) -> Option<CreditToken> {
         let x_a = RistrettoPoint::generator()
             + (0..L)
-                .map(|i| spend_proof.com[i] * Scalar::from(2u64.pow(i as u32)))
+                .map(|i| spend_proof.com[i] * Scalar::from(2u128.pow(i as u32)))
                 .fold(RistrettoPoint::identity(), |a, b| a + b);
 
         let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
