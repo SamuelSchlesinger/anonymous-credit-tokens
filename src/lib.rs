@@ -819,6 +819,11 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
 }
 
 impl CreditToken {
+    /// Returns the nullifier contained within this token.
+    pub fn nullifier(&self) -> Scalar {
+        self.k
+    }
+
     /// Returns the number of credits contained within this token.
     pub fn credits(&self) -> Scalar {
         self.c
