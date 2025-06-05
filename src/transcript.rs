@@ -28,7 +28,7 @@ use curve25519_dalek::Scalar;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
-const PROTOCOL_LABEL: &[u8] = b"curve25519-ristretto anonymous-credentials v0.2.0";
+const PROTOCOL_LABEL: &[u8] = b"curve25519-ristretto anonymous-credentials v1.0";
 
 /// A transcript that accumulates cryptographic protocol messages and generates challenges.
 ///
