@@ -132,7 +132,7 @@ use rand_core::OsRng;
 
 // Client-side: Prepare for issuance
 let preissuance = PreIssuance::random(OsRng);
-let params = Params::nothing_up_my_sleeve(b"innocence v1");
+let params = Params::new("example-org", "payment-api", "production", "2024-01-15");
 let issuance_request = preissuance.request(&params, OsRng);
 
 // Server-side: Process the request (credit amount: 20)
@@ -179,7 +179,7 @@ use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
 // 1. System Initialization
-let params = Params::nothing_up_my_sleeve(b"innocence v1");
+let params = Params::new("example-org", "payment-api", "production", "2024-01-15");
 let private_key = PrivateKey::random(OsRng);
 
 // 2. User Registration/Credit Issuance

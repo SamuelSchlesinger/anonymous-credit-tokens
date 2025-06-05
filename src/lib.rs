@@ -214,7 +214,8 @@ pub struct PublicKey {
 /// System parameters that define the cryptographic setup for the anonymous credentials scheme.
 ///
 /// These parameters are used in various cryptographic operations throughout the protocol.
-/// By default, they are deterministically generated from a fixed seed.
+/// They must be generated deterministically from a domain separator that uniquely identifies
+/// your deployment.
 #[derive(Clone)]
 pub struct Params {
     /// First generator point used in commitment schemes
@@ -245,15 +246,44 @@ impl Params {
         }
     }
 
-    /// Creates the system parameters using a deterministic seed.
+    /// Creates system parameters using a structured domain separator.
     ///
-    /// This ensures that all parties use the same parameters without requiring
-    /// a trusted setup ceremony. The seed, which should be innocuous such that it
-    /// would be very difficult to imagine it being selected maliciously, is hashed with BLAKE3 to
-    /// create a deterministic random number generator. This seed should be scoped to your
-    /// specific deployment of Anonymous Credit Tokens.
-    pub fn nothing_up_my_sleeve(non_sneaky_input: &[u8]) -> Self {
-        let rng = ChaCha20Rng::from_seed(*blake3::hash(non_sneaky_input).as_bytes());
+    /// This method creates deterministic parameters based on deployment-specific
+    /// information, ensuring cryptographic isolation between different services.
+    ///
+    /// # Arguments
+    ///
+    /// * `organization` - Unique identifier for the organization (e.g., "example-corp")
+    /// * `service` - The specific service or application name (e.g., "payment-api")
+    /// * `deployment_id` - The deployment environment (e.g., "production", "staging")
+    /// * `version` - Version date in YYYY-MM-DD format (e.g., "2024-01-15")
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anonymous_credit_tokens::Params;
+    ///
+    /// let params = Params::new(
+    ///     "example-corp",
+    ///     "payment-api",
+    ///     "production",
+    ///     "2024-01-15"
+    /// );
+    /// ```
+    pub fn new(
+        organization: &str,
+        service: &str,
+        deployment_id: &str,
+        version: &str,
+    ) -> Self {
+        // Construct the structured domain separator
+        let domain_separator = format!(
+            "ACT-v1:{}:{}:{}:{}",
+            organization, service, deployment_id, version
+        );
+        
+        // Hash the domain separator to create a seed
+        let rng = ChaCha20Rng::from_seed(*blake3::hash(domain_separator.as_bytes()).as_bytes());
         Self::random(rng)
     }
 }
@@ -361,7 +391,7 @@ impl PreIssuance {
     /// use rand_core::OsRng;
     ///
     /// let pre_issuance = PreIssuance::random(OsRng);
-    /// let params = Params::nothing_up_my_sleeve(b"innocence v1");
+    /// let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// let request = pre_issuance.request(&params, OsRng);
     /// ```
     pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
