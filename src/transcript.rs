@@ -58,18 +58,10 @@ impl Transcript {
             hasher: blake3::Hasher::new(),
         };
         t.update(PROTOCOL_LABEL);
-        t.update(
-            &bincode::serde::encode_to_vec(params.h1.basepoint(), bincode::config::standard())
-                .unwrap(),
-        );
-        t.update(
-            &bincode::serde::encode_to_vec(params.h2.basepoint(), bincode::config::standard())
-                .unwrap(),
-        );
-        t.update(
-            &bincode::serde::encode_to_vec(params.h3.basepoint(), bincode::config::standard())
-                .unwrap(),
-        );
+        // Add the parameters' base points to the transcript
+        t.update(&params.h1.basepoint().compress().as_bytes()[..]);
+        t.update(&params.h2.basepoint().compress().as_bytes()[..]);
+        t.update(&params.h3.basepoint().compress().as_bytes()[..]);
         t.update(label);
         t
     }
@@ -104,7 +96,7 @@ impl Transcript {
     ///
     /// * `element` - A reference to a `RistrettoPoint` to add to the transcript
     pub(crate) fn add_element(&mut self, element: &RistrettoPoint) {
-        self.update(&bincode::serde::encode_to_vec(element, bincode::config::standard()).unwrap());
+        self.update(&element.compress().as_bytes()[..]);
     }
 
     /// Adds multiple Ristretto points to the transcript.
@@ -124,7 +116,7 @@ impl Transcript {
     ///
     /// * `scalar` - A reference to a `Scalar` to add to the transcript
     pub(crate) fn add_scalar(&mut self, scalar: &Scalar) {
-        self.update(&bincode::serde::encode_to_vec(scalar, bincode::config::standard()).unwrap());
+        self.update(&scalar.as_bytes()[..]);
     }
 
     /// Adds multiple Ristretto points to the transcript.

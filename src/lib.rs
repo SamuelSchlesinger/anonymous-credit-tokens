@@ -109,6 +109,8 @@ pub const L: usize = 128;
 mod transcript;
 use transcript::Transcript;
 
+pub mod cbor;
+
 /// Attempts to convert a Scalar to a u128 value.
 ///
 /// This function attempts to extract a u128 value from a Scalar. Since Scalars can
@@ -447,7 +449,7 @@ impl PreIssuance {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
+    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let credit_amount = Scalar::from(20u128);
     /// # let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
@@ -545,7 +547,7 @@ impl PrivateKey {
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
+    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
@@ -701,7 +703,7 @@ impl PrivateKey {
     /// # // Setup (normally these would come from previous steps)
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
+    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
@@ -892,7 +894,7 @@ impl CreditToken {
     /// # // Create a valid credit token with 20 credits
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
+    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
@@ -1133,7 +1135,7 @@ impl PreRefund {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::nothing_up_my_sleeve(b"innocence v1");
+    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
