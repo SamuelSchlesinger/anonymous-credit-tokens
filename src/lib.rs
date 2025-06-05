@@ -691,7 +691,7 @@ impl PrivateKey {
         spend_proof: &SpendProof,
         mut rng: impl CryptoRngCore,
     ) -> Option<Refund> {
-        if spend_proof.a_prime == RistrettoPoint::generator() {
+        if spend_proof.a_prime == RistrettoPoint::identity() {
             return None;
         }
 
