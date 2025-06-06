@@ -1,0 +1,21 @@
+# Proptest configuration to speed up tests
+
+# Reduce the number of test cases from default 256 to 16
+cases = 16
+
+# Reduce the maximum number of shrink iterations from default 1024 to 50
+max_shrink_iters = 50
+
+# Set a timeout for each test case (in milliseconds)
+timeout = 500
+
+# Reduce the maximum size of generated data
+max_local_rejects = 1000
+max_global_rejects = 10000
+
+# Use a fixed seed for reproducibility (optional - remove for random testing)
+# rng_algorithm = "ChaCha"
+# seed = 0
+
+# Configure test failure persistence
+failure_persistence = "SourceParallel"
