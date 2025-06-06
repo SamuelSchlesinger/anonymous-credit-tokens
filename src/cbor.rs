@@ -18,7 +18,7 @@
 //! All protocol messages are encoded using deterministic CBOR (RFC 8949) for
 //! interoperability.
 
-use crate::{IssuanceRequest, IssuanceResponse, SpendProof, Refund, L};
+use crate::{IssuanceRequest, IssuanceResponse, SpendProof, Refund, L, PrivateKey, PublicKey, PreIssuance, CreditToken, PreRefund};
 use ciborium::value::Value;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 
@@ -442,6 +442,232 @@ impl Refund {
     }
 }
 
+/// CBOR encoding for PrivateKey
+impl PrivateKey {
+    /// Encode to CBOR according to format:
+    /// ```text
+    /// PrivateKey = {
+    ///     1: bstr,  ; x (scalar, 32 bytes)
+    ///     2: bstr   ; w (public key point, 32 bytes)
+    /// }
+    /// ```
+    pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
+        let mut map = Vec::new();
+        map.push((Value::Integer(1.into()), encode_scalar(&self.x)));
+        map.push((Value::Integer(2.into()), encode_point(&self.public.w)));
+        
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&Value::Map(map), &mut bytes)?;
+        Ok(bytes)
+    }
+    
+    /// Decode from CBOR
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
+        let value: Value = ciborium::from_reader(bytes)?;
+        
+        match value {
+            Value::Map(map) => {
+                let mut x = None;
+                let mut w = None;
+                
+                for (k, v) in map {
+                    match k {
+                        Value::Integer(i) if i == 1.into() => x = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 2.into() => w = Some(decode_point(&v)?),
+                        _ => {}
+                    }
+                }
+                
+                Ok(PrivateKey {
+                    x: x.ok_or(CborError::InvalidStructure("missing field 1 (x)"))?,
+                    public: PublicKey {
+                        w: w.ok_or(CborError::InvalidStructure("missing field 2 (w)"))?,
+                    },
+                })
+            }
+            _ => Err(CborError::InvalidStructure("expected CBOR map")),
+        }
+    }
+}
+
+/// CBOR encoding for PublicKey
+impl PublicKey {
+    /// Encode to CBOR according to format:
+    /// ```text
+    /// PublicKey = bstr  ; w (compressed Ristretto point, 32 bytes)
+    /// ```
+    pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&encode_point(&self.w), &mut bytes)?;
+        Ok(bytes)
+    }
+    
+    /// Decode from CBOR
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
+        let value: Value = ciborium::from_reader(bytes)?;
+        let w = decode_point(&value)?;
+        Ok(PublicKey { w })
+    }
+}
+
+/// CBOR encoding for PreIssuance
+impl PreIssuance {
+    /// Encode to CBOR according to format:
+    /// ```text
+    /// PreIssuance = {
+    ///     1: bstr,  ; r (scalar, 32 bytes)
+    ///     2: bstr   ; k (scalar, 32 bytes)
+    /// }
+    /// ```
+    pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
+        let mut map = Vec::new();
+        map.push((Value::Integer(1.into()), encode_scalar(&self.r)));
+        map.push((Value::Integer(2.into()), encode_scalar(&self.k)));
+        
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&Value::Map(map), &mut bytes)?;
+        Ok(bytes)
+    }
+    
+    /// Decode from CBOR
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
+        let value: Value = ciborium::from_reader(bytes)?;
+        
+        match value {
+            Value::Map(map) => {
+                let mut r = None;
+                let mut k = None;
+                
+                for (key, val) in map {
+                    match key {
+                        Value::Integer(i) if i == 1.into() => r = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 2.into() => k = Some(decode_scalar(&val)?),
+                        _ => {}
+                    }
+                }
+                
+                Ok(PreIssuance {
+                    r: r.ok_or(CborError::InvalidStructure("missing field 1 (r)"))?,
+                    k: k.ok_or(CborError::InvalidStructure("missing field 2 (k)"))?,
+                })
+            }
+            _ => Err(CborError::InvalidStructure("expected CBOR map")),
+        }
+    }
+}
+
+/// CBOR encoding for CreditToken
+impl CreditToken {
+    /// Encode to CBOR according to format:
+    /// ```text
+    /// CreditToken = {
+    ///     1: bstr,  ; a (compressed Ristretto point, 32 bytes)
+    ///     2: bstr,  ; e (scalar, 32 bytes)
+    ///     3: bstr,  ; k (scalar, 32 bytes)
+    ///     4: bstr,  ; r (scalar, 32 bytes)
+    ///     5: bstr   ; c (scalar, 32 bytes)
+    /// }
+    /// ```
+    pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
+        let mut map = Vec::new();
+        map.push((Value::Integer(1.into()), encode_point(&self.a)));
+        map.push((Value::Integer(2.into()), encode_scalar(&self.e)));
+        map.push((Value::Integer(3.into()), encode_scalar(&self.k)));
+        map.push((Value::Integer(4.into()), encode_scalar(&self.r)));
+        map.push((Value::Integer(5.into()), encode_scalar(&self.c)));
+        
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&Value::Map(map), &mut bytes)?;
+        Ok(bytes)
+    }
+    
+    /// Decode from CBOR
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
+        let value: Value = ciborium::from_reader(bytes)?;
+        
+        match value {
+            Value::Map(map) => {
+                let mut a = None;
+                let mut e = None;
+                let mut k = None;
+                let mut r = None;
+                let mut c = None;
+                
+                for (key, val) in map {
+                    match key {
+                        Value::Integer(i) if i == 1.into() => a = Some(decode_point(&val)?),
+                        Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 3.into() => k = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 4.into() => r = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 5.into() => c = Some(decode_scalar(&val)?),
+                        _ => {}
+                    }
+                }
+                
+                Ok(CreditToken {
+                    a: a.ok_or(CborError::InvalidStructure("missing field 1 (a)"))?,
+                    e: e.ok_or(CborError::InvalidStructure("missing field 2 (e)"))?,
+                    k: k.ok_or(CborError::InvalidStructure("missing field 3 (k)"))?,
+                    r: r.ok_or(CborError::InvalidStructure("missing field 4 (r)"))?,
+                    c: c.ok_or(CborError::InvalidStructure("missing field 5 (c)"))?,
+                })
+            }
+            _ => Err(CborError::InvalidStructure("expected CBOR map")),
+        }
+    }
+}
+
+/// CBOR encoding for PreRefund
+impl PreRefund {
+    /// Encode to CBOR according to format:
+    /// ```text
+    /// PreRefund = {
+    ///     1: bstr,  ; r (scalar, 32 bytes)
+    ///     2: bstr,  ; k (scalar, 32 bytes)
+    ///     3: bstr   ; m (scalar, 32 bytes)
+    /// }
+    /// ```
+    pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
+        let mut map = Vec::new();
+        map.push((Value::Integer(1.into()), encode_scalar(&self.r)));
+        map.push((Value::Integer(2.into()), encode_scalar(&self.k)));
+        map.push((Value::Integer(3.into()), encode_scalar(&self.m)));
+        
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&Value::Map(map), &mut bytes)?;
+        Ok(bytes)
+    }
+    
+    /// Decode from CBOR
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
+        let value: Value = ciborium::from_reader(bytes)?;
+        
+        match value {
+            Value::Map(map) => {
+                let mut r = None;
+                let mut k = None;
+                let mut m = None;
+                
+                for (key, val) in map {
+                    match key {
+                        Value::Integer(i) if i == 1.into() => r = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 2.into() => k = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 3.into() => m = Some(decode_scalar(&val)?),
+                        _ => {}
+                    }
+                }
+                
+                Ok(PreRefund {
+                    r: r.ok_or(CborError::InvalidStructure("missing field 1 (r)"))?,
+                    k: k.ok_or(CborError::InvalidStructure("missing field 2 (k)"))?,
+                    m: m.ok_or(CborError::InvalidStructure("missing field 3 (m)"))?,
+                })
+            }
+            _ => Err(CborError::InvalidStructure("expected CBOR map")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +743,82 @@ mod tests {
         assert_eq!(refund.e, decoded.e);
         assert_eq!(refund.gamma, decoded.gamma);
         assert_eq!(refund.z, decoded.z);
+    }
+    
+    #[test]
+    fn test_private_key_cbor_roundtrip() {
+        let x = Scalar::random(&mut OsRng);
+        let public = PublicKey {
+            w: RistrettoPoint::random(&mut OsRng),
+        };
+        
+        let private_key = PrivateKey { x, public };
+        
+        let bytes = private_key.to_cbor().unwrap();
+        let decoded = PrivateKey::from_cbor(&bytes).unwrap();
+        
+        assert_eq!(private_key.x, decoded.x);
+        assert_eq!(private_key.public.w, decoded.public.w);
+    }
+    
+    #[test]
+    fn test_public_key_cbor_roundtrip() {
+        let w = RistrettoPoint::random(&mut OsRng);
+        let public_key = PublicKey { w };
+        
+        let bytes = public_key.to_cbor().unwrap();
+        let decoded = PublicKey::from_cbor(&bytes).unwrap();
+        
+        assert_eq!(public_key.w, decoded.w);
+    }
+    
+    #[test]
+    fn test_pre_issuance_cbor_roundtrip() {
+        let r = Scalar::random(&mut OsRng);
+        let k = Scalar::random(&mut OsRng);
+        
+        let pre_issuance = PreIssuance { r, k };
+        
+        let bytes = pre_issuance.to_cbor().unwrap();
+        let decoded = PreIssuance::from_cbor(&bytes).unwrap();
+        
+        assert_eq!(pre_issuance.r, decoded.r);
+        assert_eq!(pre_issuance.k, decoded.k);
+    }
+    
+    #[test]
+    fn test_credit_token_cbor_roundtrip() {
+        let a = RistrettoPoint::random(&mut OsRng);
+        let e = Scalar::random(&mut OsRng);
+        let k = Scalar::random(&mut OsRng);
+        let r = Scalar::random(&mut OsRng);
+        let c = Scalar::random(&mut OsRng);
+        
+        let token = CreditToken { a, e, k, r, c };
+        
+        let bytes = token.to_cbor().unwrap();
+        let decoded = CreditToken::from_cbor(&bytes).unwrap();
+        
+        assert_eq!(token.a, decoded.a);
+        assert_eq!(token.e, decoded.e);
+        assert_eq!(token.k, decoded.k);
+        assert_eq!(token.r, decoded.r);
+        assert_eq!(token.c, decoded.c);
+    }
+    
+    #[test]
+    fn test_pre_refund_cbor_roundtrip() {
+        let r = Scalar::random(&mut OsRng);
+        let k = Scalar::random(&mut OsRng);
+        let m = Scalar::random(&mut OsRng);
+        
+        let pre_refund = PreRefund { r, k, m };
+        
+        let bytes = pre_refund.to_cbor().unwrap();
+        let decoded = PreRefund::from_cbor(&bytes).unwrap();
+        
+        assert_eq!(pre_refund.r, decoded.r);
+        assert_eq!(pre_refund.k, decoded.k);
+        assert_eq!(pre_refund.m, decoded.m);
     }
 }
