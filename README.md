@@ -328,7 +328,10 @@ See the [LICENSE](LICENSE) file for details.
 
 ## References
 
-The implementation is based on the Anonymous Credit Scheme designed by Jonathan Katz and Samuel Schlesinger. For more details, see the [design document](docs/design.pdf).
+The implementation is based on the Anonymous Credit Scheme designed by Jonathan Katz and Samuel Schlesinger. For more details:
+
+- [IETF Draft Specification](https://samuelschlesinger.github.io/ietf-anonymous-credit-tokens/draft-schlesinger-cfrg-act.html) - The formal specification being developed for standardization
+- [Design Document](docs/design.pdf) - The original design document
 
 ## Disclaimer
 

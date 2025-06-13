@@ -93,8 +93,7 @@
 
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
 use group::Group;
-use rand_chacha::ChaCha20Rng;
-use rand_core::{CryptoRngCore, SeedableRng};
+use rand_core::CryptoRngCore;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
@@ -303,9 +302,62 @@ impl Params {
             organization, service, deployment_id, version
         );
         
-        // Hash the domain separator to create a seed
-        let rng = ChaCha20Rng::from_seed(*blake3::hash(domain_separator.as_bytes()).as_bytes());
-        Self::random(rng)
+        // Hash the domain separator with length prefix to create a seed
+        let mut hasher = blake3::Hasher::new();
+        let domain_separator_bytes = domain_separator.as_bytes();
+        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
+        hasher.update(domain_separator_bytes);
+        let seed = hasher.finalize();
+        
+        // Generate H1, H2, H3 using counter-based approach
+        let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
+        let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
+        let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
+        
+        Params {
+            h1: RistrettoBasepointTable::create(&h1),
+            h2: RistrettoBasepointTable::create(&h2),
+            h3: RistrettoBasepointTable::create(&h3),
+        }
+    }
+    
+    /// Hash to Ristretto255 point using BLAKE3 with counter.
+    ///
+    /// This implements a deterministic hash-to-curve function that maps
+    /// the domain separator, seed, and counter to a Ristretto255 point.
+    /// All inputs are length-prefixed to ensure domain separation.
+    ///
+    /// # Arguments
+    ///
+    /// * `domain_separator` - The domain separator string
+    /// * `seed` - The seed bytes (typically from hashing the domain separator)
+    /// * `counter` - A counter to generate different points from the same seed
+    ///
+    /// # Returns
+    ///
+    /// A deterministically generated Ristretto255 point
+    fn hash_to_ristretto(domain_separator: &str, seed: &[u8], counter: u32) -> RistrettoPoint {
+        let mut hasher = blake3::Hasher::new();
+        
+        // Add domain separator with length prefix
+        let domain_separator_bytes = domain_separator.as_bytes();
+        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
+        hasher.update(domain_separator_bytes);
+        
+        // Add seed with length prefix
+        hasher.update(&(seed.len() as u64).to_be_bytes());
+        hasher.update(seed);
+        
+        // Add counter with length prefix (4 bytes for u32)
+        hasher.update(&(4u64).to_be_bytes());
+        hasher.update(&counter.to_le_bytes());
+        
+        // Generate 64 bytes for from_uniform_bytes
+        let mut uniform_bytes = [0u8; 64];
+        let mut output_reader = hasher.finalize_xof();
+        output_reader.fill(&mut uniform_bytes);
+        
+        RistrettoPoint::from_uniform_bytes(&uniform_bytes)
     }
 }
 

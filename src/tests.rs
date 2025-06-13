@@ -732,6 +732,22 @@ fn invalid_token_verification() {
 }
 
 #[test]
+fn test_params_generation_deterministic() {
+    // Test that parameters are generated deterministically
+    let params1 = Params::new("test-org", "test-service", "test", "2024-01-01");
+    let params2 = Params::new("test-org", "test-service", "test", "2024-01-01");
+    
+    // The same domain separator should produce the same parameters
+    assert_eq!(params1.h1.basepoint().compress(), params2.h1.basepoint().compress());
+    assert_eq!(params1.h2.basepoint().compress(), params2.h2.basepoint().compress());
+    assert_eq!(params1.h3.basepoint().compress(), params2.h3.basepoint().compress());
+    
+    // Different domain separators should produce different parameters
+    let params3 = Params::new("different-org", "test-service", "test", "2024-01-01");
+    assert_ne!(params1.h1.basepoint().compress(), params3.h1.basepoint().compress());
+}
+
+#[test]
 fn transcript_add_elements_test() {
     use curve25519_dalek::RistrettoPoint;
 

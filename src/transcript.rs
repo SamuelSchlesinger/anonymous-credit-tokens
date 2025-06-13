@@ -25,10 +25,8 @@
 use super::Params;
 use curve25519_dalek::RistrettoPoint;
 use curve25519_dalek::Scalar;
-use rand_chacha::ChaCha20Rng;
-use rand_core::SeedableRng;
 
-const PROTOCOL_LABEL: &[u8] = b"curve25519-ristretto anonymous-credentials v1.0";
+const PROTOCOL_VERSION: &[u8] = b"curve25519-ristretto anonymous-credentials v1.0";
 
 /// A transcript that accumulates cryptographic protocol messages and generates challenges.
 ///
@@ -54,16 +52,21 @@ impl Transcript {
     ///
     /// A new `Transcript` instance initialized with the label
     pub(crate) fn new(params: &Params, label: &[u8]) -> Self {
-        let mut t = Transcript {
+        let mut transcript = Transcript {
             hasher: blake3::Hasher::new(),
         };
-        t.update(PROTOCOL_LABEL);
-        // Add the parameters' base points to the transcript
-        t.update(&params.h1.basepoint().compress().as_bytes()[..]);
-        t.update(&params.h2.basepoint().compress().as_bytes()[..]);
-        t.update(&params.h3.basepoint().compress().as_bytes()[..]);
-        t.update(label);
-        t
+        // Add protocol version with length prefix
+        transcript.hasher.update(&(PROTOCOL_VERSION.len() as u64).to_be_bytes());
+        transcript.hasher.update(PROTOCOL_VERSION);
+        // Add the parameters' base points using Encode() which includes length prefixes
+        transcript.add_element(&params.h1.basepoint());
+        transcript.add_element(&params.h2.basepoint());
+        transcript.add_element(&params.h3.basepoint());
+        // Add label with length prefix
+        transcript.hasher.update(&(label.len() as u64).to_be_bytes());
+        transcript.hasher.update(label);
+        
+        transcript
     }
 
     /// Executes a function on a new transcript and returns the resulting challenge.
@@ -86,7 +89,7 @@ impl Transcript {
     }
 
     fn update(&mut self, bytes: &[u8]) {
-        self.hasher.update(&bytes.len().to_be_bytes());
+        self.hasher.update(&(bytes.len() as u64).to_be_bytes());
         self.hasher.update(bytes);
     }
 
@@ -116,7 +119,8 @@ impl Transcript {
     ///
     /// * `scalar` - A reference to a `Scalar` to add to the transcript
     pub(crate) fn add_scalar(&mut self, scalar: &Scalar) {
-        self.update(&scalar.as_bytes()[..]);
+        // Scalars are 32 bytes in little-endian format
+        self.update(scalar.as_bytes());
     }
 
     /// Adds multiple Ristretto points to the transcript.
@@ -130,24 +134,18 @@ impl Transcript {
         }
     }
 
-    /// Creates a deterministic random number generator from the transcript state.
-    ///
-    /// # Returns
-    ///
-    /// A `ChaCha20Rng` seeded with the current transcript state
-    pub(crate) fn rng(self) -> ChaCha20Rng {
-        ChaCha20Rng::from_seed(*self.hasher.finalize().as_bytes())
-    }
-
     /// Generates a challenge scalar from the current transcript state.
     ///
-    /// This method creates a deterministic RNG from the transcript and uses it
-    /// to generate a random scalar value.
+    /// This method finalizes the hash and uses `Scalar::from_hash` with 64 bytes
+    /// for better uniformity.
     ///
     /// # Returns
     ///
     /// A `Scalar` representing the challenge derived from the transcript
     pub(crate) fn challenge(self) -> Scalar {
-        Scalar::random(&mut self.rng())
+        let mut reader = self.hasher.finalize_xof();
+        let mut output = [0u8; 64];
+        reader.fill(&mut output);
+        Scalar::from_bytes_mod_order_wide(&output)
     }
 }
