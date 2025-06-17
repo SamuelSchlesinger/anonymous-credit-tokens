@@ -134,19 +134,14 @@ pub mod cbor;
 pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
     // Get the low 128 bits of the scalar
     let bytes = scalar.as_bytes();
-    let value = u128::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
-    ]);
+    let value = u128::from_le_bytes(
+        bytes[..16]
+            .try_into()
+            .expect("slice with incorrect length")
+    );
 
     // Check if the scalar is within u128 range and the high bits are zero
-    if bytes[16..].iter().all(|&b| b == 0) {
-        Some(value)
-    } else {
-        None
-    }
+    bytes[16..].iter().all(|&b| b == 0).then_some(value)
 }
 
 /// The private key of the issuer, used to issue and refund credit tokens.
@@ -823,8 +818,9 @@ impl PrivateKey {
             big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
         }
 
-        let k_prime = (0..L)
-            .map(|i| spend_proof.com[i] * Scalar::from(2u128.pow(i as u32)))
+        let k_prime = spend_proof.com.iter()
+            .enumerate()
+            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
             .fold(RistrettoPoint::identity(), |a, b| a + b);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
         let big_c = &params.h1 * &spend_proof.c_bar.neg()
@@ -908,12 +904,14 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
     let mut result = [Scalar::ZERO; L];
 
     // Extract each bit from the scalar's byte representation
-    for (i, result_elem) in result.iter_mut().enumerate() {
-        let b = i / 8; // Byte index
-        let j = i % 8; // Bit position within the byte
-        let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-        *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
-    }
+    result.iter_mut()
+        .enumerate()
+        .for_each(|(i, result_elem)| {
+            let b = i / 8; // Byte index
+            let j = i % 8; // Bit position within the byte
+            let bit = (bytes[b] >> j) & 0b1; // Extract the bit
+            *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
+        });
 
     result
 }
@@ -1000,10 +998,9 @@ impl CreditToken {
         let i = bits_of(self.c - s);
 
         let k_star = Scalar::random(&mut rng);
-        let mut s_i = Vec::with_capacity(L);
-        for _ in 0..L {
-            s_i.push(Scalar::random(&mut rng));
-        }
+        let s_i: Vec<Scalar> = (0..L)
+            .map(|_| Scalar::random(&mut rng))
+            .collect();
         let mut com = [RistrettoPoint::identity(); L];
         com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &s_i[0];
         for j in 1..L {
@@ -1056,8 +1053,9 @@ impl CreditToken {
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
-        let r_star = (0..L)
-            .map(|i| s_i[i] * Scalar::from(2u128.pow(i as u32)))
+        let r_star = s_i.iter()
+            .enumerate()
+            .map(|(i, si)| si * Scalar::from(2u128.pow(i as u32)))
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
@@ -1227,8 +1225,9 @@ impl PreRefund {
         public_key: &PublicKey,
     ) -> Option<CreditToken> {
         let x_a = RistrettoPoint::generator()
-            + (0..L)
-                .map(|i| spend_proof.com[i] * Scalar::from(2u128.pow(i as u32)))
+            + spend_proof.com.iter()
+                .enumerate()
+                .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
                 .fold(RistrettoPoint::identity(), |a, b| a + b);
 
         let x_g = RistrettoPoint::generator() * refund.e + public_key.w;

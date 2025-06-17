@@ -95,11 +95,12 @@ impl IssuanceRequest {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_point(&self.big_k)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.gamma)));
-        map.push((Value::Integer(3.into()), encode_scalar(&self.k_bar)));
-        map.push((Value::Integer(4.into()), encode_scalar(&self.r_bar)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_point(&self.big_k)),
+            (Value::Integer(2.into()), encode_scalar(&self.gamma)),
+            (Value::Integer(3.into()), encode_scalar(&self.k_bar)),
+            (Value::Integer(4.into()), encode_scalar(&self.r_bar)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -152,12 +153,13 @@ impl IssuanceResponse {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_point(&self.a)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.e)));
-        map.push((Value::Integer(3.into()), encode_scalar(&self.gamma)));
-        map.push((Value::Integer(4.into()), encode_scalar(&self.z)));
-        map.push((Value::Integer(5.into()), encode_scalar(&self.c)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_point(&self.a)),
+            (Value::Integer(2.into()), encode_scalar(&self.e)),
+            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
+            (Value::Integer(4.into()), encode_scalar(&self.z)),
+            (Value::Integer(5.into()), encode_scalar(&self.c)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -225,38 +227,36 @@ impl SpendProof {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        
-        map.push((Value::Integer(1.into()), encode_scalar(&self.k)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.s)));
-        map.push((Value::Integer(3.into()), encode_point(&self.a_prime)));
-        map.push((Value::Integer(4.into()), encode_point(&self.b_bar)));
-        
         // Com array
         let com_array: Vec<Value> = self.com.iter().map(encode_point).collect();
-        map.push((Value::Integer(5.into()), Value::Array(com_array)));
-        
-        map.push((Value::Integer(6.into()), encode_scalar(&self.gamma)));
-        map.push((Value::Integer(7.into()), encode_scalar(&self.e_bar)));
-        map.push((Value::Integer(8.into()), encode_scalar(&self.r2_bar)));
-        map.push((Value::Integer(9.into()), encode_scalar(&self.r3_bar)));
-        map.push((Value::Integer(10.into()), encode_scalar(&self.c_bar)));
-        map.push((Value::Integer(11.into()), encode_scalar(&self.r_bar)));
-        map.push((Value::Integer(12.into()), encode_scalar(&self.w00)));
-        map.push((Value::Integer(13.into()), encode_scalar(&self.w01)));
         
         // gamma0 array
         let gamma0_array: Vec<Value> = self.gamma0.iter().map(encode_scalar).collect();
-        map.push((Value::Integer(14.into()), Value::Array(gamma0_array)));
         
         // z array (pairs)
         let z_array: Vec<Value> = self.z.iter().map(|pair| {
             Value::Array(vec![encode_scalar(&pair[0]), encode_scalar(&pair[1])])
         }).collect();
-        map.push((Value::Integer(15.into()), Value::Array(z_array)));
         
-        map.push((Value::Integer(16.into()), encode_scalar(&self.k_bar)));
-        map.push((Value::Integer(17.into()), encode_scalar(&self.s_bar)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_scalar(&self.k)),
+            (Value::Integer(2.into()), encode_scalar(&self.s)),
+            (Value::Integer(3.into()), encode_point(&self.a_prime)),
+            (Value::Integer(4.into()), encode_point(&self.b_bar)),
+            (Value::Integer(5.into()), Value::Array(com_array)),
+            (Value::Integer(6.into()), encode_scalar(&self.gamma)),
+            (Value::Integer(7.into()), encode_scalar(&self.e_bar)),
+            (Value::Integer(8.into()), encode_scalar(&self.r2_bar)),
+            (Value::Integer(9.into()), encode_scalar(&self.r3_bar)),
+            (Value::Integer(10.into()), encode_scalar(&self.c_bar)),
+            (Value::Integer(11.into()), encode_scalar(&self.r_bar)),
+            (Value::Integer(12.into()), encode_scalar(&self.w00)),
+            (Value::Integer(13.into()), encode_scalar(&self.w01)),
+            (Value::Integer(14.into()), Value::Array(gamma0_array)),
+            (Value::Integer(15.into()), Value::Array(z_array)),
+            (Value::Integer(16.into()), encode_scalar(&self.k_bar)),
+            (Value::Integer(17.into()), encode_scalar(&self.s_bar)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -295,10 +295,10 @@ impl SpendProof {
                         Value::Integer(i) if i == 4.into() => b_bar = Some(decode_point(&val)?),
                         Value::Integer(i) if i == 5.into() => {
                             if let Value::Array(arr) = val {
-                                let mut com_arr = vec![];
-                                for v in arr {
-                                    com_arr.push(decode_point(&v)?);
-                                }
+                                let com_arr: Result<Vec<_>, _> = arr.into_iter()
+                                    .map(|v| decode_point(&v))
+                                    .collect();
+                                let com_arr = com_arr?;
                                 if com_arr.len() == L {
                                     use group::Group;
                                     let mut com_fixed = [RistrettoPoint::identity(); L];
@@ -319,10 +319,10 @@ impl SpendProof {
                         Value::Integer(i) if i == 13.into() => w01 = Some(decode_scalar(&val)?),
                         Value::Integer(i) if i == 14.into() => {
                             if let Value::Array(arr) = val {
-                                let mut gamma0_arr = vec![];
-                                for v in arr {
-                                    gamma0_arr.push(decode_scalar(&v)?);
-                                }
+                                let gamma0_arr: Result<Vec<_>, _> = arr.into_iter()
+                                    .map(|v| decode_scalar(&v))
+                                    .collect();
+                                let gamma0_arr = gamma0_arr?;
                                 if gamma0_arr.len() == L {
                                     let mut gamma0_fixed = [Scalar::ZERO; L];
                                     gamma0_fixed.copy_from_slice(&gamma0_arr);
@@ -334,18 +334,20 @@ impl SpendProof {
                         }
                         Value::Integer(i) if i == 15.into() => {
                             if let Value::Array(arr) = val {
-                                let mut z_arr = vec![];
-                                for v in arr {
-                                    if let Value::Array(pair) = v {
-                                        if pair.len() == 2 {
-                                            let z0 = decode_scalar(&pair[0])?;
-                                            let z1 = decode_scalar(&pair[1])?;
-                                            z_arr.push([z0, z1]);
+                                let z_arr: Result<Vec<_>, _> = arr.into_iter()
+                                    .map(|v| {
+                                        if let Value::Array(pair) = v {
+                                            if pair.len() == 2 {
+                                                Ok([decode_scalar(&pair[0])?, decode_scalar(&pair[1])?])
+                                            } else {
+                                                Err(CborError::InvalidStructure("z pair wrong size"))
+                                            }
                                         } else {
-                                            return Err(CborError::InvalidStructure("z pair wrong size"));
+                                            Err(CborError::InvalidStructure("expected array for z pair"))
                                         }
-                                    }
-                                }
+                                    })
+                                    .collect();
+                                let z_arr = z_arr?;
                                 if z_arr.len() == L {
                                     let mut z_fixed = [[Scalar::ZERO; 2]; L];
                                     z_fixed.copy_from_slice(&z_arr);
@@ -398,11 +400,12 @@ impl Refund {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_point(&self.a)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.e)));
-        map.push((Value::Integer(3.into()), encode_scalar(&self.gamma)));
-        map.push((Value::Integer(4.into()), encode_scalar(&self.z)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_point(&self.a)),
+            (Value::Integer(2.into()), encode_scalar(&self.e)),
+            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
+            (Value::Integer(4.into()), encode_scalar(&self.z)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -452,9 +455,10 @@ impl PrivateKey {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_scalar(&self.x)));
-        map.push((Value::Integer(2.into()), encode_point(&self.public.w)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_scalar(&self.x)),
+            (Value::Integer(2.into()), encode_point(&self.public.w)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -520,9 +524,10 @@ impl PreIssuance {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_scalar(&self.r)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.k)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_scalar(&self.r)),
+            (Value::Integer(2.into()), encode_scalar(&self.k)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -569,12 +574,13 @@ impl CreditToken {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_point(&self.a)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.e)));
-        map.push((Value::Integer(3.into()), encode_scalar(&self.k)));
-        map.push((Value::Integer(4.into()), encode_scalar(&self.r)));
-        map.push((Value::Integer(5.into()), encode_scalar(&self.c)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_point(&self.a)),
+            (Value::Integer(2.into()), encode_scalar(&self.e)),
+            (Value::Integer(3.into()), encode_scalar(&self.k)),
+            (Value::Integer(4.into()), encode_scalar(&self.r)),
+            (Value::Integer(5.into()), encode_scalar(&self.c)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
@@ -628,10 +634,11 @@ impl PreRefund {
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
-        let mut map = Vec::new();
-        map.push((Value::Integer(1.into()), encode_scalar(&self.r)));
-        map.push((Value::Integer(2.into()), encode_scalar(&self.k)));
-        map.push((Value::Integer(3.into()), encode_scalar(&self.m)));
+        let map = vec![
+            (Value::Integer(1.into()), encode_scalar(&self.r)),
+            (Value::Integer(2.into()), encode_scalar(&self.k)),
+            (Value::Integer(3.into()), encode_scalar(&self.m)),
+        ];
         
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;

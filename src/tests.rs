@@ -518,59 +518,50 @@ fn multiple_tokens_with_same_issuer() {
 fn bits_of_() {
     let x = Scalar::from(u128::MAX);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        assert_eq!(bits[i], Scalar::ONE);
-    }
+    bits.iter().for_each(|bit| assert_eq!(*bit, Scalar::ONE));
     let x = Scalar::from(0u64);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        assert_eq!(bits[i], Scalar::ZERO);
-    }
+    bits.iter().for_each(|bit| assert_eq!(*bit, Scalar::ZERO));
     let x = Scalar::from(0b001u64);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        if i == 0 {
-            assert_eq!(bits[i], Scalar::ONE);
-        } else {
-            assert_eq!(bits[i], Scalar::ZERO);
-        }
-    }
+    bits.iter()
+        .enumerate()
+        .for_each(|(i, bit)| {
+            let expected = if i == 0 { Scalar::ONE } else { Scalar::ZERO };
+            assert_eq!(*bit, expected);
+        });
     let x = Scalar::from(0b100000000u64);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        if i == 8 {
-            assert_eq!(bits[i], Scalar::ONE);
-        } else {
-            assert_eq!(bits[i], Scalar::ZERO);
-        }
-    }
+    bits.iter()
+        .enumerate()
+        .for_each(|(i, bit)| {
+            let expected = if i == 8 { Scalar::ONE } else { Scalar::ZERO };
+            assert_eq!(*bit, expected);
+        });
     let x = Scalar::from(7u64);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        if i <= 2 {
-            assert_eq!(bits[i], Scalar::ONE);
-        } else {
-            assert_eq!(bits[i], Scalar::ZERO);
-        }
-    }
+    bits.iter()
+        .enumerate()
+        .for_each(|(i, bit)| {
+            let expected = if i <= 2 { Scalar::ONE } else { Scalar::ZERO };
+            assert_eq!(*bit, expected);
+        });
     let x = Scalar::from(0b10101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010u128);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        if i % 2 == 1 {
-            assert_eq!(bits[i], Scalar::ONE);
-        } else {
-            assert_eq!(bits[i], Scalar::ZERO);
-        }
-    }
+    bits.iter()
+        .enumerate()
+        .for_each(|(i, bit)| {
+            let expected = if i % 2 == 1 { Scalar::ONE } else { Scalar::ZERO };
+            assert_eq!(*bit, expected);
+        });
     let x = Scalar::from(0b01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101u128);
     let bits = crate::bits_of(x);
-    for i in 0..L {
-        if i % 2 == 0 {
-            assert_eq!(bits[i], Scalar::ONE);
-        } else {
-            assert_eq!(bits[i], Scalar::ZERO);
-        }
-    }
+    bits.iter()
+        .enumerate()
+        .for_each(|(i, bit)| {
+            let expected = if i % 2 == 0 { Scalar::ONE } else { Scalar::ZERO };
+            assert_eq!(*bit, expected);
+        });
 }
 
 #[test]
@@ -1512,15 +1503,15 @@ proptest! {
         let bits = bits_of(scalar);
         
         // Reconstruct the value from bits
-        let mut reconstructed = Scalar::ZERO;
-        let mut power = Scalar::ONE;
-        
-        for i in 0..L {
-            if bits[i] == Scalar::ONE {
-                reconstructed += power;
-            }
-            power = power + power; // power *= 2
-        }
+        let reconstructed = bits.iter()
+            .enumerate()
+            .fold(Scalar::ZERO, |acc, (i, bit)| {
+                if *bit == Scalar::ONE {
+                    acc + Scalar::from(2u128.pow(i as u32))
+                } else {
+                    acc
+                }
+            });
         
         // For values within u128 range, reconstruction should be exact
         prop_assert_eq!(scalar, reconstructed);
@@ -1946,18 +1937,28 @@ proptest! {
         let bits = bits_of(scalar);
         
         // Verify all bits are either 0 or 1
-        for i in 0..L {
-            prop_assert!(
-                bits[i] == Scalar::ZERO || bits[i] == Scalar::ONE,
-                "Bit {} is not binary", i
-            );
-        }
+        bits.iter()
+            .enumerate()
+            .try_for_each(|(i, bit)| {
+                if *bit == Scalar::ZERO || *bit == Scalar::ONE {
+                    Ok(())
+                } else {
+                    Err(proptest::test_runner::TestCaseError::fail(format!("Bit {} is not binary", i)))
+                }
+            })?;
         
         // Verify leading bits are zero for values less than 2^n
         let bit_length = 128 - spend_amount.leading_zeros() as usize;
-        for i in bit_length..L {
-            prop_assert_eq!(bits[i], Scalar::ZERO, "Bit {} should be zero", i);
-        }
+        bits.iter()
+            .enumerate()
+            .skip(bit_length)
+            .try_for_each(|(i, bit)| {
+                if *bit == Scalar::ZERO {
+                    Ok(())
+                } else {
+                    Err(proptest::test_runner::TestCaseError::fail(format!("Bit {} should be zero", i)))
+                }
+            })?;
     }
 }
 
