@@ -26,7 +26,7 @@ use super::Params;
 use curve25519_dalek::RistrettoPoint;
 use curve25519_dalek::Scalar;
 
-const PROTOCOL_VERSION: &[u8] = b"curve25519-ristretto anonymous-credentials v1.0";
+const PROTOCOL_VERSION: &[u8] = b"curve25519-ristretto anonymous-credits v1.0";
 
 /// A transcript that accumulates cryptographic protocol messages and generates challenges.
 ///
