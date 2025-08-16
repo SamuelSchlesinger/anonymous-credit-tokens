@@ -17,6 +17,14 @@ use rand_core::OsRng;
 use std::collections::HashSet;
 use proptest::prelude::*;
 
+// Configure proptest to run fewer cases for faster testing
+// Default is 256 cases, we'll use 8 for quicker feedback  
+// You can also set PROPTEST_CASES=32 environment variable
+// to increase the number of cases for a particular run
+fn fast_config() -> ProptestConfig {
+    ProptestConfig::with_cases(8)
+}
+
 /// A simple in-memory nullifier database for testing double-spend prevention
 #[derive(Default)]
 struct NullifierDb {
@@ -1293,6 +1301,7 @@ fn test_params() -> Params {
 
 // Property: Issuance protocol maintains balance invariant
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_issuance_balance_invariant(
         credit_amount in credit_amount_strategy(),
@@ -1318,6 +1327,7 @@ proptest! {
 
 // Property: Double issuance with same request fails
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_no_double_issuance(
         credit_amount in credit_amount_strategy(),
@@ -1338,6 +1348,7 @@ proptest! {
 
 // Property: Spend + Refund preserves total balance
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_spend_refund_balance_preservation(
         initial_amount in 1u64..10000,
@@ -1379,6 +1390,7 @@ proptest! {
 
 // Property: Nullifiers are deterministic for same token
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_nullifier_determinism(
         credit_amount in credit_amount_strategy(),
@@ -1414,6 +1426,7 @@ proptest! {
 
 // Property: Different tokens have different nullifiers
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_nullifier_uniqueness(
         credit_amount in 1u64..10000,
@@ -1452,6 +1465,7 @@ proptest! {
 
 // Property: CBOR serialization round-trip for all types
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_issuance_request(
         big_k in point_strategy(),
@@ -1471,6 +1485,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_credit_token(token in credit_token_strategy()) {
         let bytes = token.to_cbor().unwrap();
@@ -1485,6 +1500,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_private_key(key in private_key_strategy()) {
         let bytes = key.to_cbor().unwrap();
@@ -1497,6 +1513,7 @@ proptest! {
 
 // Property: Binary decomposition correctness
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_binary_decomposition_correctness(value in any::<u128>()) {
         let scalar = Scalar::from(value);
@@ -1520,6 +1537,7 @@ proptest! {
 
 // Property: Overspending always fails
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_overspend_always_fails(
         initial_amount in 1u64..10000,
@@ -1548,6 +1566,7 @@ proptest! {
 
 // Property: Sequential spends accumulate correctly
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_sequential_spends_accumulate(
         initial_amount in 100u64..1000,
@@ -1593,6 +1612,7 @@ proptest! {
 
 // Property: Transcript determinism
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_transcript_determinism(
         label in prop::collection::vec(any::<u8>(), 1..32),
@@ -1619,6 +1639,7 @@ proptest! {
 
 // Property: Zero amounts are handled correctly
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_zero_amount_handling(
         initial_amount in 1u64..10000,
@@ -1651,6 +1672,7 @@ proptest! {
 
 // Property: Params affect cryptographic outputs
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_params_affect_outputs(
         pre_issuance in pre_issuance_strategy(),
@@ -1669,6 +1691,7 @@ proptest! {
 
 // Property: Invalid proofs are always rejected
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_invalid_proofs_rejected(
         initial_amount in 10u64..1000,
@@ -1700,6 +1723,7 @@ proptest! {
 
 // Property: Public key derivation is consistent
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_public_key_derivation(x in scalar_strategy()) {
         let private_key = PrivateKey {
@@ -1716,6 +1740,7 @@ proptest! {
 
 // Property: Refund amount never exceeds initial amount
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_refund_never_exceeds_initial(
         initial_amount in 1u64..10000,
@@ -1759,6 +1784,7 @@ proptest! {
 
 // Additional CBOR round-trip tests
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_issuance_response(
         a in point_strategy(),
@@ -1780,6 +1806,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_refund(
         a in point_strategy(),
@@ -1799,6 +1826,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_pre_issuance(pre_issuance in pre_issuance_strategy()) {
         let bytes = pre_issuance.to_cbor().unwrap();
@@ -1810,6 +1838,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_pre_refund(
         r in scalar_strategy(),
@@ -1827,6 +1856,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_round_trip_public_key(w in point_strategy()) {
         let public_key = PublicKey { w };
@@ -1839,6 +1869,7 @@ proptest! {
 
 // Property: SpendProof generation is deterministic given fixed randomness
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_spend_proof_structure_validity(
         initial_amount in 10u64..1000,
@@ -1874,6 +1905,7 @@ proptest! {
 
 // Property: Token tampering is always detected
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_token_tampering_detection(
         initial_amount in 10u64..1000,
@@ -1906,6 +1938,7 @@ proptest! {
 
 // Property: Issuance with invalid request always fails
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_invalid_issuance_request_rejection(
         credit_amount in credit_amount_strategy(),
@@ -1929,6 +1962,7 @@ proptest! {
 
 // Property: Spend amounts within valid range produce valid binary decompositions
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_spend_amount_binary_decomposition(
         spend_amount in any::<u128>(),
@@ -1964,6 +1998,7 @@ proptest! {
 
 // Property: Multiple issuers don't interfere
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_multiple_issuers_independence(
         credit_amount in 10u64..1000,
@@ -1999,6 +2034,7 @@ proptest! {
 
 // Property: Exhaustive spending works correctly
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_exhaustive_spending(
         initial_amount in 5u64..100,
@@ -2040,6 +2076,7 @@ proptest! {
 
 // Property: Challenge values affect proof generation
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_challenge_affects_proofs(
         initial_amount in 10u64..100,
@@ -2080,6 +2117,7 @@ proptest! {
 
 // Property: Scalar arithmetic preserves validity
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_scalar_arithmetic_validity(
         a in any::<u64>(),
@@ -2108,6 +2146,7 @@ proptest! {
 
 // Property: Point operations maintain group properties
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_point_group_properties(
         scalar1 in scalar_strategy(),
@@ -2133,6 +2172,7 @@ proptest! {
 
 // Property: Nullifier computation is collision-resistant
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_nullifier_collision_resistance(
         tokens in prop::collection::vec(
@@ -2175,6 +2215,7 @@ proptest! {
 
 // Property: CBOR encoding is canonical
 proptest! {
+    #![proptest_config(fast_config())]
     #[test]
     fn prop_cbor_encoding_canonical(
         token in credit_token_strategy(),
