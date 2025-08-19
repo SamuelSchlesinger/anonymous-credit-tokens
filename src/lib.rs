@@ -134,11 +134,7 @@ pub mod cbor;
 pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
     // Get the low 128 bits of the scalar
     let bytes = scalar.as_bytes();
-    let value = u128::from_le_bytes(
-        bytes[..16]
-            .try_into()
-            .expect("slice with incorrect length")
-    );
+    let value = u128::from_le_bytes(bytes[..16].try_into().expect("slice with incorrect length"));
 
     // Check if the scalar is within u128 range and the high bits are zero
     bytes[16..].iter().all(|&b| b == 0).then_some(value)
@@ -285,37 +281,32 @@ impl Params {
     ///     "2024-01-15"
     /// );
     /// ```
-    pub fn new(
-        organization: &str,
-        service: &str,
-        deployment_id: &str,
-        version: &str,
-    ) -> Self {
+    pub fn new(organization: &str, service: &str, deployment_id: &str, version: &str) -> Self {
         // Construct the structured domain separator
         let domain_separator = format!(
             "ACT-v1:{}:{}:{}:{}",
             organization, service, deployment_id, version
         );
-        
+
         // Hash the domain separator with length prefix to create a seed
         let mut hasher = blake3::Hasher::new();
         let domain_separator_bytes = domain_separator.as_bytes();
         hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
         hasher.update(domain_separator_bytes);
         let seed = hasher.finalize();
-        
+
         // Generate H1, H2, H3 using counter-based approach
         let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
         let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
         let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
-        
+
         Params {
             h1: RistrettoBasepointTable::create(&h1),
             h2: RistrettoBasepointTable::create(&h2),
             h3: RistrettoBasepointTable::create(&h3),
         }
     }
-    
+
     /// Hash to Ristretto255 point using BLAKE3 with counter.
     ///
     /// This implements a deterministic hash-to-curve function that maps
@@ -333,25 +324,25 @@ impl Params {
     /// A deterministically generated Ristretto255 point
     fn hash_to_ristretto(domain_separator: &str, seed: &[u8], counter: u32) -> RistrettoPoint {
         let mut hasher = blake3::Hasher::new();
-        
+
         // Add domain separator with length prefix
         let domain_separator_bytes = domain_separator.as_bytes();
         hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
         hasher.update(domain_separator_bytes);
-        
+
         // Add seed with length prefix
         hasher.update(&(seed.len() as u64).to_be_bytes());
         hasher.update(seed);
-        
+
         // Add counter with length prefix (4 bytes for u32)
         hasher.update(&(4u64).to_be_bytes());
         hasher.update(&counter.to_le_bytes());
-        
+
         // Generate 64 bytes for from_uniform_bytes
         let mut uniform_bytes = [0u8; 64];
         let mut output_reader = hasher.finalize_xof();
         output_reader.fill(&mut uniform_bytes);
-        
+
         RistrettoPoint::from_uniform_bytes(&uniform_bytes)
     }
 }
@@ -818,7 +809,9 @@ impl PrivateKey {
             big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
         }
 
-        let k_prime = spend_proof.com.iter()
+        let k_prime = spend_proof
+            .com
+            .iter()
             .enumerate()
             .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
             .fold(RistrettoPoint::identity(), |a, b| a + b);
@@ -904,14 +897,12 @@ fn bits_of(s: Scalar) -> [Scalar; L] {
     let mut result = [Scalar::ZERO; L];
 
     // Extract each bit from the scalar's byte representation
-    result.iter_mut()
-        .enumerate()
-        .for_each(|(i, result_elem)| {
-            let b = i / 8; // Byte index
-            let j = i % 8; // Bit position within the byte
-            let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-            *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
-        });
+    result.iter_mut().enumerate().for_each(|(i, result_elem)| {
+        let b = i / 8; // Byte index
+        let j = i % 8; // Bit position within the byte
+        let bit = (bytes[b] >> j) & 0b1; // Extract the bit
+        *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
+    });
 
     result
 }
@@ -998,9 +989,7 @@ impl CreditToken {
         let i = bits_of(self.c - s);
 
         let k_star = Scalar::random(&mut rng);
-        let s_i: Vec<Scalar> = (0..L)
-            .map(|_| Scalar::random(&mut rng))
-            .collect();
+        let s_i: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
         let mut com = [RistrettoPoint::identity(); L];
         com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &s_i[0];
         for j in 1..L {
@@ -1053,7 +1042,8 @@ impl CreditToken {
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
-        let r_star = s_i.iter()
+        let r_star = s_i
+            .iter()
             .enumerate()
             .map(|(i, si)| si * Scalar::from(2u128.pow(i as u32)))
             .fold(Scalar::ZERO, |x, y| x + y);
@@ -1225,7 +1215,9 @@ impl PreRefund {
         public_key: &PublicKey,
     ) -> Option<CreditToken> {
         let x_a = RistrettoPoint::generator()
-            + spend_proof.com.iter()
+            + spend_proof
+                .com
+                .iter()
                 .enumerate()
                 .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
                 .fold(RistrettoPoint::identity(), |a, b| a + b);

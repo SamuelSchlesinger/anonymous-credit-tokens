@@ -7,7 +7,12 @@ use std::sync::Arc;
 
 // Create a shared parameter object once for all benchmarks
 fn create_params() -> Arc<Params> {
-    Arc::new(Params::new("bench-org", "bench-service", "bench-env", "2024-01-01"))
+    Arc::new(Params::new(
+        "bench-org",
+        "bench-service",
+        "bench-env",
+        "2024-01-01",
+    ))
 }
 
 fn key_generation_benchmark(c: &mut Criterion) {

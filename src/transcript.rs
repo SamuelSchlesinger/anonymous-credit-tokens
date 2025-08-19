@@ -56,16 +56,20 @@ impl Transcript {
             hasher: blake3::Hasher::new(),
         };
         // Add protocol version with length prefix
-        transcript.hasher.update(&(PROTOCOL_VERSION.len() as u64).to_be_bytes());
+        transcript
+            .hasher
+            .update(&(PROTOCOL_VERSION.len() as u64).to_be_bytes());
         transcript.hasher.update(PROTOCOL_VERSION);
         // Add the parameters' base points using Encode() which includes length prefixes
         transcript.add_element(&params.h1.basepoint());
         transcript.add_element(&params.h2.basepoint());
         transcript.add_element(&params.h3.basepoint());
         // Add label with length prefix
-        transcript.hasher.update(&(label.len() as u64).to_be_bytes());
+        transcript
+            .hasher
+            .update(&(label.len() as u64).to_be_bytes());
         transcript.hasher.update(label);
-        
+
         transcript
     }
 
