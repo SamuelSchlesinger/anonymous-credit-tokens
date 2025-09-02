@@ -371,10 +371,7 @@ fn attempt_overspend() {
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
 
     // The refund should be None since the proof is invalid
-    assert!(
-        refund_result.is_none(),
-        "Overspend should have been rejected"
-    );
+    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
 }
 
 #[test]
@@ -593,15 +590,12 @@ fn invalid_issuance_request() {
     // The issuer should reject the tampered request
     let issuance_response =
         private_key.issue(&params, &tampered_request, Scalar::from(20u64), OsRng);
-    assert!(
-        issuance_response.is_none(),
-        "Tampered request should be rejected"
-    );
+    assert_eq!(issuance_response, Err(Error::InvalidIssuanceRequestProof));
 
     // The original request should be accepted
     let issuance_response = private_key.issue(&params, &valid_request, Scalar::from(20u64), OsRng);
     assert!(
-        issuance_response.is_some(),
+        issuance_response.is_ok(),
         "Valid request should be accepted"
     );
 }
@@ -641,7 +635,7 @@ fn invalid_proof_verification() {
 
     // The issuer should reject the tampered proof
     let refund_result = private_key.refund(&params, &tampered_proof, OsRng);
-    assert!(refund_result.is_none(), "Tampered proof should be rejected");
+    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
 }
 
 #[test]
@@ -717,15 +711,12 @@ fn invalid_token_verification() {
     // The client should reject the tampered response
     let token_result =
         preissuance.to_credit_token(&params, private_key.public(), &request, &tampered_response);
-    assert!(
-        token_result.is_none(),
-        "Tampered response should be rejected"
-    );
+    assert_eq!(token_result, Err(Error::InvalidIssuanceResponseProof));
 
     // The original response should be accepted
     let token_result =
         preissuance.to_credit_token(&params, private_key.public(), &request, &response);
-    assert!(token_result.is_some(), "Valid response should be accepted");
+    assert!(token_result.is_ok(), "Valid response should be accepted");
 }
 
 #[test]
@@ -822,18 +813,12 @@ fn tampered_refund_verification() {
         &tampered_refund,
         private_key.public(),
     );
-    assert!(
-        new_token_result.is_none(),
-        "Tampered refund should be rejected"
-    );
+    assert_eq!(new_token_result, Err(Error::InvalidRefundProof));
 
     // The original refund should be accepted
     let new_token_result =
         prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
-    assert!(
-        new_token_result.is_some(),
-        "Valid refund should be accepted"
-    );
+    assert!(new_token_result.is_ok(), "Valid refund should be accepted");
 }
 
 #[test]
@@ -859,7 +844,7 @@ fn zero_e_signature_attack() {
     // The client should reject this (though the actual signature verification may fail in different ways)
     let token_result =
         preissuance.to_credit_token(&params, private_key.public(), &request, &tampered_response);
-    assert!(token_result.is_none(), "Zero e value should be rejected");
+    assert_eq!(token_result, Err(Error::InvalidIssuanceResponseProof));
 }
 
 #[test]
@@ -884,10 +869,7 @@ fn spend_with_identity_a_prime() {
 
     // The issuer should reject this proof
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-    assert!(
-        refund_result.is_none(),
-        "Spend proof with identity a_prime should be rejected"
-    );
+    assert_eq!(refund_result, Err(Error::IdentityPointError));
 }
 
 #[test]
@@ -915,10 +897,7 @@ fn token_with_zero_credit() {
     let spend_amount = Scalar::from(thread_rng().gen_range(1..100) as u64);
     let (spend_proof, _) = token.prove_spend(&params, spend_amount, OsRng);
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-    assert!(
-        refund_result.is_none(),
-        "Spending from a zero-balance token should fail"
-    );
+    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
 
     // But spending zero from it should work
     let zero_spend = Scalar::ZERO;
@@ -1008,10 +987,8 @@ fn exhaust_token_with_one_credit_spends() {
     // Try to spend from empty token
     let (spend_proof, _) = current_token.prove_spend(&params, spend_amount, OsRng);
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-    assert!(
-        refund_result.is_none(),
-        "Spending from an empty token should fail"
-    );
+
+    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
 
     // But spending zero from it should work
     let zero_spend = Scalar::ZERO;
@@ -1210,10 +1187,8 @@ fn test_key_component_malleability() {
         &tampered_refund1,
         private_key.public(),
     );
-    assert!(
-        result1.is_none(),
-        "Tampered 'a' component should be rejected"
-    );
+
+    assert_eq!(result1, Err(Error::InvalidRefundProof));
 
     // 2. Tamper with the 'gamma' component in the refund
     let tampered_refund2 = Refund {
@@ -1230,10 +1205,8 @@ fn test_key_component_malleability() {
         &tampered_refund2,
         private_key.public(),
     );
-    assert!(
-        result2.is_none(),
-        "Tampered 'gamma' component should be rejected"
-    );
+
+    assert_eq!(result2, Err(Error::InvalidRefundProof));
 
     // 3. Tamper with the 'z' component in the refund
     let tampered_refund3 = Refund {
@@ -1250,14 +1223,11 @@ fn test_key_component_malleability() {
         &tampered_refund3,
         private_key.public(),
     );
-    assert!(
-        result3.is_none(),
-        "Tampered 'z' component should be rejected"
-    );
+    assert_eq!(result3, Err(Error::InvalidRefundProof));
 
     // The original refund should still be valid
     let result4 = prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
-    assert!(result4.is_some(), "Original refund should be valid");
+    assert!(result4.is_ok(), "Original refund should be valid");
 }
 
 // ===== PROPERTY-BASED TESTING WITH PROPTEST =====
@@ -1322,8 +1292,8 @@ proptest! {
         let params = test_params();
         let request = pre_issuance.request(&params, OsRng);
 
-        if let Some(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
-            if let Some(token) = pre_issuance.to_credit_token(
+        if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+            if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
                 &request,
@@ -1350,7 +1320,7 @@ proptest! {
 
         // First issuance should succeed
         let response1 = private_key.issue(&params, &request, credit_amount, OsRng);
-        prop_assert!(response1.is_some());
+        prop_assert!(response1.is_ok());
 
         // Second issuance with same request should fail (simulated by checking)
         // In a real system, the issuer would track used requests
@@ -1388,7 +1358,7 @@ proptest! {
         prop_assert_eq!(pre_refund.m, expected_remaining);
 
         // Process refund
-        if let Some(refund) = private_key.refund(&params, &spend_proof, OsRng) {
+        if let Ok(refund) = private_key.refund(&params, &spend_proof, OsRng) {
             let new_token = pre_refund
                 .to_credit_token(&params, &spend_proof, &refund, private_key.public())
                 .unwrap();
@@ -1417,8 +1387,8 @@ proptest! {
         prop_assume!(spend_u128 <= credit_u128);
 
         let request = pre_issuance.request(&params, OsRng);
-        if let Some(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
-            if let Some(token) = pre_issuance.to_credit_token(
+        if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+            if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
                 &request,
@@ -1571,7 +1541,11 @@ proptest! {
 
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund_result.is_none());
+    assert_eq!(
+        refund_result,
+        Err(Error::InvalidClientSpendProof)
+    );
+
     }
 }
 
@@ -1728,8 +1702,11 @@ proptest! {
 
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund_result.is_none());
-    }
+    assert_eq!(
+        refund_result,
+        Err(Error::InvalidClientSpendProof)
+    );
+}
 }
 
 // Property: Public key derivation is consistent
@@ -1778,7 +1755,7 @@ proptest! {
             let spend_amount = Scalar::from(amount);
             let (spend_proof, pre_refund) = current_token.prove_spend(&params, spend_amount, OsRng);
 
-            if let Some(refund) = private_key.refund(&params, &spend_proof, OsRng) {
+            if let Ok(refund) = private_key.refund(&params, &spend_proof, OsRng) {
                 total_spent += amount;
 
                 current_token = pre_refund
@@ -1943,8 +1920,11 @@ proptest! {
 
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund_result.is_none(), "Tampered token should be rejected");
-    }
+    assert_eq!(
+        refund_result,
+        Err(Error::InvalidClientSpendProof)
+    );
+}
 }
 
 // Property: Issuance with invalid request always fails
@@ -1967,7 +1947,10 @@ proptest! {
 
         // Issuance should fail
         let response = private_key.issue(&params, &request, credit_amount, OsRng);
-        prop_assert!(response.is_none(), "Invalid request should be rejected");
+    assert_eq!(
+        response,
+        Err(Error::InvalidIssuanceRequestProof)
+    );
     }
 }
 
@@ -2035,11 +2018,14 @@ proptest! {
         // Try to spend token1 with issuer2 (should fail)
         let (spend_proof, _) = token1.prove_spend(&params, spend, OsRng);
         let refund2 = private_key2.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund2.is_none(), "Wrong issuer should reject spend");
+    assert_eq!(
+        refund2,
+        Err(Error::InvalidClientSpendProof)
+    );
 
         // Correct issuer should accept
         let refund1 = private_key1.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund1.is_some(), "Correct issuer should accept spend");
+        prop_assert!(refund1.is_ok(), "Correct issuer should accept spend");
     }
 }
 
@@ -2202,8 +2188,8 @@ proptest! {
             }
 
             let request = pre_issuance.request(&params, OsRng);
-            if let Some(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
-                if let Some(token) = pre_issuance.to_credit_token(
+            if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+                if let Ok(token) = pre_issuance.to_credit_token(
                     &params,
                     private_key.public(),
                     &request,

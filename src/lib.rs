@@ -94,10 +94,22 @@
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
 use group::Group;
 use rand_core::CryptoRngCore;
+use std::ops::Neg;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
-use std::ops::Neg;
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    InvalidIssuanceRequestProof,
+    InvalidIssuanceResponseProof,
+    DoubleSpendError,
+    InvalidRefundProof,
+    InvalidRefundResponseProof,
+    IdentityPointError,
+    InvalidClientSpendProof,
+    AmountTooBigError,
+    ScalarOutOfRangeError,
+}
 
 /// The bit length used for binary decomposition of values in range proofs.
 /// This defines the maximum value (2^128 - 1) that can be represented.
@@ -120,8 +132,8 @@ pub mod cbor;
 ///
 /// # Returns
 ///
-/// * `Some(u128)` - The u128 value if the Scalar is within the u128 range
-/// * `None` - If the Scalar value is too large to fit in a u128
+/// * `Ok(u128)` - The u128 value if the Scalar is within the u128 range
+/// * `Err(Error) - If the Scalar value is too large to fit in a u128
 ///
 /// # Example
 ///
@@ -383,7 +395,7 @@ pub struct IssuanceRequest {
 /// elements needed to prove ownership and spend credits without revealing the client's
 /// identity. The token includes a credit value `c` that represents the total amount
 /// of credits available to spend.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
+#[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct CreditToken {
     /// A Ristretto point representing the BBS+ signature component
     a: RistrettoPoint,
@@ -493,8 +505,8 @@ impl PreIssuance {
     ///
     /// # Returns
     ///
-    /// * `Some(CreditToken)` - A valid credit token if the issuer's response is verified
-    /// * `None` - If the verification fails, indicating a potential invalid response
+    /// * `Ok(CreditToken)` - A valid credit token if the issuer's response is verified
+    /// * `Err(Error)` - If the verification fails, indicating a potential invalid response
     ///
     /// # Example
     ///
@@ -524,7 +536,7 @@ impl PreIssuance {
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
-    ) -> Option<CreditToken> {
+    ) -> Result<CreditToken, Error> {
         // Reconstruct the signature base points for verification
         let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
@@ -541,11 +553,11 @@ impl PreIssuance {
 
         // Verify that the challenge matches the expected value
         if gamma != response.gamma {
-            return None;
+            return Err(Error::InvalidIssuanceResponseProof);
         }
 
         // Construct the credit token with the verified signature
-        Some(CreditToken {
+        Ok(CreditToken {
             a: response.a,
             e: response.e,
             r: self.r,
@@ -561,7 +573,7 @@ impl PreIssuance {
 /// values that allow the client to construct a valid credit token. It includes
 /// the credit amount (`c`) assigned by the issuer and the BBS+ signature
 /// elements that authenticate this amount.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
+#[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct IssuanceResponse {
     /// The BBS+ signature's main component
     a: RistrettoPoint,
@@ -592,8 +604,8 @@ impl PrivateKey {
     ///
     /// # Returns
     ///
-    /// * `Some(IssuanceResponse)` - The response containing the signature if the request is valid
-    /// * `None` - If the request verification fails
+    /// * `Ok(IssuanceResponse)` - The response containing the signature if the request is valid
+    /// * `Err(Error)` - If the request verification fails
     ///
     /// # Example
     ///
@@ -617,7 +629,7 @@ impl PrivateKey {
         request: &IssuanceRequest,
         c: Scalar,
         mut rng: impl CryptoRngCore,
-    ) -> Option<IssuanceResponse> {
+    ) -> Result<IssuanceResponse, Error> {
         // Verify the client's zero-knowledge proof
         let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
             - request.big_k * request.gamma;
@@ -629,7 +641,7 @@ impl PrivateKey {
 
         // Verify that the client's proof is valid
         if gamma != request.gamma {
-            return None;
+            return Err(Error::InvalidIssuanceRequestProof);
         }
 
         // Create a BBS+ signature on the client's commitment and credit amount
@@ -652,7 +664,7 @@ impl PrivateKey {
         // Calculate the response value for the proof
         let z = gamma * (self.x + e) + alpha;
 
-        Some(IssuanceResponse { a, e, gamma, z, c })
+        Ok(IssuanceResponse { a, e, gamma, z, c })
     }
 }
 
@@ -744,8 +756,8 @@ impl PrivateKey {
     ///
     /// # Returns
     ///
-    /// * `Some(Refund)` - The refund token if the spend proof is valid
-    /// * `None` - If the spend proof verification fails
+    /// * `Ok(Refund)` - The refund token if the spend proof is valid
+    /// * `Err(Error)` - If the spend proof verification fails
     ///
     /// # Example
     ///
@@ -776,9 +788,9 @@ impl PrivateKey {
         params: &Params,
         spend_proof: &SpendProof,
         mut rng: impl CryptoRngCore,
-    ) -> Option<Refund> {
+    ) -> Result<Refund, Error> {
         if spend_proof.a_prime == RistrettoPoint::identity() {
-            return None;
+            return Err(Error::IdentityPointError);
         }
 
         let a_bar = spend_proof.a_prime * self.x;
@@ -833,7 +845,7 @@ impl PrivateKey {
         });
 
         if gamma != spend_proof.gamma {
-            return None;
+            return Err(Error::InvalidClientSpendProof);
         }
 
         let e = Scalar::random(&mut rng);
@@ -853,7 +865,7 @@ impl PrivateKey {
 
         let z = refund_gamma * (self.x + e) + alpha;
 
-        Some(Refund {
+        Ok(Refund {
             a,
             e,
             gamma: refund_gamma,
@@ -1150,7 +1162,7 @@ impl CreditToken {
 /// This response contains the cryptographic signature components needed for the client
 /// to construct a new credit token with the remaining balance. It includes a BBS+
 /// signature on the remaining balance and proof values that authenticate the response.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
+#[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct Refund {
     /// The BBS+ signature's main component for the new credit token
     a: RistrettoPoint,
@@ -1177,8 +1189,8 @@ impl PreRefund {
     ///
     /// # Returns
     ///
-    /// * `Some(CreditToken)` - A new credit token with the remaining balance if the refund is valid
-    /// * `None` - If the verification fails
+    /// * `Ok(CreditToken)` - A new credit token with the remaining balance if the refund is valid
+    /// * `Err(Error)r - If the verification fails
     ///
     /// # Example
     ///
@@ -1213,7 +1225,7 @@ impl PreRefund {
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
-    ) -> Option<CreditToken> {
+    ) -> Result<CreditToken, Error> {
         let x_a = RistrettoPoint::generator()
             + spend_proof
                 .com
@@ -1232,11 +1244,11 @@ impl PreRefund {
         });
 
         if gamma != refund.gamma {
-            return None;
+            return Err(Error::InvalidRefundProof);
         }
 
         // The client now has a new credit token
-        Some(CreditToken {
+        Ok(CreditToken {
             a: refund.a,
             e: refund.e,
             k: self.k,
