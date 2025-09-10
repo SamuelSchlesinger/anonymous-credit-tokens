@@ -92,8 +92,11 @@
 //! See the README.md file for comprehensive usage examples and integration guidance.
 
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
-use group::Group;
+use group::{Group, prime::PrimeGroup};
 use rand_core::CryptoRngCore;
+use sigma_rs::{
+    LinearRelation, Nizk, codec::Shake128DuplexSponge, linear_relation::CanonicalLinearRelation,
+};
 use std::ops::Neg;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
@@ -381,12 +384,8 @@ pub struct PreIssuance {
 pub struct IssuanceRequest {
     /// A commitment to the client's identifier and blinding factor
     big_k: RistrettoPoint,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the identifier commitment
-    k_bar: Scalar,
-    /// A response value for the blinding factor
-    r_bar: Scalar,
+    /// Proof of knowledge of the client's identifier and blinding factor
+    pok: Vec<u8>,
 }
 
 /// The credit token used to store and spend anonymous credits.
@@ -469,26 +468,14 @@ impl PreIssuance {
         // Create a commitment to the client's identifier and blinding factor
         let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
 
-        // Generate random values for the zero-knowledge proof
-        let k_prime = Scalar::random(&mut rng);
-        let r_prime = Scalar::random(&mut rng);
-        let k1 = &params.h2 * &k_prime + &params.h3 * &r_prime;
+        // Generate proof of knowledge of k, r for the statement: big_K = k*H2 + r*H3.
+        let relation =
+            IssuanceRequest::build_relation(params.h2.basepoint(), params.h3.basepoint(), big_k);
+        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"request", relation);
+        let witness = vec![self.k, self.r];
+        let pok = nizk.prove_compact(&witness, &mut rng).unwrap();
 
-        // Generate the challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"request", |transcript| {
-            transcript.add_elements([&big_k, &k1].into_iter());
-        });
-
-        // Calculate the response values for the zero-knowledge proof
-        let k_bar = k_prime + self.k * gamma;
-        let r_bar = r_prime + self.r * gamma;
-
-        IssuanceRequest {
-            big_k,
-            gamma,
-            k_bar,
-            r_bar,
-        }
+        IssuanceRequest { big_k, pok }
     }
 
     /// Constructs a credit token from the issuer's response to an issuance request.
@@ -538,21 +525,14 @@ impl PreIssuance {
         response: &IssuanceResponse,
     ) -> Result<CreditToken, Error> {
         // Reconstruct the signature base points for verification
-        let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
-        let x_g = RistrettoPoint::generator() * response.e + public.w;
-
-        // Verify the response by checking the BBS+ signature proof
-        let y_a = response.a * response.z + x_a * response.gamma.neg();
-        let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
-
-        // Generate the expected challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&response.c, &response.e].into_iter());
-            transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
+        let g = RistrettoPoint::generator();
+        let x_a = g + &params.h1 * &response.c + request.big_k;
+        let x_g = g * response.e + public.w;
 
         // Verify that the challenge matches the expected value
-        if gamma != response.gamma {
+        let relation = IssuanceResponse::build_relation(response.a, x_a, g, x_g);
+        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"response", relation);
+        if nizk.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
         }
 
@@ -564,6 +544,18 @@ impl PreIssuance {
             k: self.k,
             c: response.c,
         })
+    }
+}
+
+impl IssuanceRequest {
+    /// Relation used to prove knowledge of (k0,k1) such that R = k0*P + k1*Q.
+    fn build_relation<G: PrimeGroup>(p: G, q: G, r: G) -> CanonicalLinearRelation<G> {
+        let mut rel = LinearRelation::new();
+        let [k0, k1] = rel.allocate_scalars::<2>();
+        let [p_id, q_id, r_id] = rel.allocate_elements::<3>();
+        rel.append_equation(r_id, k0 * p_id + k1 * q_id);
+        rel.set_elements([(p_id, p), (q_id, q), (r_id, r)]);
+        rel.canonical().unwrap()
     }
 }
 
@@ -579,12 +571,10 @@ pub struct IssuanceResponse {
     a: RistrettoPoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the proof of knowledge of the signature
-    z: Scalar,
     /// The amount of credits being issued
     c: Scalar,
+    /// Proof of knowledge of correct BBS signature.
+    pok: Vec<u8>,
 }
 
 impl PrivateKey {
@@ -631,40 +621,44 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, Error> {
         // Verify the client's zero-knowledge proof
-        let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
-            - request.big_k * request.gamma;
-
-        // Generate the expected challenge value
-        let gamma = Transcript::with(params, b"request", |transcript| {
-            transcript.add_elements([&request.big_k, &k1].into_iter());
-        });
-
-        // Verify that the client's proof is valid
-        if gamma != request.gamma {
+        let relation = IssuanceRequest::build_relation(
+            params.h2.basepoint(),
+            params.h3.basepoint(),
+            request.big_k,
+        );
+        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"request", relation);
+        if nizk.verify_compact(&request.pok).is_err() {
             return Err(Error::InvalidIssuanceRequestProof);
         }
 
         // Create a BBS+ signature on the client's commitment and credit amount
+        let g = RistrettoPoint::generator();
         let e = Scalar::random(&mut rng);
-        let x_a = RistrettoPoint::generator() + &params.h1 * &c + request.big_k;
-        let a = x_a * (e + self.x).invert();
-        let x_g = RistrettoPoint::generator() * e + self.public.w;
+        let exp = e + self.x;
+        let x_a = g + &params.h1 * &c + request.big_k;
+        let a = x_a * exp.invert();
+        let x_g = g * exp;
 
         // Generate a zero-knowledge proof that the signature is valid
-        let alpha = Scalar::random(&mut rng);
-        let y_a = a * alpha;
-        let y_g = RistrettoPoint::generator() * alpha;
+        let relation = IssuanceResponse::build_relation(a, x_a, g, x_g);
+        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"response", relation);
+        let witness = vec![exp];
+        let pok = nizk.prove_compact(&witness, &mut rng).unwrap();
 
-        // Generate the challenge for the proof using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&c, &e].into_iter());
-            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
+        Ok(IssuanceResponse { a, e, c, pok })
+    }
+}
 
-        // Calculate the response value for the proof
-        let z = gamma * (self.x + e) + alpha;
-
-        Ok(IssuanceResponse { a, e, gamma, z, c })
+impl IssuanceResponse {
+    /// Relation used to prove knowledge of k such that X = k*P, Y = k*Q.
+    pub fn build_relation<G: PrimeGroup>(p: G, x: G, q: G, y: G) -> CanonicalLinearRelation<G> {
+        let mut rel = LinearRelation::new();
+        let k = rel.allocate_scalar();
+        let [p_id, q_id, x_id, y_id] = rel.allocate_elements::<4>();
+        rel.append_equation(x_id, k * p_id);
+        rel.append_equation(y_id, k * q_id);
+        rel.set_elements([(p_id, p), (x_id, x), (q_id, q), (y_id, y)]);
+        rel.canonical().unwrap()
     }
 }
 
