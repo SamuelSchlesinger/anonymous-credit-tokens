@@ -579,12 +579,10 @@ fn invalid_issuance_request() {
     // Create a valid request
     let valid_request = preissuance.request(&params, OsRng);
 
-    // Tamper with the request by modifying the k_bar value
+    // Tamper with the request by modifying the PoK value
     let tampered_request = IssuanceRequest {
         big_k: valid_request.big_k,
-        gamma: valid_request.gamma,
-        k_bar: valid_request.k_bar + Scalar::ONE, // Modify the k_bar value
-        r_bar: valid_request.r_bar,
+        pok: vec![], // Modify the proof value
     };
 
     // The issuer should reject the tampered request
@@ -701,11 +699,10 @@ fn invalid_token_verification() {
 
     // Tamper with the response
     let tampered_response = IssuanceResponse {
-        gamma: response.gamma,
         a: response.a,
         e: response.e + Scalar::ONE, // Modify the e value
-        z: response.z,
         c: response.c,
+        pok: response.pok.clone(),
     };
 
     // The client should reject the tampered response
@@ -836,9 +833,8 @@ fn zero_e_signature_attack() {
     let tampered_response = IssuanceResponse {
         a: response.a,
         e: Scalar::ZERO, // Set e to zero
-        gamma: response.gamma,
-        z: response.z,
         c: response.c,
+        pok: response.pok.clone(),
     };
 
     // The client should reject this (though the actual signature verification may fail in different ways)
@@ -1232,6 +1228,11 @@ fn test_key_component_malleability() {
 
 // ===== PROPERTY-BASED TESTING WITH PROPTEST =====
 
+/// Strategy for generating random Vec<u8>
+fn vec_strategy() -> impl Strategy<Value = Vec<u8>> {
+    prop::array::uniform32(any::<u8>()).prop_map(|bytes| bytes.to_vec())
+}
+
 /// Strategy for generating random Scalars
 fn scalar_strategy() -> impl Strategy<Value = Scalar> {
     prop::array::uniform32(any::<u8>()).prop_map(|bytes| Scalar::from_bytes_mod_order(bytes))
@@ -1450,18 +1451,14 @@ proptest! {
     #[test]
     fn prop_cbor_round_trip_issuance_request(
         big_k in point_strategy(),
-        gamma in scalar_strategy(),
-        k_bar in scalar_strategy(),
-        r_bar in scalar_strategy(),
+        pok in vec_strategy(),
     ) {
-        let request = IssuanceRequest { big_k, gamma, k_bar, r_bar };
+        let request = IssuanceRequest { big_k, pok};
         let bytes = request.to_cbor().unwrap();
         let decoded = IssuanceRequest::from_cbor(&bytes).unwrap();
 
         prop_assert_eq!(request.big_k, decoded.big_k);
-        prop_assert_eq!(request.gamma, decoded.gamma);
-        prop_assert_eq!(request.k_bar, decoded.k_bar);
-        prop_assert_eq!(request.r_bar, decoded.r_bar);
+        prop_assert_eq!(&request.pok, &decoded.pok);
     }
 }
 
@@ -1670,7 +1667,7 @@ proptest! {
         let request2 = pre_issuance.request(&params2, OsRng);
 
         // Requests should be different with different params
-        prop_assert_ne!(request1.gamma, request2.gamma);
+        prop_assert_ne!(&request1.pok, &request2.pok);
     }
 }
 
@@ -1777,19 +1774,17 @@ proptest! {
     fn prop_cbor_round_trip_issuance_response(
         a in point_strategy(),
         e in scalar_strategy(),
-        gamma in scalar_strategy(),
-        z in scalar_strategy(),
         c in scalar_strategy(),
+        pok in vec_strategy(),
     ) {
-        let response = IssuanceResponse { a, e, gamma, z, c };
+        let response = IssuanceResponse { a, e, c, pok };
         let bytes = response.to_cbor().unwrap();
         let decoded = IssuanceResponse::from_cbor(&bytes).unwrap();
 
         prop_assert_eq!(response.a, decoded.a);
         prop_assert_eq!(response.e, decoded.e);
-        prop_assert_eq!(response.gamma, decoded.gamma);
-        prop_assert_eq!(response.z, decoded.z);
         prop_assert_eq!(response.c, decoded.c);
+        prop_assert_eq!(&response.pok, &decoded.pok);
     }
 }
 
@@ -1936,14 +1931,14 @@ proptest! {
         private_key in private_key_strategy(),
         pre_issuance in pre_issuance_strategy(),
         random_point in point_strategy(),
-        random_scalar in scalar_strategy(),
+        random_vec in vec_strategy(),
     ) {
         let params = test_params();
         let mut request = pre_issuance.request(&params, OsRng);
 
         // Tamper with the request
         request.big_k = random_point;
-        request.gamma = random_scalar;
+        request.pok = random_vec;
 
         // Issuance should fail
         let response = private_key.issue(&params, &request, credit_amount, OsRng);
