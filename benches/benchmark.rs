@@ -261,7 +261,7 @@ fn refund_token_creation_benchmark(c: &mut Criterion) {
             |(prerefund, spend_proof, refund, private_key, params)| {
                 black_box(
                     prerefund
-                        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+                        .to_credit_token(&spend_proof, &refund, private_key.public())
                         .unwrap(),
                 )
             },

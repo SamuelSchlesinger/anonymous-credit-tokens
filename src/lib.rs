@@ -92,11 +92,9 @@
 //! See the README.md file for comprehensive usage examples and integration guidance.
 
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
-use group::{Group, prime::PrimeGroup};
+use group::Group;
 use rand_core::CryptoRngCore;
-use sigma_rs::{
-    LinearRelation, Nizk, codec::Shake128DuplexSponge, linear_relation::CanonicalLinearRelation,
-};
+use sigma_rs::LinearRelation;
 use std::ops::Neg;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
@@ -469,11 +467,16 @@ impl PreIssuance {
         let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
 
         // Generate proof of knowledge of k, r for the statement: big_K = k*H2 + r*H3.
-        let relation =
-            IssuanceRequest::build_relation(params.h2.basepoint(), params.h3.basepoint(), big_k);
-        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"request", relation);
+        let mut statement = LinearRelation::new();
+        proofs::pedersen(
+            &mut statement,
+            params.h2.basepoint(),
+            params.h3.basepoint(),
+            big_k,
+        );
+        let prover = statement.into_nizk(b"request").unwrap();
         let witness = vec![self.k, self.r];
-        let pok = nizk.prove_compact(&witness, &mut rng).unwrap();
+        let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
         IssuanceRequest { big_k, pok }
     }
@@ -530,9 +533,10 @@ impl PreIssuance {
         let x_g = g * response.e + public.w;
 
         // Verify that the challenge matches the expected value
-        let relation = IssuanceResponse::build_relation(response.a, x_a, g, x_g);
-        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"response", relation);
-        if nizk.verify_compact(&response.pok).is_err() {
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, response.a, x_a, g, x_g);
+        let verifier = statement.into_nizk(b"respond").unwrap();
+        if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
         }
 
@@ -544,18 +548,6 @@ impl PreIssuance {
             k: self.k,
             c: response.c,
         })
-    }
-}
-
-impl IssuanceRequest {
-    /// Relation used to prove knowledge of (k0,k1) such that R = k0*P + k1*Q.
-    fn build_relation<G: PrimeGroup>(p: G, q: G, r: G) -> CanonicalLinearRelation<G> {
-        let mut rel = LinearRelation::new();
-        let [k0, k1] = rel.allocate_scalars::<2>();
-        let [p_id, q_id, r_id] = rel.allocate_elements::<3>();
-        rel.append_equation(r_id, k0 * p_id + k1 * q_id);
-        rel.set_elements([(p_id, p), (q_id, q), (r_id, r)]);
-        rel.canonical().unwrap()
     }
 }
 
@@ -621,13 +613,15 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, Error> {
         // Verify the client's zero-knowledge proof
-        let relation = IssuanceRequest::build_relation(
+        let mut statement = LinearRelation::new();
+        proofs::pedersen(
+            &mut statement,
             params.h2.basepoint(),
             params.h3.basepoint(),
             request.big_k,
         );
-        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"request", relation);
-        if nizk.verify_compact(&request.pok).is_err() {
+        let verifier = statement.into_nizk(b"request").unwrap();
+        if verifier.verify_compact(&request.pok).is_err() {
             return Err(Error::InvalidIssuanceRequestProof);
         }
 
@@ -640,25 +634,13 @@ impl PrivateKey {
         let x_g = g * exp;
 
         // Generate a zero-knowledge proof that the signature is valid
-        let relation = IssuanceResponse::build_relation(a, x_a, g, x_g);
-        let nizk = Nizk::<_, Shake128DuplexSponge<RistrettoPoint>>::new(b"response", relation);
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, a, x_a, g, x_g);
+        let prover = statement.into_nizk(b"respond").unwrap();
         let witness = vec![exp];
-        let pok = nizk.prove_compact(&witness, &mut rng).unwrap();
+        let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
         Ok(IssuanceResponse { a, e, c, pok })
-    }
-}
-
-impl IssuanceResponse {
-    /// Relation used to prove knowledge of k such that X = k*P, Y = k*Q.
-    pub fn build_relation<G: PrimeGroup>(p: G, x: G, q: G, y: G) -> CanonicalLinearRelation<G> {
-        let mut rel = LinearRelation::new();
-        let k = rel.allocate_scalar();
-        let [p_id, q_id, x_id, y_id] = rel.allocate_elements::<4>();
-        rel.append_equation(x_id, k * p_id);
-        rel.append_equation(y_id, k * q_id);
-        rel.set_elements([(p_id, p), (x_id, x), (q_id, q), (y_id, y)]);
-        rel.canonical().unwrap()
     }
 }
 
@@ -842,28 +824,24 @@ impl PrivateKey {
             return Err(Error::InvalidClientSpendProof);
         }
 
-        let e = Scalar::random(&mut rng);
+        // Issuing a refund
+        let e_star = Scalar::random(&mut rng);
+        let g = RistrettoPoint::generator();
+        let exp = e_star + self.x;
+        let x_a_star = g + k_prime;
+        let a_star = x_a_star * exp.invert();
+        let x_g = g * exp;
 
-        let x_a = RistrettoPoint::generator() + k_prime;
-        let a = x_a * (e + self.x).invert();
-
-        let x_g = RistrettoPoint::generator() * e + self.public.w;
-        let alpha = Scalar::random(&mut rng);
-        let y_a = a * alpha;
-        let y_g = RistrettoPoint::generator() * alpha;
-
-        let refund_gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalar(&e);
-            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        let z = refund_gamma * (self.x + e) + alpha;
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, a_star, x_a_star, g, x_g);
+        let prover = statement.into_nizk(b"refund").unwrap();
+        let witness = vec![exp];
+        let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
         Ok(Refund {
-            a,
-            e,
-            gamma: refund_gamma,
-            z,
+            a: a_star,
+            e: e_star,
+            pok,
         })
     }
 }
@@ -1162,10 +1140,8 @@ pub struct Refund {
     a: RistrettoPoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the proof of knowledge of the signature
-    z: Scalar,
+    /// Proof of knowledge of correct BBS signature.
+    pok: Vec<u8>,
 }
 
 impl PreRefund {
@@ -1207,7 +1183,6 @@ impl PreRefund {
     /// #
     /// // Construct the new credit token with the remaining balance
     /// let new_credit_token = prerefund.to_credit_token(
-    ///     &params,
     ///     &spend_proof,
     ///     &refund,
     ///     public_key
@@ -1215,29 +1190,24 @@ impl PreRefund {
     /// ```
     pub fn to_credit_token(
         &self,
-        params: &Params,
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, Error> {
-        let x_a = RistrettoPoint::generator()
-            + spend_proof
-                .com
-                .iter()
-                .enumerate()
-                .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
-                .fold(RistrettoPoint::identity(), |a, b| a + b);
+        // Verify the client's zero-knowledge proof
+        let g = RistrettoPoint::generator();
+        let x_a = g + spend_proof
+            .com
+            .iter()
+            .enumerate()
+            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let x_g = g * refund.e + public_key.w;
 
-        let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
-        let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
-        let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
-
-        let gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalar(&refund.e);
-            transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        if gamma != refund.gamma {
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, refund.a, x_a, g, x_g);
+        let verifier = statement.into_nizk(b"refund").unwrap();
+        if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);
         }
 
@@ -1249,6 +1219,37 @@ impl PreRefund {
             r: self.r,
             c: self.m,
         })
+    }
+}
+
+/// Proofs of knowledge used in this protocol.
+mod proofs {
+    use group::prime::PrimeGroup;
+    use sigma_rs::LinearRelation;
+
+    /// Relation used to prove knowledge of (k0, k1) such that R = k0\*P + k1\*Q.
+    ///
+    /// This is denoted as Pedersen(P, Q, R) = PoK{ (k0, k1) : R = k0\*P + k1\*Q }.
+    ///
+    /// Reference [Pedersen](https://doi.org/10.1007/3-540-46766-1_9)
+    pub fn pedersen<G: PrimeGroup>(statement: &mut LinearRelation<G>, p: G, q: G, r: G) {
+        let [k0_var, k1_var] = statement.allocate_scalars::<2>();
+        let [p_var, q_var, r_var] = statement.allocate_elements::<3>();
+        statement.append_equation(r_var, k0_var * p_var + k1_var * q_var);
+        statement.set_elements([(p_var, p), (q_var, q), (r_var, r)]);
+    }
+
+    /// Relation used to prove knowledge of k such that X = k\*P, Y = k\*Q.
+    ///
+    /// This is denoted as DLEQ(P, Q, X, Y) = PoK{ k : X = k\*P, Y = k\*Q }
+    ///
+    /// Reference [Chaum-Pedersen](https://doi.org/10.1007/3-540-48071-4_7)
+    pub fn dleq<G: PrimeGroup>(statement: &mut LinearRelation<G>, p: G, x: G, q: G, y: G) {
+        let k_var = statement.allocate_scalar();
+        let [p_var, q_var, x_var, y_var] = statement.allocate_elements::<4>();
+        statement.append_equation(x_var, k_var * p_var);
+        statement.append_equation(y_var, k_var * q_var);
+        statement.set_elements([(p_var, p), (x_var, x), (q_var, q), (y_var, y)]);
     }
 }
 
