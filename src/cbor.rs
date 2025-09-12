@@ -95,7 +95,7 @@ fn decode_scalar(value: &Value) -> Result<Scalar, CborError> {
     }
 }
 
-/// Decode a Vec<u8> from a CBOR byte string
+/// Decode a `Vec<u8>` from a CBOR byte string
 fn decode_vec(value: &Value) -> Result<Vec<u8>, CborError> {
     match value {
         Value::Bytes(bytes) => Ok(bytes.clone()),
@@ -109,7 +109,7 @@ impl IssuanceRequest {
     /// ```text
     /// IssuanceRequestMsg = {
     ///     1: bstr,  ; K (compressed Ristretto point, 32 bytes)
-    ///     2: pok    ; pok (Vec<u8>, n bytes)
+    ///     2: bstr   ; pok (bytes, n bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -412,16 +412,14 @@ impl Refund {
     /// RefundMsg = {
     ///     1: bstr,  ; A* (compressed Ristretto point, 32 bytes)
     ///     2: bstr,  ; e* (scalar, 32 bytes)
-    ///     3: bstr,  ; gamma (scalar, 32 bytes)
-    ///     4: bstr   ; z (scalar, 32 bytes)
+    ///     3: bstr,  ; pok (bytes, n bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
             (Value::Integer(1.into()), encode_point(&self.a)),
             (Value::Integer(2.into()), encode_scalar(&self.e)),
-            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(4.into()), encode_scalar(&self.z)),
+            (Value::Integer(3.into()), encode_vec(&self.pok)),
         ];
 
         let mut bytes = Vec::new();
@@ -437,15 +435,13 @@ impl Refund {
             Value::Map(map) => {
                 let mut a = None;
                 let mut e = None;
-                let mut gamma = None;
-                let mut z = None;
+                let mut pok = None;
 
                 for (k, v) in map {
                     match k {
                         Value::Integer(i) if i == 1.into() => a = Some(decode_point(&v)?),
                         Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 3.into() => pok = Some(decode_vec(&v)?),
                         _ => {}
                     }
                 }
@@ -453,8 +449,7 @@ impl Refund {
                 Ok(Refund {
                     a: a.ok_or(CborError::InvalidStructure("missing field 1 (A*)"))?,
                     e: e.ok_or(CborError::InvalidStructure("missing field 2 (e*)"))?,
-                    gamma: gamma.ok_or(CborError::InvalidStructure("missing field 3 (gamma)"))?,
-                    z: z.ok_or(CborError::InvalidStructure("missing field 4 (z)"))?,
+                    pok: pok.ok_or(CborError::InvalidStructure("missing field 3 (pok)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -701,7 +696,7 @@ mod tests {
     #[test]
     fn test_issuance_request_cbor_roundtrip() {
         let big_k = RistrettoPoint::random(&mut OsRng);
-        let mut pok = Vec::with_capacity(64);
+        let mut pok = vec![0; 64];
         OsRng.fill_bytes(&mut pok);
 
         let request = IssuanceRequest { big_k, pok };
@@ -718,7 +713,7 @@ mod tests {
         let a = RistrettoPoint::random(&mut OsRng);
         let e = Scalar::random(&mut OsRng);
         let c = Scalar::random(&mut OsRng);
-        let mut pok = Vec::with_capacity(64);
+        let mut pok = vec![0; 64];
         OsRng.fill_bytes(&mut pok);
 
         let response = IssuanceResponse { a, e, c, pok };
@@ -736,18 +731,17 @@ mod tests {
     fn test_refund_cbor_roundtrip() {
         let a = RistrettoPoint::random(&mut OsRng);
         let e = Scalar::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let z = Scalar::random(&mut OsRng);
+        let mut pok = vec![0; 64];
+        OsRng.fill_bytes(&mut pok);
 
-        let refund = Refund { a, e, gamma, z };
+        let refund = Refund { a, e, pok };
 
         let bytes = refund.to_cbor().unwrap();
         let decoded = Refund::from_cbor(&bytes).unwrap();
 
         assert_eq!(refund.a, decoded.a);
         assert_eq!(refund.e, decoded.e);
-        assert_eq!(refund.gamma, decoded.gamma);
-        assert_eq!(refund.z, decoded.z);
+        assert_eq!(refund.pok, decoded.pok);
     }
 
     #[test]
