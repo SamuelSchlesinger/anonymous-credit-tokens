@@ -73,7 +73,7 @@ fn main() {
 
     // Client receives a new credit token with 20 credits remaining
     credit_token = prerefund
-        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .to_credit_token(&spend_proof, &refund, private_key.public())
         .unwrap();
     println!("Credits: {:?}", credit_token.credits().to_bytes()[0]);
 }

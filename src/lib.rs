@@ -534,7 +534,7 @@ impl PreIssuance {
 
         // Verify that the challenge matches the expected value
         let mut statement = LinearRelation::new();
-        proofs::dleq(&mut statement, response.a, x_a, g, x_g);
+        proofs::dleq(&mut statement, response.a, g, x_a, x_g);
         let verifier = statement.into_nizk(b"respond").unwrap();
         if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
@@ -635,7 +635,7 @@ impl PrivateKey {
 
         // Generate a zero-knowledge proof that the signature is valid
         let mut statement = LinearRelation::new();
-        proofs::dleq(&mut statement, a, x_a, g, x_g);
+        proofs::dleq(&mut statement, a, g, x_a, x_g);
         let prover = statement.into_nizk(b"respond").unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -833,7 +833,7 @@ impl PrivateKey {
         let x_g = g * exp;
 
         let mut statement = LinearRelation::new();
-        proofs::dleq(&mut statement, a_star, x_a_star, g, x_g);
+        proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
         let prover = statement.into_nizk(b"refund").unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -1205,7 +1205,7 @@ impl PreRefund {
         let x_g = g * refund.e + public_key.w;
 
         let mut statement = LinearRelation::new();
-        proofs::dleq(&mut statement, refund.a, x_a, g, x_g);
+        proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
         let verifier = statement.into_nizk(b"refund").unwrap();
         if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);
@@ -1244,12 +1244,12 @@ mod proofs {
     /// This is denoted as DLEQ(P, Q, X, Y) = PoK{ k : X = k\*P, Y = k\*Q }
     ///
     /// Reference [Chaum-Pedersen](https://doi.org/10.1007/3-540-48071-4_7)
-    pub fn dleq<G: PrimeGroup>(statement: &mut LinearRelation<G>, p: G, x: G, q: G, y: G) {
+    pub fn dleq<G: PrimeGroup>(statement: &mut LinearRelation<G>, p: G, q: G, x: G, y: G) {
         let k_var = statement.allocate_scalar();
         let [p_var, q_var, x_var, y_var] = statement.allocate_elements::<4>();
         statement.append_equation(x_var, k_var * p_var);
         statement.append_equation(y_var, k_var * q_var);
-        statement.set_elements([(p_var, p), (x_var, x), (q_var, q), (y_var, y)]);
+        statement.set_elements([(p_var, p), (q_var, q), (x_var, x), (y_var, y)]);
     }
 }
 
