@@ -94,6 +94,7 @@
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
 use group::Group;
 use rand_core::CryptoRngCore;
+use sigma_rs::LinearRelation;
 use std::ops::Neg;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
@@ -381,12 +382,8 @@ pub struct PreIssuance {
 pub struct IssuanceRequest {
     /// A commitment to the client's identifier and blinding factor
     big_k: RistrettoPoint,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the identifier commitment
-    k_bar: Scalar,
-    /// A response value for the blinding factor
-    r_bar: Scalar,
+    /// Proof of knowledge of the client's identifier and blinding factor
+    pok: Vec<u8>,
 }
 
 /// The credit token used to store and spend anonymous credits.
@@ -469,26 +466,19 @@ impl PreIssuance {
         // Create a commitment to the client's identifier and blinding factor
         let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
 
-        // Generate random values for the zero-knowledge proof
-        let k_prime = Scalar::random(&mut rng);
-        let r_prime = Scalar::random(&mut rng);
-        let k1 = &params.h2 * &k_prime + &params.h3 * &r_prime;
-
-        // Generate the challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"request", |transcript| {
-            transcript.add_elements([&big_k, &k1].into_iter());
-        });
-
-        // Calculate the response values for the zero-knowledge proof
-        let k_bar = k_prime + self.k * gamma;
-        let r_bar = r_prime + self.r * gamma;
-
-        IssuanceRequest {
+        // Generate proof of knowledge of k, r for the statement: big_K = k*H2 + r*H3.
+        let mut statement = LinearRelation::new();
+        proofs::pedersen(
+            &mut statement,
+            params.h2.basepoint(),
+            params.h3.basepoint(),
             big_k,
-            gamma,
-            k_bar,
-            r_bar,
-        }
+        );
+        let prover = statement.into_nizk(b"request").unwrap();
+        let witness = vec![self.k, self.r];
+        let pok = prover.prove_compact(&witness, &mut rng).unwrap();
+
+        IssuanceRequest { big_k, pok }
     }
 
     /// Constructs a credit token from the issuer's response to an issuance request.
@@ -538,21 +528,15 @@ impl PreIssuance {
         response: &IssuanceResponse,
     ) -> Result<CreditToken, Error> {
         // Reconstruct the signature base points for verification
-        let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
-        let x_g = RistrettoPoint::generator() * response.e + public.w;
-
-        // Verify the response by checking the BBS+ signature proof
-        let y_a = response.a * response.z + x_a * response.gamma.neg();
-        let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
-
-        // Generate the expected challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&response.c, &response.e].into_iter());
-            transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
+        let g = RistrettoPoint::generator();
+        let x_a = g + &params.h1 * &response.c + request.big_k;
+        let x_g = g * response.e + public.w;
 
         // Verify that the challenge matches the expected value
-        if gamma != response.gamma {
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, response.a, g, x_a, x_g);
+        let verifier = statement.into_nizk(b"respond").unwrap();
+        if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
         }
 
@@ -579,12 +563,10 @@ pub struct IssuanceResponse {
     a: RistrettoPoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the proof of knowledge of the signature
-    z: Scalar,
     /// The amount of credits being issued
     c: Scalar,
+    /// Proof of knowledge of correct BBS signature.
+    pok: Vec<u8>,
 }
 
 impl PrivateKey {
@@ -631,40 +613,34 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, Error> {
         // Verify the client's zero-knowledge proof
-        let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
-            - request.big_k * request.gamma;
-
-        // Generate the expected challenge value
-        let gamma = Transcript::with(params, b"request", |transcript| {
-            transcript.add_elements([&request.big_k, &k1].into_iter());
-        });
-
-        // Verify that the client's proof is valid
-        if gamma != request.gamma {
+        let mut statement = LinearRelation::new();
+        proofs::pedersen(
+            &mut statement,
+            params.h2.basepoint(),
+            params.h3.basepoint(),
+            request.big_k,
+        );
+        let verifier = statement.into_nizk(b"request").unwrap();
+        if verifier.verify_compact(&request.pok).is_err() {
             return Err(Error::InvalidIssuanceRequestProof);
         }
 
         // Create a BBS+ signature on the client's commitment and credit amount
+        let g = RistrettoPoint::generator();
         let e = Scalar::random(&mut rng);
-        let x_a = RistrettoPoint::generator() + &params.h1 * &c + request.big_k;
-        let a = x_a * (e + self.x).invert();
-        let x_g = RistrettoPoint::generator() * e + self.public.w;
+        let exp = e + self.x;
+        let x_a = g + &params.h1 * &c + request.big_k;
+        let a = x_a * exp.invert();
+        let x_g = g * exp;
 
         // Generate a zero-knowledge proof that the signature is valid
-        let alpha = Scalar::random(&mut rng);
-        let y_a = a * alpha;
-        let y_g = RistrettoPoint::generator() * alpha;
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, a, g, x_a, x_g);
+        let prover = statement.into_nizk(b"respond").unwrap();
+        let witness = vec![exp];
+        let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
-        // Generate the challenge for the proof using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&c, &e].into_iter());
-            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        // Calculate the response value for the proof
-        let z = gamma * (self.x + e) + alpha;
-
-        Ok(IssuanceResponse { a, e, gamma, z, c })
+        Ok(IssuanceResponse { a, e, c, pok })
     }
 }
 
@@ -848,28 +824,24 @@ impl PrivateKey {
             return Err(Error::InvalidClientSpendProof);
         }
 
-        let e = Scalar::random(&mut rng);
+        // Issuing a refund
+        let e_star = Scalar::random(&mut rng);
+        let g = RistrettoPoint::generator();
+        let exp = e_star + self.x;
+        let x_a_star = g + k_prime;
+        let a_star = x_a_star * exp.invert();
+        let x_g = g * exp;
 
-        let x_a = RistrettoPoint::generator() + k_prime;
-        let a = x_a * (e + self.x).invert();
-
-        let x_g = RistrettoPoint::generator() * e + self.public.w;
-        let alpha = Scalar::random(&mut rng);
-        let y_a = a * alpha;
-        let y_g = RistrettoPoint::generator() * alpha;
-
-        let refund_gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalar(&e);
-            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        let z = refund_gamma * (self.x + e) + alpha;
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
+        let prover = statement.into_nizk(b"refund").unwrap();
+        let witness = vec![exp];
+        let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
         Ok(Refund {
-            a,
-            e,
-            gamma: refund_gamma,
-            z,
+            a: a_star,
+            e: e_star,
+            pok,
         })
     }
 }
@@ -1168,10 +1140,8 @@ pub struct Refund {
     a: RistrettoPoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the proof of knowledge of the signature
-    z: Scalar,
+    /// Proof of knowledge of correct BBS signature.
+    pok: Vec<u8>,
 }
 
 impl PreRefund {
@@ -1213,7 +1183,6 @@ impl PreRefund {
     /// #
     /// // Construct the new credit token with the remaining balance
     /// let new_credit_token = prerefund.to_credit_token(
-    ///     &params,
     ///     &spend_proof,
     ///     &refund,
     ///     public_key
@@ -1221,29 +1190,24 @@ impl PreRefund {
     /// ```
     pub fn to_credit_token(
         &self,
-        params: &Params,
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, Error> {
-        let x_a = RistrettoPoint::generator()
-            + spend_proof
-                .com
-                .iter()
-                .enumerate()
-                .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
-                .fold(RistrettoPoint::identity(), |a, b| a + b);
+        // Verify the client's zero-knowledge proof
+        let g = RistrettoPoint::generator();
+        let x_a = g + spend_proof
+            .com
+            .iter()
+            .enumerate()
+            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let x_g = g * refund.e + public_key.w;
 
-        let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
-        let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
-        let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
-
-        let gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalar(&refund.e);
-            transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        if gamma != refund.gamma {
+        let mut statement = LinearRelation::new();
+        proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
+        let verifier = statement.into_nizk(b"refund").unwrap();
+        if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);
         }
 
@@ -1255,6 +1219,37 @@ impl PreRefund {
             r: self.r,
             c: self.m,
         })
+    }
+}
+
+/// Proofs of knowledge used in this protocol.
+mod proofs {
+    use group::prime::PrimeGroup;
+    use sigma_rs::LinearRelation;
+
+    /// Relation used to prove knowledge of (k0, k1) such that R = k0\*P + k1\*Q.
+    ///
+    /// This is denoted as Pedersen(P, Q, R) = PoK{ (k0, k1) : R = k0\*P + k1\*Q }.
+    ///
+    /// Reference [Pedersen](https://doi.org/10.1007/3-540-46766-1_9)
+    pub fn pedersen<G: PrimeGroup>(statement: &mut LinearRelation<G>, p: G, q: G, r: G) {
+        let [k0_var, k1_var] = statement.allocate_scalars::<2>();
+        let [p_var, q_var, r_var] = statement.allocate_elements::<3>();
+        statement.append_equation(r_var, k0_var * p_var + k1_var * q_var);
+        statement.set_elements([(p_var, p), (q_var, q), (r_var, r)]);
+    }
+
+    /// Relation used to prove knowledge of k such that X = k\*P, Y = k\*Q.
+    ///
+    /// This is denoted as DLEQ(P, Q, X, Y) = PoK{ k : X = k\*P, Y = k\*Q }
+    ///
+    /// Reference [Chaum-Pedersen](https://doi.org/10.1007/3-540-48071-4_7)
+    pub fn dleq<G: PrimeGroup>(statement: &mut LinearRelation<G>, p: G, q: G, x: G, y: G) {
+        let k_var = statement.allocate_scalar();
+        let [p_var, q_var, x_var, y_var] = statement.allocate_elements::<4>();
+        statement.append_equation(x_var, k_var * p_var);
+        statement.append_equation(y_var, k_var * q_var);
+        statement.set_elements([(p_var, p), (q_var, q), (x_var, x), (y_var, y)]);
     }
 }
 

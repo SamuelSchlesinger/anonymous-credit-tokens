@@ -58,6 +58,11 @@ fn encode_scalar(scalar: &Scalar) -> Value {
     Value::Bytes(scalar.as_bytes().to_vec())
 }
 
+/// Encode a byte slice as a CBOR byte string
+fn encode_vec(v: &[u8]) -> Value {
+    Value::Bytes(v.to_vec())
+}
+
 /// Decode a RistrettoPoint from a CBOR byte string
 fn decode_point(value: &Value) -> Result<RistrettoPoint, CborError> {
     match value {
@@ -90,23 +95,27 @@ fn decode_scalar(value: &Value) -> Result<Scalar, CborError> {
     }
 }
 
+/// Decode a `Vec<u8>` from a CBOR byte string
+fn decode_vec(value: &Value) -> Result<Vec<u8>, CborError> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(CborError::InvalidStructure("expected byte array")),
+    }
+}
+
 /// CBOR encoding for IssuanceRequest
 impl IssuanceRequest {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// IssuanceRequestMsg = {
     ///     1: bstr,  ; K (compressed Ristretto point, 32 bytes)
-    ///     2: bstr,  ; gamma (scalar, 32 bytes)
-    ///     3: bstr,  ; k_bar (scalar, 32 bytes)
-    ///     4: bstr   ; r_bar (scalar, 32 bytes)
+    ///     2: bstr   ; pok (bytes, n bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
             (Value::Integer(1.into()), encode_point(&self.big_k)),
-            (Value::Integer(2.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(3.into()), encode_scalar(&self.k_bar)),
-            (Value::Integer(4.into()), encode_scalar(&self.r_bar)),
+            (Value::Integer(2.into()), encode_vec(&self.pok)),
         ];
 
         let mut bytes = Vec::new();
@@ -121,25 +130,19 @@ impl IssuanceRequest {
         match value {
             Value::Map(map) => {
                 let mut big_k = None;
-                let mut gamma = None;
-                let mut k_bar = None;
-                let mut r_bar = None;
+                let mut pok = None;
 
                 for (k, v) in map {
                     match k {
                         Value::Integer(i) if i == 1.into() => big_k = Some(decode_point(&v)?),
-                        Value::Integer(i) if i == 2.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => k_bar = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => r_bar = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 2.into() => pok = Some(decode_vec(&v)?),
                         _ => {}
                     }
                 }
 
                 Ok(IssuanceRequest {
                     big_k: big_k.ok_or(CborError::InvalidStructure("missing field 1 (K)"))?,
-                    gamma: gamma.ok_or(CborError::InvalidStructure("missing field 2 (gamma)"))?,
-                    k_bar: k_bar.ok_or(CborError::InvalidStructure("missing field 3 (k_bar)"))?,
-                    r_bar: r_bar.ok_or(CborError::InvalidStructure("missing field 4 (r_bar)"))?,
+                    pok: pok.ok_or(CborError::InvalidStructure("missing field 2 (pok)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -154,18 +157,16 @@ impl IssuanceResponse {
     /// IssuanceResponseMsg = {
     ///     1: bstr,  ; A (compressed Ristretto point, 32 bytes)
     ///     2: bstr,  ; e (scalar, 32 bytes)
-    ///     3: bstr,  ; gamma_resp (scalar, 32 bytes)
-    ///     4: bstr,  ; z (scalar, 32 bytes)
-    ///     5: bstr   ; c (scalar, 32 bytes)
+    ///     3: bstr,  ; c (scalar, 32 bytes)
+    ///     4: bstr,  ; pok (bytes, n bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
             (Value::Integer(1.into()), encode_point(&self.a)),
             (Value::Integer(2.into()), encode_scalar(&self.e)),
-            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(4.into()), encode_scalar(&self.z)),
-            (Value::Integer(5.into()), encode_scalar(&self.c)),
+            (Value::Integer(3.into()), encode_scalar(&self.c)),
+            (Value::Integer(4.into()), encode_vec(&self.pok)),
         ];
 
         let mut bytes = Vec::new();
@@ -181,17 +182,15 @@ impl IssuanceResponse {
             Value::Map(map) => {
                 let mut a = None;
                 let mut e = None;
-                let mut gamma = None;
-                let mut z = None;
                 let mut c = None;
+                let mut pok = None;
 
                 for (k, v) in map {
                     match k {
                         Value::Integer(i) if i == 1.into() => a = Some(decode_point(&v)?),
                         Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 5.into() => c = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 3.into() => c = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 4.into() => pok = Some(decode_vec(&v)?),
                         _ => {}
                     }
                 }
@@ -199,9 +198,8 @@ impl IssuanceResponse {
                 Ok(IssuanceResponse {
                     a: a.ok_or(CborError::InvalidStructure("missing field 1 (A)"))?,
                     e: e.ok_or(CborError::InvalidStructure("missing field 2 (e)"))?,
-                    gamma: gamma.ok_or(CborError::InvalidStructure("missing field 3 (gamma)"))?,
-                    z: z.ok_or(CborError::InvalidStructure("missing field 4 (z)"))?,
-                    c: c.ok_or(CborError::InvalidStructure("missing field 5 (c)"))?,
+                    c: c.ok_or(CborError::InvalidStructure("missing field 3 (c)"))?,
+                    pok: pok.ok_or(CborError::InvalidStructure("missing field 4 (pok)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -414,16 +412,14 @@ impl Refund {
     /// RefundMsg = {
     ///     1: bstr,  ; A* (compressed Ristretto point, 32 bytes)
     ///     2: bstr,  ; e* (scalar, 32 bytes)
-    ///     3: bstr,  ; gamma (scalar, 32 bytes)
-    ///     4: bstr   ; z (scalar, 32 bytes)
+    ///     3: bstr,  ; pok (bytes, n bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
             (Value::Integer(1.into()), encode_point(&self.a)),
             (Value::Integer(2.into()), encode_scalar(&self.e)),
-            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(4.into()), encode_scalar(&self.z)),
+            (Value::Integer(3.into()), encode_vec(&self.pok)),
         ];
 
         let mut bytes = Vec::new();
@@ -439,15 +435,13 @@ impl Refund {
             Value::Map(map) => {
                 let mut a = None;
                 let mut e = None;
-                let mut gamma = None;
-                let mut z = None;
+                let mut pok = None;
 
                 for (k, v) in map {
                     match k {
                         Value::Integer(i) if i == 1.into() => a = Some(decode_point(&v)?),
                         Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 3.into() => pok = Some(decode_vec(&v)?),
                         _ => {}
                     }
                 }
@@ -455,8 +449,7 @@ impl Refund {
                 Ok(Refund {
                     a: a.ok_or(CborError::InvalidStructure("missing field 1 (A*)"))?,
                     e: e.ok_or(CborError::InvalidStructure("missing field 2 (e*)"))?,
-                    gamma: gamma.ok_or(CborError::InvalidStructure("missing field 3 (gamma)"))?,
-                    z: z.ok_or(CborError::InvalidStructure("missing field 4 (z)"))?,
+                    pok: pok.ok_or(CborError::InvalidStructure("missing field 3 (pok)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -697,67 +690,58 @@ impl PreRefund {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
     use rand_core::OsRng;
 
     #[test]
     fn test_issuance_request_cbor_roundtrip() {
         let big_k = RistrettoPoint::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let k_bar = Scalar::random(&mut OsRng);
-        let r_bar = Scalar::random(&mut OsRng);
+        let mut pok = vec![0; 64];
+        OsRng.fill_bytes(&mut pok);
 
-        let request = IssuanceRequest {
-            big_k,
-            gamma,
-            k_bar,
-            r_bar,
-        };
+        let request = IssuanceRequest { big_k, pok };
 
         let bytes = request.to_cbor().unwrap();
         let decoded = IssuanceRequest::from_cbor(&bytes).unwrap();
 
         assert_eq!(request.big_k, decoded.big_k);
-        assert_eq!(request.gamma, decoded.gamma);
-        assert_eq!(request.k_bar, decoded.k_bar);
-        assert_eq!(request.r_bar, decoded.r_bar);
+        assert_eq!(request.pok, decoded.pok);
     }
 
     #[test]
     fn test_issuance_response_cbor_roundtrip() {
         let a = RistrettoPoint::random(&mut OsRng);
         let e = Scalar::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let z = Scalar::random(&mut OsRng);
         let c = Scalar::random(&mut OsRng);
+        let mut pok = vec![0; 64];
+        OsRng.fill_bytes(&mut pok);
 
-        let response = IssuanceResponse { a, e, gamma, z, c };
+        let response = IssuanceResponse { a, e, c, pok };
 
         let bytes = response.to_cbor().unwrap();
         let decoded = IssuanceResponse::from_cbor(&bytes).unwrap();
 
         assert_eq!(response.a, decoded.a);
         assert_eq!(response.e, decoded.e);
-        assert_eq!(response.gamma, decoded.gamma);
-        assert_eq!(response.z, decoded.z);
         assert_eq!(response.c, decoded.c);
+        assert_eq!(response.pok, decoded.pok);
     }
 
     #[test]
     fn test_refund_cbor_roundtrip() {
         let a = RistrettoPoint::random(&mut OsRng);
         let e = Scalar::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let z = Scalar::random(&mut OsRng);
+        let mut pok = vec![0; 64];
+        OsRng.fill_bytes(&mut pok);
 
-        let refund = Refund { a, e, gamma, z };
+        let refund = Refund { a, e, pok };
 
         let bytes = refund.to_cbor().unwrap();
         let decoded = Refund::from_cbor(&bytes).unwrap();
 
         assert_eq!(refund.a, decoded.a);
         assert_eq!(refund.e, decoded.e);
-        assert_eq!(refund.gamma, decoded.gamma);
-        assert_eq!(refund.z, decoded.z);
+        assert_eq!(refund.pok, decoded.pok);
     }
 
     #[test]
