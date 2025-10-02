@@ -228,6 +228,12 @@ pub struct Params {
     h3: RistrettoBasepointTable,
 }
 
+impl PartialEq for Params {
+    fn eq(&self, other: &Params) -> bool {
+        self.h1.basepoint() == other.h1.basepoint() && self.h2.basepoint() == other.h2.basepoint() && self.h3.basepoint() == other.h2.basepoint()
+    }
+}
+
 impl std::fmt::Debug for Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Params")
@@ -237,17 +243,6 @@ impl std::fmt::Debug for Params {
             .finish()
     }
 }
-
-impl PartialEq for Params {
-    fn eq(&self, _other: &Self) -> bool {
-        // For testing purposes, assume all Params instances are different
-        // unless they are the same object. In real usage, Params should
-        // be created deterministically with domain separation.
-        false
-    }
-}
-
-impl Eq for Params {}
 
 impl Params {
     /// Generates random system parameters using the provided random number generator.
