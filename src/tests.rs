@@ -2232,3 +2232,480 @@ proptest! {
         prop_assert_eq!(&bytes1, &bytes3);
     }
 }
+
+// ===== TESTS FOR GRANT FUNCTIONALITY =====
+
+#[test]
+fn test_basic_grant() {
+    use rand::{Rng, thread_rng};
+
+    // Setup
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    // Random initial credit amount between 10 and 100
+    let initial_credits = thread_rng().gen_range(10..100) as u64;
+    let credit_amount = Scalar::from(initial_credits);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, credit_amount, OsRng)
+        .unwrap();
+    let credit_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    // Grant additional credits - random amount between 10 and 50
+    let grant_value = thread_rng().gen_range(10..50) as u64;
+    let grant_amount = Scalar::from(grant_value);
+
+    let (grant_proof, pregrant) = credit_token.prove_grant(&params, grant_amount, OsRng);
+
+    // Verify the grant amount
+    assert_eq!(
+        grant_proof.grant(),
+        grant_amount,
+        "Grant amount should match requested amount"
+    );
+
+    // Verify the new balance in pregrant
+    assert_eq!(
+        pregrant.m,
+        credit_amount + grant_amount,
+        "New balance should be original plus grant"
+    );
+
+    // Process the grant
+    let grant = private_key.grant(&params, &grant_proof, OsRng).unwrap();
+
+    // Create new token with increased balance
+    let new_token = pregrant
+        .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+        .unwrap();
+
+    // Verify the new token has the correct balance
+    assert_eq!(
+        new_token.c,
+        credit_amount + grant_amount,
+        "New token should have increased balance"
+    );
+}
+
+#[test]
+fn test_multiple_grants() {
+    use rand::{Rng, thread_rng};
+
+    let mut nullifier_db = NullifierDb::new();
+
+    // Setup
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    // Start with a small amount
+    let initial_credits = thread_rng().gen_range(5..20) as u64;
+    let initial_amount = Scalar::from(initial_credits);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .unwrap();
+    let mut current_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    let mut total_balance = initial_credits;
+
+    // Perform multiple grants
+    for i in 0..5 {
+        let grant_value = thread_rng().gen_range(5..15) as u64;
+        let grant_amount = Scalar::from(grant_value);
+
+        let (grant_proof, pregrant) = current_token.prove_grant(&params, grant_amount, OsRng);
+
+        // Check nullifier uniqueness
+        let nullifier = grant_proof.nullifier();
+        assert!(
+            !nullifier_db.is_spent(&nullifier),
+            "Grant nullifier already used at iteration {}",
+            i
+        );
+        nullifier_db.record_spent(&nullifier);
+
+        // Update expected balance
+        total_balance += grant_value;
+
+        // Verify pregrant has correct balance
+        assert_eq!(
+            pregrant.m,
+            Scalar::from(total_balance),
+            "PreGrant balance incorrect at iteration {}",
+            i
+        );
+
+        // Process grant
+        let grant = private_key.grant(&params, &grant_proof, OsRng).unwrap();
+        current_token = pregrant
+            .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+            .unwrap();
+
+        // Verify new token balance
+        assert_eq!(
+            current_token.c,
+            Scalar::from(total_balance),
+            "Token balance incorrect after grant {}",
+            i
+        );
+    }
+
+    // Verify we can spend from the granted token
+    let spend_amount = Scalar::from(total_balance / 2);
+    let (spend_proof, prerefund) = current_token.prove_spend(&params, spend_amount, OsRng);
+
+    assert_eq!(
+        prerefund.m,
+        Scalar::from(total_balance - total_balance / 2),
+        "Remaining balance after spend should be correct"
+    );
+
+    let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    let final_token = prerefund
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+
+    assert_eq!(
+        final_token.c,
+        Scalar::from(total_balance - total_balance / 2),
+        "Final token balance should be correct"
+    );
+}
+
+#[test]
+fn test_grant_spend_interleaving() {
+    let mut nullifier_db = NullifierDb::new();
+
+    // Setup
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    let initial_amount = Scalar::from(50u64);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .unwrap();
+    let mut current_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    let mut balance = 50u64;
+
+    // Grant 30
+    let (grant_proof1, pregrant1) = current_token.prove_grant(&params, Scalar::from(30u64), OsRng);
+    nullifier_db.record_spent(&grant_proof1.nullifier());
+    balance += 30;
+    let grant1 = private_key.grant(&params, &grant_proof1, OsRng).unwrap();
+    current_token = pregrant1
+        .to_credit_token(&params, &grant_proof1, &grant1, private_key.public())
+        .unwrap();
+    assert_eq!(current_token.c, Scalar::from(balance));
+
+    // Spend 20
+    let (spend_proof1, prerefund1) = current_token.prove_spend(&params, Scalar::from(20u64), OsRng);
+    nullifier_db.record_spent(&spend_proof1.nullifier());
+    balance -= 20;
+    let refund1 = private_key.refund(&params, &spend_proof1, OsRng).unwrap();
+    current_token = prerefund1
+        .to_credit_token(&params, &spend_proof1, &refund1, private_key.public())
+        .unwrap();
+    assert_eq!(current_token.c, Scalar::from(balance));
+
+    // Grant 40
+    let (grant_proof2, pregrant2) = current_token.prove_grant(&params, Scalar::from(40u64), OsRng);
+    nullifier_db.record_spent(&grant_proof2.nullifier());
+    balance += 40;
+    let grant2 = private_key.grant(&params, &grant_proof2, OsRng).unwrap();
+    current_token = pregrant2
+        .to_credit_token(&params, &grant_proof2, &grant2, private_key.public())
+        .unwrap();
+    assert_eq!(current_token.c, Scalar::from(balance));
+
+    // Spend 50
+    let (spend_proof2, prerefund2) = current_token.prove_spend(&params, Scalar::from(50u64), OsRng);
+    nullifier_db.record_spent(&spend_proof2.nullifier());
+    balance -= 50;
+    let refund2 = private_key.refund(&params, &spend_proof2, OsRng).unwrap();
+    current_token = prerefund2
+        .to_credit_token(&params, &spend_proof2, &refund2, private_key.public())
+        .unwrap();
+    assert_eq!(current_token.c, Scalar::from(balance));
+
+    // Final balance should be 50 + 30 - 20 + 40 - 50 = 50
+    assert_eq!(current_token.c, Scalar::from(50u64));
+}
+
+#[test]
+fn test_grant_overflow_protection() {
+    // Test that granting too much (would overflow 2^128) is rejected
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    // Issue a token with near-maximum value
+    let near_max = u128::MAX - 100;
+    let initial_amount = Scalar::from(near_max);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .unwrap();
+    let credit_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    // Try to grant 200 (which would overflow)
+    let grant_amount = Scalar::from(200u128);
+    let (grant_proof, _pregrant) = credit_token.prove_grant(&params, grant_amount, OsRng);
+
+    // The grant verification should fail
+    let grant_result = private_key.grant(&params, &grant_proof, OsRng);
+    assert_eq!(grant_result, Err(Error::InvalidClientSpendProof));
+}
+
+#[test]
+fn test_grant_with_tampered_proof() {
+    // Setup
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    let initial_amount = Scalar::from(50u64);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .unwrap();
+    let credit_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    // Create a valid grant proof
+    let grant_amount = Scalar::from(20u64);
+    let (mut grant_proof, _pregrant) = credit_token.prove_grant(&params, grant_amount, OsRng);
+
+    // Tamper with the proof
+    grant_proof.g = Scalar::from(30u64); // Change the grant amount
+
+    // Verification should fail
+    let grant_result = private_key.grant(&params, &grant_proof, OsRng);
+    assert_eq!(grant_result, Err(Error::InvalidClientSpendProof));
+}
+
+#[test]
+fn test_grant_double_spending() {
+    // Test that the same grant proof can't be used twice
+    let mut nullifier_db = NullifierDb::new();
+
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    let initial_amount = Scalar::from(50u64);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .unwrap();
+    let credit_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    // Create a grant proof
+    let grant_amount = Scalar::from(20u64);
+    let (grant_proof, pregrant) = credit_token.prove_grant(&params, grant_amount, OsRng);
+
+    // First use should succeed
+    let nullifier = grant_proof.nullifier();
+    assert!(!nullifier_db.is_spent(&nullifier));
+
+    let grant = private_key.grant(&params, &grant_proof, OsRng).unwrap();
+    nullifier_db.record_spent(&nullifier);
+
+    // Create new token
+    let new_token = pregrant
+        .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+        .unwrap();
+    assert_eq!(new_token.c, Scalar::from(70u64));
+
+    // Try to use the same original token again (double-grant attempt)
+    let (grant_proof2, _) = credit_token.prove_grant(&params, grant_amount, OsRng);
+    let nullifier2 = grant_proof2.nullifier();
+
+    // Should detect double-spend
+    assert!(nullifier_db.is_spent(&nullifier2), "Double-grant not detected");
+}
+
+#[test]
+fn test_grant_to_zero_balance_token() {
+    // Test granting to a token that has been fully spent
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let issuance_request = preissuance.request(&params, OsRng);
+
+    let initial_amount = Scalar::from(50u64);
+
+    let issuance_response = private_key
+        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .unwrap();
+    let credit_token = preissuance
+        .to_credit_token(
+            &params,
+            private_key.public(),
+            &issuance_request,
+            &issuance_response,
+        )
+        .unwrap();
+
+    // Spend all credits
+    let (spend_proof, prerefund) = credit_token.prove_spend(&params, initial_amount, OsRng);
+    assert_eq!(prerefund.m, Scalar::ZERO);
+
+    let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    let zero_token = prerefund
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(zero_token.c, Scalar::ZERO);
+
+    // Now grant to the zero-balance token
+    let grant_amount = Scalar::from(30u64);
+    let (grant_proof, pregrant) = zero_token.prove_grant(&params, grant_amount, OsRng);
+    assert_eq!(pregrant.m, grant_amount);
+
+    let grant = private_key.grant(&params, &grant_proof, OsRng).unwrap();
+    let revived_token = pregrant
+        .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+        .unwrap();
+
+    assert_eq!(revived_token.c, grant_amount, "Token should have grant amount");
+}
+
+// Property-based tests for grant functionality
+proptest! {
+    #![proptest_config(fast_config())]
+    #[test]
+    fn prop_grant_increases_balance(
+        initial_amount in 1u64..1000,
+        grant_amount in 1u64..1000,
+        private_key in private_key_strategy(),
+        pre_issuance in pre_issuance_strategy(),
+    ) {
+        let params = test_params();
+        let initial_credits = Scalar::from(initial_amount);
+        let grant_credits = Scalar::from(grant_amount);
+
+        // Skip if would overflow
+        prop_assume!(u128::from(initial_amount.saturating_add(grant_amount)) < u128::MAX / 2);
+
+        let request = pre_issuance.request(&params, OsRng);
+        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let token = pre_issuance
+            .to_credit_token(&params, private_key.public(), &request, &response)
+            .unwrap();
+
+        // Grant credits
+        let (grant_proof, pregrant) = token.prove_grant(&params, grant_credits, OsRng);
+
+        // New balance should be sum
+        let expected_balance = initial_credits + grant_credits;
+        prop_assert_eq!(pregrant.m, expected_balance);
+
+        // Process grant
+        if let Ok(grant) = private_key.grant(&params, &grant_proof, OsRng) {
+            let new_token = pregrant
+                .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+                .unwrap();
+
+            prop_assert_eq!(new_token.c, expected_balance);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(fast_config())]
+    #[test]
+    fn prop_grant_nullifier_uniqueness(
+        initial_amount in 10u64..100,
+        grant_amounts in prop::collection::vec(1u64..50, 2..5),
+        private_key in private_key_strategy(),
+        pre_issuance in pre_issuance_strategy(),
+    ) {
+        let params = test_params();
+        let initial_credits = Scalar::from(initial_amount);
+
+        let request = pre_issuance.request(&params, OsRng);
+        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let mut token = pre_issuance
+            .to_credit_token(&params, private_key.public(), &request, &response)
+            .unwrap();
+
+        let mut nullifiers = HashSet::new();
+        let mut balance = initial_amount;
+
+        for grant_amount in grant_amounts {
+            // Check for overflow
+            if u128::from(balance.saturating_add(grant_amount)) >= u128::MAX / 2 {
+                continue;
+            }
+
+            let grant_credits = Scalar::from(grant_amount);
+            let (grant_proof, pregrant) = token.prove_grant(&params, grant_credits, OsRng);
+
+            let nullifier = grant_proof.nullifier();
+            prop_assert!(!nullifiers.contains(&nullifier), "Grant nullifier collision detected");
+            nullifiers.insert(nullifier);
+
+            balance += grant_amount;
+
+            if let Ok(grant) = private_key.grant(&params, &grant_proof, OsRng) {
+                token = pregrant
+                    .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+                    .unwrap();
+
+                prop_assert_eq!(token.c, Scalar::from(balance));
+            }
+        }
+    }
+}

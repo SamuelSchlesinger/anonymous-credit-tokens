@@ -62,6 +62,24 @@
 //!    │     to new CreditToken               │
 //!    │     with remaining balance           │
 //!    │     [KEPT BY CLIENT]                 │
+//!    │                                      │
+//!    │       ┌─────────────────┐            │
+//!    │       │  Granting Phase │            │
+//!    │       └─────────────────┘            │
+//!    │ 11. Create GrantProof                │
+//!    │     [SENT TO ISSUER]                 │
+//!    │     and PreGrant                     │
+//!    │     [KEPT BY CLIENT]                 │
+//!    │ ──────────────────────────────────>  │
+//!    │                                      │ 12. Verify GrantProof
+//!    │                                      │ 13. Check nullifier
+//!    │                                      │ 14. Generate Grant
+//!    │                                      │     [SENT TO CLIENT]
+//!    │ <─────────────────────────────────── │
+//!    │ 15. Convert PreGrant+Grant           │
+//!    │     to new CreditToken               │
+//!    │     with increased balance           │
+//!    │     [KEPT BY CLIENT]                 │
 //! ┌──┴───┐                              ┌───┴───┐
 //! │Client│                              │Issuer │
 //! └──────┘                              └───────┘
@@ -74,6 +92,7 @@
 //!
 //! - **Credit Issuance**: Services can issue digital credit tokens to users
 //! - **Anonymous Spending**: Users can spend these credits without revealing their identity
+//! - **Anonymous Granting**: Users can receive additional credits on existing tokens privately
 //! - **Double-Spend Prevention**: The system prevents credits from being used multiple times
 //! - **Privacy-Preserving Refunds**: Unspent credits can be refunded without compromising user privacy
 //!
@@ -663,6 +682,74 @@ impl PrivateKey {
     }
 }
 
+/// A zero-knowledge proof that allows being granted credits anonymously.
+///
+/// This proof demonstrates that the client possesses a valid credit token with sufficient space
+/// space to contain the requested amount, without revealing the token itself. The proof includes a
+/// nullifier that prevents double spending, and a range proof that ensures that the remaining
+/// balance is below the upper limit.
+#[derive(ZeroizeOnDrop, Debug, Clone)]
+pub struct GrantProof {
+    /// The nullifier, uniquely identifying this grant to prevent double-spending
+    k: Scalar,
+    /// The amount being granted in this transaction
+    g: Scalar,
+    /// The blinded signature component
+    a_prime: RistrettoPoint,
+    /// A blinded token component
+    b_bar: RistrettoPoint,
+    /// Commitments for the binary decomposition of the new balance
+    com: [RistrettoPoint; L],
+    /// The challenge value for the zero-knowledge proof
+    gamma: Scalar,
+    /// Response value for the signature proof
+    e_bar: Scalar,
+    /// Response value for signature transformations
+    r2_bar: Scalar,
+    /// Response value for signature transformations
+    r3_bar: Scalar,
+    /// Response value for the credit amount
+    c_bar: Scalar,
+    /// Response value for the blinding factor
+    r_bar: Scalar,
+    /// Response value for the range proof (bit 0, value 0)
+    w00: Scalar,
+    /// Response value for the range proof (bit 0, value 1)
+    w01: Scalar,
+    /// Challenge values for each bit in the range proof
+    gamma0: [Scalar; L],
+    /// Response values for the range proof bit commitments
+    z: [[Scalar; 2]; L],
+    /// Response value for the credit identifier
+    k_bar: Scalar,
+    /// Response value for the range proof sum commitment
+    g_bar: Scalar,
+}
+
+impl GrantProof {
+    /// Returns the nullifier associated with this grant.
+    ///
+    /// The nullifier is a unique identifier for this grant that should be recorded
+    /// by the issuer to prevent double-spending. If the same nullifier is seen twice,
+    /// the second spend or grant attempt should be rejected.
+    ///
+    /// # Returns
+    ///
+    /// The nullifier as a `Scalar` value
+    pub fn nullifier(&self) -> Scalar {
+        self.k
+    }
+
+    /// Returns the amount of credits being granted in this transaction.
+    ///
+    /// # Returns
+    ///
+    /// The credit amount as a `Scalar` value
+    pub fn grant(&self) -> Scalar {
+        self.g
+    }
+}
+
 /// A zero-knowledge proof that allows spending credits anonymously.
 ///
 /// This proof demonstrates that the client possesses a valid credit token with
@@ -778,6 +865,121 @@ impl PrivateKey {
     /// // Then process the refund
     /// let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// ```
+    /// Processes a grant proof and issues a grant token for the increased credits.
+    ///
+    /// This method verifies the validity of a grant proof and, if valid, issues a grant
+    /// token for the new balance. The grant token can be used by the client to
+    /// construct a new credit token with the increased balance.
+    ///
+    /// # Security Warning
+    ///
+    /// This method does NOT verify that the nullifier has not been seen before. The caller
+    /// MUST check that the nullifier returned by `grant_proof.nullifier()` has not been
+    /// previously processed to prevent double-granting.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The system parameters
+    /// * `grant_proof` - The client's proof of valid granting
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Grant)` - The grant token if the grant proof is valid
+    /// * `Err(Error)` - If the grant proof verification fails
+    pub fn grant(
+        &self,
+        params: &Params,
+        grant_proof: &GrantProof,
+        mut rng: impl CryptoRngCore,
+    ) -> Result<Grant, Error> {
+        if grant_proof.a_prime == RistrettoPoint::identity() {
+            return Err(Error::IdentityPointError);
+        }
+
+        let a_bar = grant_proof.a_prime * self.x;
+        let big_h1 = RistrettoPoint::generator() + &params.h2 * &grant_proof.k;
+        let a1 = grant_proof.a_prime * grant_proof.e_bar
+            + grant_proof.b_bar * grant_proof.r2_bar
+            + a_bar * grant_proof.gamma.neg();
+        let a2 = grant_proof.b_bar * grant_proof.r3_bar
+            + &params.h1 * &grant_proof.c_bar
+            + &params.h3 * &grant_proof.r_bar
+            + big_h1 * grant_proof.gamma.neg();
+        let mut gamma01 = [Scalar::ZERO; L];
+        gamma01[0] = grant_proof.gamma - grant_proof.gamma0[0];
+        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
+        big_c[0][0] = grant_proof.com[0];
+        big_c[0][1] = grant_proof.com[0] - params.h1.basepoint();
+        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+        big_c_prime[0][0] = &params.h2 * &grant_proof.w00 + &params.h3 * &grant_proof.z[0][0]
+            - big_c[0][0] * grant_proof.gamma0[0];
+        big_c_prime[0][1] = &params.h2 * &grant_proof.w01 + &params.h3 * &grant_proof.z[0][1]
+            - big_c[0][1] * gamma01[0];
+        for j in 1..L {
+            gamma01[j] = grant_proof.gamma - grant_proof.gamma0[j];
+            big_c[j][0] = grant_proof.com[j];
+            big_c[j][1] = grant_proof.com[j] - params.h1.basepoint();
+            big_c_prime[j][0] =
+                &params.h3 * &grant_proof.z[j][0] - big_c[j][0] * grant_proof.gamma0[j];
+            big_c_prime[j][1] = &params.h3 * &grant_proof.z[j][1] - big_c[j][1] * gamma01[j];
+        }
+
+        let k_prime = grant_proof
+            .com
+            .iter()
+            .enumerate()
+            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        // In spending: com_ = h1*s + k_prime, where k_prime encodes (c - s)
+        // In granting: com_ should be k_prime - h1*g, where k_prime encodes (c + g)
+        // This is because: c + g = bits, so c = bits - g
+        let com_ = k_prime - &params.h1 * &grant_proof.g;
+        let big_c = &params.h1 * &grant_proof.c_bar.neg()
+            + &params.h2 * &grant_proof.k_bar
+            + &params.h3 * &grant_proof.g_bar
+            - com_ * grant_proof.gamma;
+
+        let gamma = Transcript::with(params, b"grant", |transcript| {
+            transcript.add_scalar(&grant_proof.k);
+            transcript.add_elements([&grant_proof.a_prime, &grant_proof.b_bar].into_iter());
+            transcript.add_elements([&a1, &a2].into_iter());
+            transcript.add_elements(grant_proof.com.iter());
+            for c_prime in big_c_prime.iter() {
+                transcript.add_elements(c_prime.iter());
+            }
+            transcript.add_element(&big_c);
+        });
+
+        if gamma != grant_proof.gamma {
+            return Err(Error::InvalidClientSpendProof);
+        }
+
+        let e = Scalar::random(&mut rng);
+
+        let x_a = RistrettoPoint::generator() + k_prime;
+        let a = x_a * (e + self.x).invert();
+
+        let x_g = RistrettoPoint::generator() * e + self.public.w;
+        let alpha = Scalar::random(&mut rng);
+        let y_a = a * alpha;
+        let y_g = RistrettoPoint::generator() * alpha;
+
+        let grant_gamma = Transcript::with(params, b"grant_response", |transcript| {
+            transcript.add_scalar(&e);
+            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
+        });
+
+        let z = grant_gamma * (self.x + e) + alpha;
+
+        Ok(Grant {
+            a,
+            e,
+            gamma: grant_gamma,
+            z,
+        })
+    }
+
     pub fn refund(
         &self,
         params: &Params,
@@ -882,6 +1084,22 @@ pub struct PreRefund {
     /// A random identifier for the new credit token
     k: Scalar,
     /// The remaining balance after spending
+    m: Scalar,
+}
+
+/// Client state maintained during the grant protocol.
+///
+/// This structure holds the client's secret values that are needed to complete
+/// the grant protocol and construct a new credit token with the increased balance.
+/// The client must keep this information private after receiving a grant and while
+/// awaiting the grant response.
+#[derive(ZeroizeOnDrop, Debug, Clone)]
+pub struct PreGrant {
+    /// A random blinding factor for the new credit token
+    r: Scalar,
+    /// A random identifier for the new credit token
+    k: Scalar,
+    /// The new balance after granting
     m: Scalar,
 }
 
@@ -1150,6 +1368,221 @@ impl CreditToken {
             prerefund,
         )
     }
+
+    /// Creates a zero-knowledge proof for being granted credits to this token.
+    ///
+    /// This method generates a proof that the client possesses a valid credit token and
+    /// that adding the granted amount will not exceed the maximum allowed balance (2^L - 1).
+    /// The proof includes a range proof to demonstrate that the new balance is within bounds,
+    /// and a nullifier to prevent double-granting.
+    ///
+    /// # Precondition
+    ///
+    /// This function requires that `self.c + g < 2^L`. If this condition is not met,
+    /// the proof will be invalid and will be rejected by the issuer.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The system parameters
+    /// * `g` - The amount of credits to grant
+    /// * `rng` - A cryptographically secure random number generator
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * `GrantProof` - The proof of valid granting to send to the issuer
+    /// * `PreGrant` - The client's state to keep for later creating a new credit token
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Grant 10 credits (where token balance + 10 < 2^128)
+    /// let grant_amount = Scalar::from(10u128);
+    /// let (grant_proof, pregrant) = credit_token.prove_grant(&params, grant_amount, OsRng);
+    /// ```
+    pub fn prove_grant(
+        &self,
+        params: &Params,
+        g: Scalar,
+        mut rng: impl CryptoRngCore,
+    ) -> (GrantProof, PreGrant) {
+        let r1 = Scalar::random(&mut rng);
+        let r2 = Scalar::random(&mut rng);
+        let c_prime = Scalar::random(&mut rng);
+        let r_prime = Scalar::random(&mut rng);
+        let e_prime = Scalar::random(&mut rng);
+        let r2_prime = Scalar::random(&mut rng);
+        let r3_prime = Scalar::random(&mut rng);
+
+        let b = RistrettoPoint::generator()
+            + &params.h1 * &self.c
+            + &params.h2 * &self.k
+            + &params.h3 * &self.r;
+        let a_prime = self.a * (r1 * r2);
+        let b_bar = b * r1;
+        let r3 = r1.invert();
+        let a1 = a_prime * e_prime + b_bar * r2_prime;
+        let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
+
+        // Key difference: we prove c + g is within bounds instead of c - s
+        let i = bits_of(self.c + g);
+
+        let k_star = Scalar::random(&mut rng);
+        let g_i: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
+        let mut com = [RistrettoPoint::identity(); L];
+        com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &g_i[0];
+        for j in 1..L {
+            com[j] = &params.h1 * &i[j] + &params.h3 * &g_i[j];
+        }
+        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
+        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+
+        big_c[0][0] = com[0];
+        big_c[0][1] = com[0] - params.h1.basepoint();
+        let k0_prime = Scalar::random(&mut rng);
+        let mut g_i_prime = [Scalar::ZERO; L];
+        for g_prime in g_i_prime.iter_mut() {
+            *g_prime = Scalar::random(&mut rng);
+        }
+        let mut gamma_i = [Scalar::ZERO; L];
+        for gamma in gamma_i.iter_mut() {
+            *gamma = Scalar::random(&mut rng);
+        }
+        let w0 = Scalar::random(&mut rng);
+        let mut z = [Scalar::ZERO; L];
+        for z_val in z.iter_mut() {
+            *z_val = Scalar::random(&mut rng);
+        }
+
+        big_c_prime[0][0] = RistrettoPoint::conditional_select(
+            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][0] * gamma_i[0]),
+            &(&params.h2 * &k0_prime + &params.h3 * &g_i_prime[0]),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+
+        big_c_prime[0][1] = RistrettoPoint::conditional_select(
+            &(&params.h2 * &k0_prime + &params.h3 * &g_i_prime[0]),
+            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][1] * gamma_i[0]),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+
+        for j in 1..L {
+            big_c[j][0] = com[j];
+            big_c[j][1] = com[j] - params.h1.basepoint();
+
+            big_c_prime[j][0] = RistrettoPoint::conditional_select(
+                &(&params.h3 * &z[j] - big_c[j][0] * gamma_i[j]),
+                &(&params.h3 * &g_i_prime[j]),
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+            big_c_prime[j][1] = RistrettoPoint::conditional_select(
+                &(&params.h3 * &g_i_prime[j]),
+                &(&params.h3 * &z[j] - big_c[j][1] * gamma_i[j]),
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+        }
+        let r_star = g_i
+            .iter()
+            .enumerate()
+            .map(|(i, gi)| gi * Scalar::from(2u128.pow(i as u32)))
+            .fold(Scalar::ZERO, |x, y| x + y);
+        let k_prime = Scalar::random(&mut rng);
+        let g_prime = Scalar::random(&mut rng);
+        let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &g_prime;
+
+        // Use "grant" as the transcript label to differentiate from "spend"
+        let gamma = Transcript::with(params, b"grant", |transcript| {
+            transcript.add_scalar(&self.k);
+            transcript.add_elements([&a_prime, &b_bar].into_iter());
+            transcript.add_elements([&a1, &a2].into_iter());
+            transcript.add_elements(com.iter());
+            for c_prime in big_c_prime.iter() {
+                transcript.add_elements(c_prime.iter());
+            }
+            transcript.add_element(&c_);
+        });
+
+        let e_bar = gamma.neg() * self.e + e_prime;
+        let r2_bar = gamma * r2 + r2_prime;
+        let r3_bar = gamma * r3 + r3_prime;
+        let c_bar = gamma.neg() * self.c + c_prime;
+        let r_bar = gamma.neg() * self.r + r_prime;
+        let mut gamma00 = [Scalar::ZERO; L];
+        gamma00[0] = Scalar::conditional_select(
+            &gamma_i[0],
+            &(gamma - gamma_i[0]),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        let w00 = Scalar::conditional_select(
+            &w0,
+            &(gamma00[0] * k_star + k0_prime),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        let w01 = Scalar::conditional_select(
+            &((gamma - gamma00[0]) * k_star + k0_prime),
+            &w0,
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        let mut z00 = [[Scalar::ZERO; 2]; L];
+        z00[0][0] = Scalar::conditional_select(
+            &z[0],
+            &(gamma00[0] * g_i[0] + g_i_prime[0]),
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        z00[0][1] = Scalar::conditional_select(
+            &((gamma - gamma00[0]) * g_i[0] + g_i_prime[0]),
+            &z[0],
+            i[0].ct_eq(&Scalar::ZERO),
+        );
+        for j in 1..L {
+            gamma00[j] = Scalar::conditional_select(
+                &gamma_i[j],
+                &(gamma - gamma_i[j]),
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+            z00[j][0] = Scalar::conditional_select(
+                &z[j],
+                &(gamma00[j] * g_i[j] + g_i_prime[j]),
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+            z00[j][1] = Scalar::conditional_select(
+                &((gamma - gamma00[j]) * g_i[j] + g_i_prime[j]),
+                &z[j],
+                i[j].ct_eq(&Scalar::ZERO),
+            );
+        }
+        let k_bar = gamma * k_star + k_prime;
+        let g_bar = gamma * r_star + g_prime;
+
+        let pregrant = PreGrant {
+            k: k_star,
+            r: r_star,
+            m: self.c + g,  // Key difference: adding instead of subtracting
+        };
+
+        (
+            GrantProof {
+                k: self.k,
+                g,
+                a_prime,
+                b_bar,
+                com,
+                gamma,
+                e_bar,
+                r2_bar,
+                r3_bar,
+                c_bar,
+                r_bar,
+                w00,
+                w01,
+                gamma0: gamma00,
+                z: z00,
+                k_bar,
+                g_bar,
+            },
+            pregrant,
+        )
+    }
 }
 
 /// The issuer's response to a spending proof, used to create a new credit token.
@@ -1159,6 +1592,23 @@ impl CreditToken {
 /// signature on the remaining balance and proof values that authenticate the response.
 #[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct Refund {
+    /// The BBS+ signature's main component for the new credit token
+    a: RistrettoPoint,
+    /// A random scalar used in the BBS+ signature
+    e: Scalar,
+    /// A challenge value generated as part of the proof protocol
+    gamma: Scalar,
+    /// A response value for the proof of knowledge of the signature
+    z: Scalar,
+}
+
+/// The issuer's response to a grant proof, used to create a new credit token.
+///
+/// This response contains the cryptographic signature components needed for the client
+/// to construct a new credit token with the increased balance. It includes a BBS+
+/// signature on the new balance and proof values that authenticate the response.
+#[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
+pub struct Grant {
     /// The BBS+ signature's main component for the new credit token
     a: RistrettoPoint,
     /// A random scalar used in the BBS+ signature
@@ -1246,6 +1696,75 @@ impl PreRefund {
         Ok(CreditToken {
             a: refund.a,
             e: refund.e,
+            k: self.k,
+            r: self.r,
+            c: self.m,
+        })
+    }
+}
+
+impl PreGrant {
+    /// Constructs a new credit token from the grant response.
+    ///
+    /// This method verifies the issuer's grant response and, if valid, creates a new
+    /// credit token with the increased balance. This completes the granting protocol
+    /// by providing the client with a new token for their increased credits.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The system parameters
+    /// * `grant_proof` - The original grant proof sent to the issuer
+    /// * `grant` - The issuer's grant response
+    /// * `public_key` - The issuer's public key
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(CreditToken)` - A new credit token with the increased balance if the grant is valid
+    /// * `Err(Error)` - If the verification fails
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Construct the new credit token with the increased balance
+    /// let new_credit_token = pregrant.to_credit_token(
+    ///     &params,
+    ///     &grant_proof,
+    ///     &grant,
+    ///     public_key
+    /// ).unwrap();
+    /// ```
+    pub fn to_credit_token(
+        &self,
+        params: &Params,
+        grant_proof: &GrantProof,
+        grant: &Grant,
+        public_key: &PublicKey,
+    ) -> Result<CreditToken, Error> {
+        let x_a = RistrettoPoint::generator()
+            + grant_proof
+                .com
+                .iter()
+                .enumerate()
+                .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+                .fold(RistrettoPoint::identity(), |a, b| a + b);
+
+        let x_g = RistrettoPoint::generator() * grant.e + public_key.w;
+        let y_a = grant.a * grant.z + x_a * grant.gamma.neg();
+        let y_g = RistrettoPoint::generator() * grant.z + x_g * grant.gamma.neg();
+
+        let gamma = Transcript::with(params, b"grant_response", |transcript| {
+            transcript.add_scalar(&grant.e);
+            transcript.add_elements([&grant.a, &x_a, &x_g, &y_a, &y_g].into_iter());
+        });
+
+        if gamma != grant.gamma {
+            return Err(Error::InvalidRefundProof);
+        }
+
+        // The client now has a new credit token with increased balance
+        Ok(CreditToken {
+            a: grant.a,
+            e: grant.e,
             k: self.k,
             r: self.r,
             c: self.m,

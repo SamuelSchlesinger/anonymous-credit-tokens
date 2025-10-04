@@ -15,6 +15,7 @@ This library implements the Anonymous Credit Scheme designed by Jonathan Katz an
 
 - **Credit Issuance**: Services can issue digital credit tokens to users
 - **Anonymous Spending**: Users can spend these credits without revealing their identity
+- **Anonymous Granting**: Users can receive additional credits on existing tokens privately
 - **Double-Spend Prevention**: The system prevents credits from being used multiple times
 - **Privacy-Preserving Refunds**: Unspent credits can be refunded without compromising user privacy
 
@@ -87,7 +88,8 @@ A typical service implementation would include these endpoints:
 
 1. **Issue Credit**: Process client issuance requests and issue credit tokens
 2. **Process Spend**: Verify spending proofs and issue refunds
-3. **Get Public Key**: Provide the issuer's public key to clients
+3. **Process Grant**: Verify grant proofs and issue grants
+4. **Get Public Key**: Provide the issuer's public key to clients
 
 ## Usage Examples
 
@@ -171,6 +173,30 @@ let new_credit_token = prerefund
     .unwrap();
 ```
 
+### Granting Credits
+
+```rust
+// Client-side: Creates a grant proof (requesting 15 more credits on top of existing 10)
+let grant_amount = Scalar::from(15u64);
+let (grant_proof, pregrant) = credit_token.prove_grant(&params, grant_amount, OsRng);
+
+// Server-side: Verify and process the grant proof
+// IMPORTANT: Check that the nullifier hasn't been used before
+let nullifier = grant_proof.nullifier();
+if nullifier_store.is_used(&nullifier) {
+    return Err("Double-grant attempt detected");
+}
+nullifier_store.mark_used(nullifier);
+
+// Server-side: Create a grant
+let grant = private_key.grant(&params, &grant_proof, OsRng).unwrap();
+
+// Client-side: Construct a new credit token with increased credits
+let new_credit_token = pregrant
+    .to_credit_token(&params, &grant_proof, &grant, private_key.public())
+    .unwrap();
+```
+
 ### Complete Transaction Lifecycle
 
 ```rust
@@ -250,6 +276,13 @@ This implementation uses:
    - Issuer verifies the proof and checks the nullifier database
    - Issuer creates a new signature for the refund token
    - Client constructs a new credit token with the remaining balance
+4. **Granting Protocol**:
+   - Client creates a zero-knowledge proof of valid token ownership
+   - Client proves that the new balance (current + grant) is within range
+   - Client includes a nullifier to prevent double-granting
+   - Issuer verifies the proof and checks the nullifier database
+   - Issuer creates a new signature for the grant token
+   - Client constructs a new credit token with the increased balance
 
 ## Benchmarks
 
@@ -263,6 +296,9 @@ The project uses [Criterion.rs](https://github.com/bheisler/criterion.rs) for be
 - Spending proof generation
 - Refund processing
 - Refund token creation
+- Grant proof generation
+- Grant processing
+- Grant token creation
 
 To run the benchmarks:
 
@@ -289,6 +325,7 @@ Benchmark results will be available in the `target/criterion` directory as HTML 
 3. **API Endpoints**:
    - POST `/api/credits/issue`: Process issuance requests
    - POST `/api/credits/spend`: Process spending proofs
+   - POST `/api/credits/grant`: Process grant proofs
    - GET `/api/credits/public-key`: Provide the issuer's public key
 
 ### Client Integration
