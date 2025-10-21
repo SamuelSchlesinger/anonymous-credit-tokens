@@ -94,7 +94,7 @@
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
 use group::Group;
 use rand_core::CryptoRngCore;
-use sigma_rs::LinearRelation;
+use sigma_proofs::LinearRelation;
 use std::ops::Neg;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
@@ -1220,7 +1220,7 @@ impl PreRefund {
 /// Proofs of knowledge used in this protocol.
 mod proofs {
     use group::prime::PrimeGroup;
-    use sigma_rs::LinearRelation;
+    use sigma_proofs::LinearRelation;
 
     /// Relation used to prove knowledge of (k0, k1) such that R = k0\*P + k1\*Q.
     ///
