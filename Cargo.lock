@@ -28,6 +28,7 @@ dependencies = [
  "group",
  "proptest",
  "rand",
+ "rand_chacha",
  "rand_core",
  "subtle",
  "zeroize",

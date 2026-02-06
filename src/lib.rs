@@ -835,9 +835,33 @@ impl PrivateKey {
     ///
     /// # Security Warning
     ///
-    /// This method does NOT verify that the nullifier has not been seen before. The caller
-    /// MUST check that the nullifier returned by `spend_proof.nullifier()` has not been
-    /// previously processed to prevent double-spending.
+    /// This method implements only the proof verification and refund issuance portions
+    /// of the spec's `VerifyAndRefund` function. The caller MUST also:
+    ///
+    /// 1. Check that `spend_proof.nullifier()` has not been previously recorded
+    /// 2. Atomically record the nullifier before returning the refund to the client
+    /// 3. Ensure the refund remains retrievable if the client's connection drops
+    ///
+    /// ```rust,no_run
+    /// # use anonymous_credit_tokens::*;
+    /// # fn example(private_key: &PrivateKey, params: &Params,
+    /// #     spend_proof: &SpendProof<128>, nullifier_db: &mut std::collections::HashSet<Scalar>)
+    /// #     -> Result<Refund, ErrorCode> {
+    /// // Step 1: Check nullifier
+    /// let nullifier = spend_proof.nullifier();
+    /// if nullifier_db.contains(&nullifier) {
+    ///     return Err(ErrorCode::NullifierReuse);
+    /// }
+    ///
+    /// // Step 2: Verify proof and create refund
+    /// let refund = private_key.refund(params, spend_proof, rand_core::OsRng)?;
+    ///
+    /// // Step 3: Record nullifier (atomically in production)
+    /// nullifier_db.insert(nullifier);
+    ///
+    /// Ok(refund)
+    /// # }
+    /// ```
     ///
     /// # Arguments
     ///
@@ -1398,6 +1422,44 @@ impl PreRefund {
             ctx: self.ctx,
         })
     }
+}
+
+/// Converts a Scalar back to a credit amount, validating that it fits within L bits.
+///
+/// This implements the `ScalarToCredit` function from the spec (Section 3.8).
+/// The scalar must represent a value in the range `[0, 2^L)`. Values outside
+/// this range are rejected with [`ErrorCode::InvalidAmount`].
+///
+/// # Type Parameters
+///
+/// * `L` - The bit-length for credit values. Must be `<= 252`.
+///
+/// # Arguments
+///
+/// * `scalar` - The Scalar value to convert to a credit amount
+///
+/// # Returns
+///
+/// * `Ok(u128)` - The credit amount if the scalar is within the valid range
+/// * `Err(ErrorCode::InvalidAmount)` - If the scalar does not fit in L bits or u128
+///
+/// # Example
+///
+/// ```
+/// use anonymous_credit_tokens::{scalar_to_credit, credit_to_scalar};
+///
+/// let scalar = credit_to_scalar::<128>(100).unwrap();
+/// assert_eq!(scalar_to_credit::<128>(&scalar), Ok(100));
+///
+/// // With a smaller L, large values are rejected
+/// let big = credit_to_scalar::<128>(1000).unwrap();
+/// assert!(scalar_to_credit::<8>(&big).is_err()); // 1000 >= 2^8
+/// ```
+pub fn scalar_to_credit<const L: usize>(scalar: &Scalar) -> Result<u128, ErrorCode> {
+    if !scalar_fits_in_bits::<L>(scalar) {
+        return Err(ErrorCode::InvalidAmount);
+    }
+    scalar_to_u128(scalar).ok_or(ErrorCode::InvalidAmount)
 }
 
 /// Converts a credit amount to a Scalar, validating that it is within the valid range.

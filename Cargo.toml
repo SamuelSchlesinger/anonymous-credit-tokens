@@ -21,6 +21,7 @@ zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 [dev-dependencies]
 proptest = "1.6.0"
 rand = "0.8.5"
+rand_chacha = "0.3.1"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 criterion = "0.5.1"
 
