@@ -122,9 +122,8 @@
 //!
 //! See the README.md file for comprehensive integration guidance.
 
-use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable, traits::MultiscalarMul};
+use curve25519_dalek::{RistrettoPoint, ristretto::RistrettoBasepointTable, traits::MultiscalarMul};
 use group::Group;
-use rand_core::CryptoRngCore;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
@@ -134,6 +133,11 @@ mod transcript;
 use transcript::Transcript;
 
 pub mod cbor;
+
+// Re-export types used in the public API so consumers don't need to depend
+// on curve25519-dalek or rand_core directly.
+pub use curve25519_dalek::Scalar;
+pub use rand_core::{self, CryptoRngCore};
 
 /// Attempts to convert a Scalar to a u128 value.
 ///
@@ -797,6 +801,7 @@ impl<const L: usize> SpendProof<L> {
     /// # Returns
     ///
     /// The nullifier as a `Scalar` value
+    #[allow(clippy::let_unit_value)]
     pub fn nullifier(&self) -> Scalar {
         let _ = Self::_ASSERT;
         self.k
@@ -1455,6 +1460,19 @@ impl ErrorCode {
     }
 }
 
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorCode::InvalidProof => write!(f, "proof verification failed"),
+            ErrorCode::NullifierReuse => write!(f, "double-spend attempt detected"),
+            ErrorCode::MalformedRequest => write!(f, "request format is invalid"),
+            ErrorCode::InvalidAmount => write!(f, "credit amount exceeds maximum"),
+        }
+    }
+}
+
+impl std::error::Error for ErrorCode {}
+
 /// An error message as defined in Section 4.2 of the spec.
 ///
 /// ```text
@@ -1470,6 +1488,14 @@ pub struct ErrorMsg {
     /// A human-readable error message for debugging.
     pub error_message: String,
 }
+
+impl std::fmt::Display for ErrorMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.error_code, self.error_message)
+    }
+}
+
+impl std::error::Error for ErrorMsg {}
 
 #[cfg(test)]
 mod tests;

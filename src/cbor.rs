@@ -33,6 +33,25 @@ pub enum CborError {
     InvalidValue(&'static str),
 }
 
+impl std::fmt::Display for CborError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CborError::Ciborium(e) => write!(f, "CBOR error: {e}"),
+            CborError::InvalidStructure(msg) => write!(f, "invalid CBOR structure: {msg}"),
+            CborError::InvalidValue(msg) => write!(f, "invalid CBOR value: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CborError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CborError::Ciborium(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl From<ciborium::de::Error<std::io::Error>> for CborError {
     fn from(e: ciborium::de::Error<std::io::Error>) -> Self {
         CborError::Ciborium(e)

@@ -19,14 +19,13 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "anonymous-credit-tokens"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "ciborium",
  "criterion",
  "curve25519-dalek",
  "group",
- "hex",
  "proptest",
  "rand",
  "rand_core",
@@ -405,12 +404,6 @@ name = "hermit-abi"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbd780fe5cc30f81464441920d82ac8740e2e46b29a6fad543ddd075229ce37e"
-
-[[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "is-terminal"
