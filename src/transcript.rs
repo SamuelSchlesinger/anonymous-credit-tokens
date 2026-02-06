@@ -62,6 +62,7 @@ impl Transcript {
         transcript.add_element(&params.h1.basepoint());
         transcript.add_element(&params.h2.basepoint());
         transcript.add_element(&params.h3.basepoint());
+        transcript.add_element(&params.h4.basepoint());
         // Add label with length prefix
         transcript.hasher.update(&(label.len() as u64).to_be_bytes());
         transcript.hasher.update(label);

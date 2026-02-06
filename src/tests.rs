@@ -17,6 +17,19 @@ use rand_core::OsRng;
 use std::collections::HashSet;
 use proptest::prelude::*;
 
+/// A fixed example request context for tests, derived from a human-readable label.
+/// In production, this would be an application-specific context (e.g., hashed from
+/// a Privacy Pass token challenge or session identifier).
+fn test_context() -> Scalar {
+    // Hash a descriptive string to produce a deterministic test context
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"test-request-context:example.com/api/charge");
+    let mut wide = [0u8; 64];
+    let mut reader = hasher.finalize_xof();
+    reader.fill(&mut wide);
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
 /// A simple in-memory nullifier database for testing double-spend prevention
 #[derive(Default)]
 struct NullifierDb {
@@ -55,7 +68,7 @@ fn issuance() {
         let credit_amount = Scalar::from(thread_rng().gen_range(1..1000) as u64);
 
         let issuance_response = private_key
-            .issue(&params, &issuance_request, credit_amount, OsRng)
+            .issue(&params, &issuance_request, credit_amount, test_context(), OsRng)
             .unwrap();
         let _credit_token1 = preissuance
             .to_credit_token(
@@ -83,7 +96,7 @@ fn full_cycle() {
         let credit_amount = Scalar::from(total_credits);
 
         let issuance_response = private_key
-            .issue(&params, &issuance_request, credit_amount, OsRng)
+            .issue(&params, &issuance_request, credit_amount, test_context(), OsRng)
             .unwrap();
         let credit_token1 = preissuance
             .to_credit_token(
@@ -134,7 +147,7 @@ fn double_spend_prevention() {
     let credit_amount = Scalar::from(total_credits);
 
     let issuance_response = private_key
-        .issue(&params, &issuance_request, credit_amount, OsRng)
+        .issue(&params, &issuance_request, credit_amount, test_context(), OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -213,7 +226,7 @@ fn spend_exact_balance() {
     let credit_amount = Scalar::from(total_credits);
 
     let issuance_response = private_key
-        .issue(&params, &issuance_request, credit_amount, OsRng)
+        .issue(&params, &issuance_request, credit_amount, test_context(), OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -265,7 +278,7 @@ fn sequential_spends() {
     let initial_amount = Scalar::from(initial_credits);
 
     let issuance_response = private_key
-        .issue(&params, &issuance_request, initial_amount, OsRng)
+        .issue(&params, &issuance_request, initial_amount, test_context(), OsRng)
         .unwrap();
     let mut current_token = preissuance
         .to_credit_token(
@@ -343,7 +356,7 @@ fn attempt_overspend() {
     let credit_amount = Scalar::from(credit_value);
 
     let issuance_response = private_key
-        .issue(&params, &issuance_request, credit_amount, OsRng)
+        .issue(&params, &issuance_request, credit_amount, test_context(), OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -384,7 +397,7 @@ fn zero_spend_scenario() {
     let credit_amount = Scalar::from(credit_value);
 
     let issuance_response = private_key
-        .issue(&params, &issuance_request, credit_amount, OsRng)
+        .issue(&params, &issuance_request, credit_amount, test_context(), OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -439,7 +452,7 @@ fn multiple_tokens_with_same_issuer() {
     let preissuance1 = PreIssuance::random(OsRng);
     let request1 = preissuance1.request(&params, OsRng);
     let response1 = private_key
-        .issue(&params, &request1, credit_amount1, OsRng)
+        .issue(&params, &request1, credit_amount1, test_context(), OsRng)
         .unwrap();
     let token1 = preissuance1
         .to_credit_token(&params, private_key.public(), &request1, &response1)
@@ -452,7 +465,7 @@ fn multiple_tokens_with_same_issuer() {
     let preissuance2 = PreIssuance::random(OsRng);
     let request2 = preissuance2.request(&params, OsRng);
     let response2 = private_key
-        .issue(&params, &request2, credit_amount2, OsRng)
+        .issue(&params, &request2, credit_amount2, test_context(), OsRng)
         .unwrap();
     let token2 = preissuance2
         .to_credit_token(&params, private_key.public(), &request2, &response2)
@@ -586,14 +599,14 @@ fn invalid_issuance_request() {
 
     // The issuer should reject the tampered request
     let issuance_response =
-        private_key.issue(&params, &tampered_request, Scalar::from(20u64), OsRng);
+        private_key.issue(&params, &tampered_request, Scalar::from(20u64), test_context(), OsRng);
     assert!(
         issuance_response.is_err(),
         "Tampered request should be rejected"
     );
 
     // The original request should be accepted
-    let issuance_response = private_key.issue(&params, &valid_request, Scalar::from(20u64), OsRng);
+    let issuance_response = private_key.issue(&params, &valid_request, Scalar::from(20u64), test_context(), OsRng);
     assert!(
         issuance_response.is_ok(),
         "Valid request should be accepted"
@@ -615,7 +628,7 @@ fn invalid_proof_verification() {
     let credit_amount = Scalar::from(credit_value);
 
     let response = private_key
-        .issue(&params, &request, credit_amount, OsRng)
+        .issue(&params, &request, credit_amount, test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -655,7 +668,7 @@ fn large_amount_issuance() {
     let large_amount = Scalar::from(base_amount + variation);
 
     let response = private_key
-        .issue(&params, &request, large_amount, OsRng)
+        .issue(&params, &request, large_amount, test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -696,7 +709,7 @@ fn invalid_token_verification() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue(&params, &request, Scalar::from(50u64), OsRng)
+        .issue(&params, &request, Scalar::from(50u64), test_context(), OsRng)
         .unwrap();
 
     // Tamper with the response
@@ -706,6 +719,7 @@ fn invalid_token_verification() {
         e: response.e + Scalar::ONE, // Modify the e value
         z: response.z,
         c: response.c,
+        ctx: response.ctx,
     };
 
     // The client should reject the tampered response
@@ -732,6 +746,7 @@ fn test_params_generation_deterministic() {
     assert_eq!(params1.h1.basepoint().compress(), params2.h1.basepoint().compress());
     assert_eq!(params1.h2.basepoint().compress(), params2.h2.basepoint().compress());
     assert_eq!(params1.h3.basepoint().compress(), params2.h3.basepoint().compress());
+    assert_eq!(params1.h4.basepoint().compress(), params2.h4.basepoint().compress());
     
     // Different domain separators should produce different parameters
     let params3 = Params::new("different-org", "test-service", "test", "2024-01-01");
@@ -776,7 +791,7 @@ fn tampered_refund_verification() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue(&params, &request, Scalar::from(50u64), OsRng)
+        .issue(&params, &request, Scalar::from(50u64), test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -826,7 +841,7 @@ fn zero_e_signature_attack() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue(&params, &request, Scalar::from(20u64), OsRng)
+        .issue(&params, &request, Scalar::from(20u64), test_context(), OsRng)
         .unwrap();
 
     // Create a tampered response with e = 0
@@ -836,6 +851,7 @@ fn zero_e_signature_attack() {
         gamma: response.gamma,
         z: response.z,
         c: response.c,
+        ctx: response.ctx,
     };
 
     // The client should reject this (though the actual signature verification may fail in different ways)
@@ -852,7 +868,7 @@ fn spend_with_identity_a_prime() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue(&params, &request, Scalar::from(20u64), OsRng)
+        .issue(&params, &request, Scalar::from(20u64), test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -873,47 +889,48 @@ fn spend_with_identity_a_prime() {
 }
 
 #[test]
-fn token_with_zero_credit() {
-    use rand::{Rng, thread_rng};
-
-    // Create a token with zero credits
+fn issuance_rejects_zero_credits() {
+    // Issuing with zero credits should be rejected (spec: c > 0)
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
-    let zero_amount = Scalar::ZERO;
+    let response = private_key.issue(&params, &request, Scalar::ZERO, test_context(), OsRng);
+    assert_eq!(
+        response.unwrap_err(),
+        ErrorCode::InvalidAmount,
+        "Zero credit amount should be rejected"
+    );
+}
+
+#[test]
+fn spend_zero_for_reanonymization() {
+    // Spending 0 is valid and useful: it re-anonymizes a token with a fresh
+    // nullifier, enabling secure transfer to another party.
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let request = preissuance.request(&params, OsRng);
+    let initial_credits = Scalar::from(100u128);
     let response = private_key
-        .issue(&params, &request, zero_amount, OsRng)
+        .issue(&params, &request, initial_credits, test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
         .unwrap();
 
-    // Token should have zero balance
-    assert_eq!(token.c, Scalar::ZERO, "Token should have zero balance");
+    // Spend zero to re-anonymize
+    let (spend_proof, prerefund) = token.prove_spend(&params, Scalar::ZERO, OsRng);
+    assert_eq!(prerefund.m, initial_credits, "Balance should be unchanged");
 
-    // Attempting to spend from this token should fail
-    // Try to spend a random positive amount
-    let spend_amount = Scalar::from(thread_rng().gen_range(1..100) as u64);
-    let (spend_proof, _) = token.prove_spend(&params, spend_amount, OsRng);
-    let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-    assert!(
-        refund_result.is_err(),
-        "Spending from a zero-balance token should fail"
-    );
-
-    // But spending zero from it should work
-    let zero_spend = Scalar::ZERO;
-    let (spend_proof, prerefund) = token.prove_spend(&params, zero_spend, OsRng);
     let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
-    assert_eq!(
-        new_token.c,
-        Scalar::ZERO,
-        "New token should still have zero balance"
-    );
+
+    // New token has same balance but fresh nullifier
+    assert_eq!(new_token.c, initial_credits);
+    assert_ne!(new_token.k, token.k, "New token should have a different nullifier");
 }
 
 #[test]
@@ -930,7 +947,7 @@ fn exhaust_token_with_one_credit_spends() {
     let credit_amount = Scalar::from(initial_credits);
 
     let response = private_key
-        .issue(&params, &request, credit_amount, OsRng)
+        .issue(&params, &request, credit_amount, test_context(), OsRng)
         .unwrap();
     let mut current_token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -1020,7 +1037,7 @@ fn test_binary_decomposition_max_value() {
 
     // Issue a token with the maximum value
     let response = private_key
-        .issue(&params, &request, max_value, OsRng)
+        .issue(&params, &request, max_value, test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -1121,7 +1138,7 @@ fn test_nullifier_collisions() {
         let credit_amount = Scalar::from(100u64);
 
         let response = private_key
-            .issue(&params, &request, credit_amount, OsRng)
+            .issue(&params, &request, credit_amount, test_context(), OsRng)
             .unwrap();
         let token = preissuance
             .to_credit_token(&params, private_key.public(), &request, &response)
@@ -1163,7 +1180,7 @@ fn test_key_component_malleability() {
 
     // Create a valid token
     let response = private_key
-        .issue(&params, &request, credit_amount, OsRng)
+        .issue(&params, &request, credit_amount, test_context(), OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -1282,8 +1299,9 @@ fn credit_token_strategy() -> impl Strategy<Value = CreditToken> {
         scalar_strategy(),
         scalar_strategy(),
         scalar_strategy(),
+        scalar_strategy(),
     )
-        .prop_map(|(a, e, k, r, c)| CreditToken { a, e, k, r, c })
+        .prop_map(|(a, e, k, r, c, ctx)| CreditToken { a, e, k, r, c, ctx })
 }
 
 // Use a single test params instance to avoid stack issues
@@ -1303,7 +1321,7 @@ proptest! {
         let params = test_params();
         let request = pre_issuance.request(&params, OsRng);
         
-        if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+        if let Ok(response) = private_key.issue(&params, &request, credit_amount, test_context(), OsRng) {
             if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
@@ -1330,7 +1348,7 @@ proptest! {
         let request = pre_issuance.request(&params, OsRng);
         
         // First issuance should succeed
-        let response1 = private_key.issue(&params, &request, credit_amount, OsRng);
+        let response1 = private_key.issue(&params, &request, credit_amount, test_context(), OsRng);
         prop_assert!(response1.is_ok());
         
         // Second issuance with same request should fail (simulated by checking)
@@ -1356,7 +1374,7 @@ proptest! {
         prop_assume!(spend_amount <= initial_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1398,7 +1416,7 @@ proptest! {
         prop_assume!(spend_u128 <= credit_u128);
         
         let request = pre_issuance.request(&params, OsRng);
-        if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+        if let Ok(response) = private_key.issue(&params, &request, credit_amount, test_context(), OsRng) {
             if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
@@ -1435,13 +1453,13 @@ proptest! {
         
         // Issue two different tokens
         let request1 = pre_issuance1.request(&params, OsRng);
-        let response1 = private_key.issue(&params, &request1, credits, OsRng).unwrap();
+        let response1 = private_key.issue(&params, &request1, credits, test_context(), OsRng).unwrap();
         let token1 = pre_issuance1
             .to_credit_token(&params, private_key.public(), &request1, &response1)
             .unwrap();
         
         let request2 = pre_issuance2.request(&params, OsRng);
-        let response2 = private_key.issue(&params, &request2, credits, OsRng).unwrap();
+        let response2 = private_key.issue(&params, &request2, credits, test_context(), OsRng).unwrap();
         let token2 = pre_issuance2
             .to_credit_token(&params, private_key.public(), &request2, &response2)
             .unwrap();
@@ -1482,12 +1500,13 @@ proptest! {
     fn prop_cbor_round_trip_credit_token(token in credit_token_strategy()) {
         let bytes = token.to_cbor().unwrap();
         let decoded = CreditToken::from_cbor(&bytes).unwrap();
-        
+
         prop_assert_eq!(token.a, decoded.a);
         prop_assert_eq!(token.e, decoded.e);
         prop_assert_eq!(token.k, decoded.k);
         prop_assert_eq!(token.r, decoded.r);
         prop_assert_eq!(token.c, decoded.c);
+        prop_assert_eq!(token.ctx, decoded.ctx);
     }
 }
 
@@ -1542,7 +1561,7 @@ proptest! {
         let overspend_amount = Scalar::from(initial_amount * overspend_factor);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1574,7 +1593,7 @@ proptest! {
         prop_assume!(total_spend <= initial_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let mut current_token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1642,7 +1661,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1697,7 +1716,7 @@ proptest! {
         let spend_credits = Scalar::from(spend_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1744,7 +1763,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let mut current_token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1784,16 +1803,18 @@ proptest! {
         gamma in scalar_strategy(),
         z in scalar_strategy(),
         c in scalar_strategy(),
+        ctx in scalar_strategy(),
     ) {
-        let response = IssuanceResponse { a, e, gamma, z, c };
+        let response = IssuanceResponse { a, e, gamma, z, c, ctx };
         let bytes = response.to_cbor().unwrap();
         let decoded = IssuanceResponse::from_cbor(&bytes).unwrap();
-        
+
         prop_assert_eq!(response.a, decoded.a);
         prop_assert_eq!(response.e, decoded.e);
         prop_assert_eq!(response.gamma, decoded.gamma);
         prop_assert_eq!(response.z, decoded.z);
         prop_assert_eq!(response.c, decoded.c);
+        prop_assert_eq!(response.ctx, decoded.ctx);
     }
 }
 
@@ -1836,14 +1857,16 @@ proptest! {
         r in scalar_strategy(),
         k in scalar_strategy(),
         m in scalar_strategy(),
+        ctx in scalar_strategy(),
     ) {
-        let pre_refund = PreRefund { r, k, m };
+        let pre_refund = PreRefund { r, k, m, ctx };
         let bytes = pre_refund.to_cbor().unwrap();
         let decoded = PreRefund::from_cbor(&bytes).unwrap();
-        
+
         prop_assert_eq!(pre_refund.r, decoded.r);
         prop_assert_eq!(pre_refund.k, decoded.k);
         prop_assert_eq!(pre_refund.m, decoded.m);
+        prop_assert_eq!(pre_refund.ctx, decoded.ctx);
     }
 }
 
@@ -1876,7 +1899,7 @@ proptest! {
         let spend_credits = Scalar::from(spend_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1910,7 +1933,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let mut token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1947,7 +1970,7 @@ proptest! {
         request.gamma = random_scalar;
         
         // Issuance should fail
-        let response = private_key.issue(&params, &request, credit_amount, OsRng);
+        let response = private_key.issue(&params, &request, credit_amount, test_context(), OsRng);
         prop_assert!(response.is_err(), "Invalid request should be rejected");
     }
 }
@@ -2008,7 +2031,7 @@ proptest! {
         let request = pre_issuance.request(&params, OsRng);
         
         // Issue with first issuer
-        let response1 = private_key1.issue(&params, &request, credits, OsRng).unwrap();
+        let response1 = private_key1.issue(&params, &request, credits, test_context(), OsRng).unwrap();
         let token1 = pre_issuance
             .to_credit_token(&params, private_key1.public(), &request, &response1)
             .unwrap();
@@ -2037,7 +2060,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
         
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue(&params, &request, initial_credits, test_context(), OsRng).unwrap();
         let mut token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -2085,13 +2108,13 @@ proptest! {
         
         // Issue two tokens with same amount
         let request1 = pre_issuance1.request(&params, OsRng);
-        let response1 = private_key.issue(&params, &request1, initial_credits, OsRng).unwrap();
+        let response1 = private_key.issue(&params, &request1, initial_credits, test_context(), OsRng).unwrap();
         let token1 = pre_issuance1
             .to_credit_token(&params, private_key.public(), &request1, &response1)
             .unwrap();
         
         let request2 = pre_issuance2.request(&params, OsRng);
-        let response2 = private_key.issue(&params, &request2, initial_credits, OsRng).unwrap();
+        let response2 = private_key.issue(&params, &request2, initial_credits, test_context(), OsRng).unwrap();
         let token2 = pre_issuance2
             .to_credit_token(&params, private_key.public(), &request2, &response2)
             .unwrap();
@@ -2183,7 +2206,7 @@ proptest! {
             }
             
             let request = pre_issuance.request(&params, OsRng);
-            if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+            if let Ok(response) = private_key.issue(&params, &request, credit_amount, test_context(), OsRng) {
                 if let Ok(token) = pre_issuance.to_credit_token(
                     &params,
                     private_key.public(),

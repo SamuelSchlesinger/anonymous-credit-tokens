@@ -149,7 +149,8 @@ impl IssuanceResponse {
     ///     2: bstr,  ; e (scalar, 32 bytes)
     ///     3: bstr,  ; gamma_resp (scalar, 32 bytes)
     ///     4: bstr,  ; z (scalar, 32 bytes)
-    ///     5: bstr   ; c (scalar, 32 bytes)
+    ///     5: bstr,  ; c (scalar, 32 bytes)
+    ///     6: bstr   ; ctx (scalar, 32 bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -159,6 +160,7 @@ impl IssuanceResponse {
             (Value::Integer(3.into()), encode_scalar(&self.gamma)),
             (Value::Integer(4.into()), encode_scalar(&self.z)),
             (Value::Integer(5.into()), encode_scalar(&self.c)),
+            (Value::Integer(6.into()), encode_scalar(&self.ctx)),
         ];
         
         let mut bytes = Vec::new();
@@ -177,7 +179,8 @@ impl IssuanceResponse {
                 let mut gamma = None;
                 let mut z = None;
                 let mut c = None;
-                
+                let mut ctx = None;
+
                 for (k, v) in map {
                     match k {
                         Value::Integer(i) if i == 1.into() => a = Some(decode_point(&v)?),
@@ -185,16 +188,18 @@ impl IssuanceResponse {
                         Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
                         Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
                         Value::Integer(i) if i == 5.into() => c = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 6.into() => ctx = Some(decode_scalar(&v)?),
                         _ => {}
                     }
                 }
-                
+
                 Ok(IssuanceResponse {
                     a: a.ok_or(CborError::InvalidStructure("missing field 1 (A)"))?,
                     e: e.ok_or(CborError::InvalidStructure("missing field 2 (e)"))?,
                     gamma: gamma.ok_or(CborError::InvalidStructure("missing field 3 (gamma)"))?,
                     z: z.ok_or(CborError::InvalidStructure("missing field 4 (z)"))?,
                     c: c.ok_or(CborError::InvalidStructure("missing field 5 (c)"))?,
+                    ctx: ctx.ok_or(CborError::InvalidStructure("missing field 6 (ctx)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -223,7 +228,8 @@ impl SpendProof {
     ///     14: [* bstr],      ; gamma0 array (L scalars)
     ///     15: [* [bstr, bstr]], ; z array (L pairs of scalars)
     ///     16: bstr,          ; k_bar (scalar, 32 bytes)
-    ///     17: bstr           ; s_bar (scalar, 32 bytes)
+    ///     17: bstr,          ; s_bar (scalar, 32 bytes)
+    ///     18: bstr           ; ctx (request_context scalar, 32 bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -256,13 +262,14 @@ impl SpendProof {
             (Value::Integer(15.into()), Value::Array(z_array)),
             (Value::Integer(16.into()), encode_scalar(&self.k_bar)),
             (Value::Integer(17.into()), encode_scalar(&self.s_bar)),
+            (Value::Integer(18.into()), encode_scalar(&self.ctx)),
         ];
-        
+
         let mut bytes = Vec::new();
         ciborium::into_writer(&Value::Map(map), &mut bytes)?;
         Ok(bytes)
     }
-    
+
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
         let value: Value = ciborium::from_reader(bytes)?;
@@ -270,6 +277,7 @@ impl SpendProof {
         match value {
             Value::Map(map) => {
                 let mut k = None;
+                let mut ctx = None;
                 let mut s = None;
                 let mut a_prime = None;
                 let mut b_bar = None;
@@ -359,12 +367,14 @@ impl SpendProof {
                         }
                         Value::Integer(i) if i == 16.into() => k_bar = Some(decode_scalar(&val)?),
                         Value::Integer(i) if i == 17.into() => s_bar = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 18.into() => ctx = Some(decode_scalar(&val)?),
                         _ => {}
                     }
                 }
-                
+
                 Ok(SpendProof {
                     k: k.ok_or(CborError::InvalidStructure("missing field 1"))?,
+                    ctx: ctx.ok_or(CborError::InvalidStructure("missing field 18"))?,
                     s: s.ok_or(CborError::InvalidStructure("missing field 2"))?,
                     a_prime: a_prime.ok_or(CborError::InvalidStructure("missing field 3"))?,
                     b_bar: b_bar.ok_or(CborError::InvalidStructure("missing field 4"))?,
@@ -570,7 +580,8 @@ impl CreditToken {
     ///     2: bstr,  ; e (scalar, 32 bytes)
     ///     3: bstr,  ; k (scalar, 32 bytes)
     ///     4: bstr,  ; r (scalar, 32 bytes)
-    ///     5: bstr   ; c (scalar, 32 bytes)
+    ///     5: bstr,  ; c (scalar, 32 bytes)
+    ///     6: bstr   ; ctx (scalar, 32 bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -580,6 +591,7 @@ impl CreditToken {
             (Value::Integer(3.into()), encode_scalar(&self.k)),
             (Value::Integer(4.into()), encode_scalar(&self.r)),
             (Value::Integer(5.into()), encode_scalar(&self.c)),
+            (Value::Integer(6.into()), encode_scalar(&self.ctx)),
         ];
         
         let mut bytes = Vec::new();
@@ -598,7 +610,8 @@ impl CreditToken {
                 let mut k = None;
                 let mut r = None;
                 let mut c = None;
-                
+                let mut ctx = None;
+
                 for (key, val) in map {
                     match key {
                         Value::Integer(i) if i == 1.into() => a = Some(decode_point(&val)?),
@@ -606,16 +619,18 @@ impl CreditToken {
                         Value::Integer(i) if i == 3.into() => k = Some(decode_scalar(&val)?),
                         Value::Integer(i) if i == 4.into() => r = Some(decode_scalar(&val)?),
                         Value::Integer(i) if i == 5.into() => c = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 6.into() => ctx = Some(decode_scalar(&val)?),
                         _ => {}
                     }
                 }
-                
+
                 Ok(CreditToken {
                     a: a.ok_or(CborError::InvalidStructure("missing field 1 (a)"))?,
                     e: e.ok_or(CborError::InvalidStructure("missing field 2 (e)"))?,
                     k: k.ok_or(CborError::InvalidStructure("missing field 3 (k)"))?,
                     r: r.ok_or(CborError::InvalidStructure("missing field 4 (r)"))?,
                     c: c.ok_or(CborError::InvalidStructure("missing field 5 (c)"))?,
+                    ctx: ctx.ok_or(CborError::InvalidStructure("missing field 6 (ctx)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -630,7 +645,8 @@ impl PreRefund {
     /// PreRefund = {
     ///     1: bstr,  ; r (scalar, 32 bytes)
     ///     2: bstr,  ; k (scalar, 32 bytes)
-    ///     3: bstr   ; m (scalar, 32 bytes)
+    ///     3: bstr,  ; m (scalar, 32 bytes)
+    ///     4: bstr   ; ctx (scalar, 32 bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -638,6 +654,7 @@ impl PreRefund {
             (Value::Integer(1.into()), encode_scalar(&self.r)),
             (Value::Integer(2.into()), encode_scalar(&self.k)),
             (Value::Integer(3.into()), encode_scalar(&self.m)),
+            (Value::Integer(4.into()), encode_scalar(&self.ctx)),
         ];
         
         let mut bytes = Vec::new();
@@ -654,20 +671,23 @@ impl PreRefund {
                 let mut r = None;
                 let mut k = None;
                 let mut m = None;
-                
+                let mut ctx = None;
+
                 for (key, val) in map {
                     match key {
                         Value::Integer(i) if i == 1.into() => r = Some(decode_scalar(&val)?),
                         Value::Integer(i) if i == 2.into() => k = Some(decode_scalar(&val)?),
                         Value::Integer(i) if i == 3.into() => m = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 4.into() => ctx = Some(decode_scalar(&val)?),
                         _ => {}
                     }
                 }
-                
+
                 Ok(PreRefund {
                     r: r.ok_or(CborError::InvalidStructure("missing field 1 (r)"))?,
                     k: k.ok_or(CborError::InvalidStructure("missing field 2 (k)"))?,
                     m: m.ok_or(CborError::InvalidStructure("missing field 3 (m)"))?,
+                    ctx: ctx.ok_or(CborError::InvalidStructure("missing field 4 (ctx)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -771,23 +791,26 @@ mod tests {
         let gamma = Scalar::random(&mut OsRng);
         let z = Scalar::random(&mut OsRng);
         let c = Scalar::random(&mut OsRng);
-        
+        let ctx = Scalar::random(&mut OsRng);
+
         let response = IssuanceResponse {
             a,
             e,
             gamma,
             z,
             c,
+            ctx,
         };
-        
+
         let bytes = response.to_cbor().unwrap();
         let decoded = IssuanceResponse::from_cbor(&bytes).unwrap();
-        
+
         assert_eq!(response.a, decoded.a);
         assert_eq!(response.e, decoded.e);
         assert_eq!(response.gamma, decoded.gamma);
         assert_eq!(response.z, decoded.z);
         assert_eq!(response.c, decoded.c);
+        assert_eq!(response.ctx, decoded.ctx);
     }
     
     #[test]
@@ -861,17 +884,19 @@ mod tests {
         let k = Scalar::random(&mut OsRng);
         let r = Scalar::random(&mut OsRng);
         let c = Scalar::random(&mut OsRng);
-        
-        let token = CreditToken { a, e, k, r, c };
-        
+        let ctx = Scalar::random(&mut OsRng);
+
+        let token = CreditToken { a, e, k, r, c, ctx };
+
         let bytes = token.to_cbor().unwrap();
         let decoded = CreditToken::from_cbor(&bytes).unwrap();
-        
+
         assert_eq!(token.a, decoded.a);
         assert_eq!(token.e, decoded.e);
         assert_eq!(token.k, decoded.k);
         assert_eq!(token.r, decoded.r);
         assert_eq!(token.c, decoded.c);
+        assert_eq!(token.ctx, decoded.ctx);
     }
     
     #[test]
@@ -879,15 +904,17 @@ mod tests {
         let r = Scalar::random(&mut OsRng);
         let k = Scalar::random(&mut OsRng);
         let m = Scalar::random(&mut OsRng);
-        
-        let pre_refund = PreRefund { r, k, m };
-        
+        let ctx = Scalar::random(&mut OsRng);
+
+        let pre_refund = PreRefund { r, k, m, ctx };
+
         let bytes = pre_refund.to_cbor().unwrap();
         let decoded = PreRefund::from_cbor(&bytes).unwrap();
-        
+
         assert_eq!(pre_refund.r, decoded.r);
         assert_eq!(pre_refund.k, decoded.k);
         assert_eq!(pre_refund.m, decoded.m);
+        assert_eq!(pre_refund.ctx, decoded.ctx);
     }
 
     #[test]

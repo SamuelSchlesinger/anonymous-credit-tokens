@@ -105,22 +105,22 @@ let public_key = private_key.public();
 ### Scalar Conversion Utilities
 
 ```rust
-use anonymous_credit_tokens::{u128_to_scalar, scalar_to_u128};
+use anonymous_credit_tokens::{credit_to_scalar, scalar_to_u128};
 
 // Convert u128 to Scalar for credit amounts
 let credit_amount_u128 = 500u128;
-let credit_amount_scalar = u128_to_scalar(credit_amount_u128);
+let credit_amount_scalar = credit_to_scalar(credit_amount_u128).unwrap();
 
 // Use the scalar for issuing credits
 // ...
 
 // Convert back to u128 for display or other purposes
-let amount_back = scalar_to_uu128(&credit_amount_scalar).unwrap();
+let amount_back = scalar_to_u128(&credit_amount_scalar).unwrap();
 assert_eq!(amount_back, credit_amount_u128);
 
 // Conversion will return None if the scalar is outside u128 range
-let large_scalar = // ... some large scalar
-let result = scalar_to_u128(&large_scalar); // Returns None if too large
+// let large_scalar = ...; // some large scalar
+// let result = scalar_to_u128(&large_scalar); // Returns None if too large
 ```
 
 ### Issuing Credits
@@ -137,8 +137,9 @@ let issuance_request = preissuance.request(&params, OsRng);
 
 // Server-side: Process the request (credit amount: 20)
 let credit_amount = Scalar::from(20u64);
+let ctx = Scalar::ZERO; // request context (e.g., derived from application context)
 let issuance_response = private_key
-    .issue(&params, &issuance_request, credit_amount, OsRng)
+    .issue(&params, &issuance_request, credit_amount, ctx, OsRng)
     .unwrap();
 
 // Client-side: Construct the credit token
@@ -174,7 +175,7 @@ let new_credit_token = prerefund
 ### Complete Transaction Lifecycle
 
 ```rust
-use anonymous_credit_tokens::{PrivateKey, PreIssuance};
+use anonymous_credit_tokens::{Params, PrivateKey, PreIssuance};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
@@ -188,8 +189,9 @@ let preissuance = PreIssuance::random(OsRng);
 let issuance_request = preissuance.request(&params, OsRng);
 
 // Server issues 40 credits
+let ctx = Scalar::ZERO; // request context
 let issuance_response = private_key
-    .issue(&params, &issuance_request, Scalar::from(40u64), OsRng)
+    .issue(&params, &issuance_request, Scalar::from(40u64), ctx, OsRng)
     .unwrap();
 
 // Client receives the credit token

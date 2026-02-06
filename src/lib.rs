@@ -218,6 +218,8 @@ pub struct Params {
     h2: RistrettoBasepointTable,
     /// Third generator point used in commitment schemes
     h3: RistrettoBasepointTable,
+    /// Fourth generator point used for request_context binding
+    h4: RistrettoBasepointTable,
 }
 
 impl std::fmt::Debug for Params {
@@ -226,6 +228,7 @@ impl std::fmt::Debug for Params {
             .field("h1", &"RistrettoBasepointTable")
             .field("h2", &"RistrettoBasepointTable")
             .field("h3", &"RistrettoBasepointTable")
+            .field("h4", &"RistrettoBasepointTable")
             .finish()
     }
 }
@@ -258,6 +261,7 @@ impl Params {
             h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
+            h4: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
         }
     }
 
@@ -304,15 +308,17 @@ impl Params {
         hasher.update(domain_separator_bytes);
         let seed = hasher.finalize();
         
-        // Generate H1, H2, H3 using counter-based approach
+        // Generate H1, H2, H3, H4 using counter-based approach
         let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
         let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
         let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
-        
+        let h4 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 3);
+
         Params {
             h1: RistrettoBasepointTable::create(&h1),
             h2: RistrettoBasepointTable::create(&h2),
             h3: RistrettoBasepointTable::create(&h3),
+            h4: RistrettoBasepointTable::create(&h4),
         }
     }
     
@@ -404,6 +410,13 @@ pub struct CreditToken {
     r: Scalar,
     /// The amount of credits available in this token
     c: Scalar,
+    /// The request context binding this token to an application-specific context.
+    ///
+    /// WARNING: This value is revealed in the clear during spending and persists across
+    /// refunds. If distinct ctx values are assigned per issuance, the entire token chain
+    /// becomes linkable. Use a shared ctx across clients within the same context (e.g.,
+    /// per-service or per-epoch) to preserve unlinkability.
+    ctx: Scalar,
 }
 
 impl PreIssuance {
@@ -518,7 +531,7 @@ impl PreIssuance {
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let credit_amount = Scalar::from(20u128);
-    /// # let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// #
     /// let credit_token = pre_issuance.to_credit_token(
     ///     &params,
@@ -534,8 +547,13 @@ impl PreIssuance {
         request: &IssuanceRequest,
         response: &IssuanceResponse,
     ) -> Result<CreditToken, ErrorCode> {
+        // Validate received point is not identity (spec Section 5.2)
+        if response.a == RistrettoPoint::identity() {
+            return Err(ErrorCode::InvalidProof);
+        }
+
         // Reconstruct the signature base points for verification
-        let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
+        let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + &params.h4 * &response.ctx + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
 
         // Verify the response by checking the BBS+ signature proof
@@ -544,7 +562,7 @@ impl PreIssuance {
 
         // Generate the expected challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&response.c, &response.e].into_iter());
+            transcript.add_scalars([&response.c, &response.ctx, &response.e].into_iter());
             transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
@@ -560,6 +578,7 @@ impl PreIssuance {
             r: self.r,
             k: self.k,
             c: response.c,
+            ctx: response.ctx,
         })
     }
 }
@@ -582,6 +601,8 @@ pub struct IssuanceResponse {
     z: Scalar,
     /// The amount of credits being issued
     c: Scalar,
+    /// The request context binding this credential to an application-specific context
+    ctx: Scalar,
 }
 
 impl PrivateKey {
@@ -597,6 +618,10 @@ impl PrivateKey {
     ///
     /// * `request` - The client's issuance request
     /// * `c` - The amount of credits to issue
+    /// * `ctx` - The request context binding this credential to an application-specific
+    ///   context. This value is revealed in the clear during spending and persists across
+    ///   refunds. To preserve unlinkability, use a shared ctx across clients within the
+    ///   same context (e.g., per-service or per-epoch), not per-client values.
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Returns
@@ -618,15 +643,26 @@ impl PrivateKey {
     /// #
     /// // Issue 20 credits to the client
     /// let credit_amount = Scalar::from(20u128);
-    /// let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
+    /// let response = private_key.issue(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// ```
     pub fn issue(
         &self,
         params: &Params,
         request: &IssuanceRequest,
         c: Scalar,
+        ctx: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, ErrorCode> {
+        // Validate credit amount is within range (0 < c < 2^L)
+        if c == Scalar::ZERO || scalar_to_u128(&c).is_none() {
+            return Err(ErrorCode::InvalidAmount);
+        }
+
+        // Validate received point is not identity (spec Section 5.2)
+        if request.big_k == RistrettoPoint::identity() {
+            return Err(ErrorCode::InvalidProof);
+        }
+
         // Verify the client's zero-knowledge proof
         let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
             - request.big_k * request.gamma;
@@ -643,7 +679,7 @@ impl PrivateKey {
 
         // Create a BBS+ signature on the client's commitment and credit amount
         let e = Scalar::random(&mut rng);
-        let x_a = RistrettoPoint::generator() + &params.h1 * &c + request.big_k;
+        let x_a = RistrettoPoint::generator() + &params.h1 * &c + &params.h4 * &ctx + request.big_k;
         let a = x_a * (e + self.x).invert();
         let x_g = RistrettoPoint::generator() * e + self.public.w;
 
@@ -654,14 +690,14 @@ impl PrivateKey {
 
         // Generate the challenge for the proof using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&c, &e].into_iter());
+            transcript.add_scalars([&c, &ctx, &e].into_iter());
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
         // Calculate the response value for the proof
         let z = gamma * (self.x + e) + alpha;
 
-        Ok(IssuanceResponse { a, e, gamma, z, c })
+        Ok(IssuanceResponse { a, e, gamma, z, c, ctx })
     }
 }
 
@@ -675,6 +711,8 @@ impl PrivateKey {
 pub struct SpendProof {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
+    /// The request context for this spend
+    ctx: Scalar,
     /// The amount being spent in this transaction
     s: Scalar,
     /// The blinded signature component
@@ -723,6 +761,15 @@ impl SpendProof {
         self.k
     }
 
+    /// Returns the request context associated with this spend.
+    ///
+    /// # Returns
+    ///
+    /// The request context as a `Scalar` value
+    pub fn context(&self) -> Scalar {
+        self.ctx
+    }
+
     /// Returns the amount of credits being spent in this transaction.
     ///
     /// # Returns
@@ -768,7 +815,7 @@ impl PrivateKey {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
@@ -786,12 +833,21 @@ impl PrivateKey {
         spend_proof: &SpendProof,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, ErrorCode> {
+        // Validate received points are not identity (spec Section 5.2)
         if spend_proof.a_prime == RistrettoPoint::identity() {
             return Err(ErrorCode::InvalidProof);
         }
+        if spend_proof.b_bar == RistrettoPoint::identity() {
+            return Err(ErrorCode::InvalidProof);
+        }
+        for com in &spend_proof.com {
+            if *com == RistrettoPoint::identity() {
+                return Err(ErrorCode::InvalidProof);
+            }
+        }
 
         let a_bar = spend_proof.a_prime * self.x;
-        let big_h1 = RistrettoPoint::generator() + &params.h2 * &spend_proof.k;
+        let big_h1 = RistrettoPoint::generator() + &params.h2 * &spend_proof.k + &params.h4 * &spend_proof.ctx;
         let a1 = spend_proof.a_prime * spend_proof.e_bar
             + spend_proof.b_bar * spend_proof.r2_bar
             + a_bar * spend_proof.gamma.neg();
@@ -830,6 +886,7 @@ impl PrivateKey {
 
         let gamma = Transcript::with(params, b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
+            transcript.add_scalar(&spend_proof.ctx);
             transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
             transcript.add_elements(spend_proof.com.iter());
@@ -845,7 +902,7 @@ impl PrivateKey {
 
         let e = Scalar::random(&mut rng);
 
-        let x_a = RistrettoPoint::generator() + k_prime;
+        let x_a = RistrettoPoint::generator() + k_prime + &params.h4 * &spend_proof.ctx;
         let a = x_a * (e + self.x).invert();
 
         let x_g = RistrettoPoint::generator() * e + self.public.w;
@@ -854,7 +911,7 @@ impl PrivateKey {
         let y_g = RistrettoPoint::generator() * alpha;
 
         let refund_gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalar(&e);
+            transcript.add_scalars([&e, &spend_proof.ctx].into_iter());
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
@@ -883,6 +940,8 @@ pub struct PreRefund {
     k: Scalar,
     /// The remaining balance after spending
     m: Scalar,
+    /// The request context carried over from the original token
+    ctx: Scalar,
 }
 
 /// Decomposes a scalar value into its binary representation.
@@ -962,7 +1021,7 @@ impl CreditToken {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// #
     /// // Spend 10 credits (where 10 <= token balance < 2^128)
@@ -988,7 +1047,8 @@ impl CreditToken {
         let b = RistrettoPoint::generator()
             + &params.h1 * &self.c
             + &params.h2 * &self.k
-            + &params.h3 * &self.r;
+            + &params.h3 * &self.r
+            + &params.h4 * &self.ctx;
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
         let r3 = r1.invert();
@@ -1063,6 +1123,7 @@ impl CreditToken {
 
         let gamma = Transcript::with(params, b"spend", |transcript| {
             transcript.add_scalar(&self.k);
+            transcript.add_scalar(&self.ctx);
             transcript.add_elements([&a_prime, &b_bar].into_iter());
             transcript.add_elements([&a1, &a2].into_iter());
             transcript.add_elements(com.iter());
@@ -1128,11 +1189,13 @@ impl CreditToken {
             k: k_star,
             r: r_star,
             m: self.c - s,
+            ctx: self.ctx,
         };
 
         (
             SpendProof {
                 k: self.k,
+                ctx: self.ctx,
                 s,
                 a_prime,
                 b_bar,
@@ -1203,7 +1266,7 @@ impl PreRefund {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
+    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
@@ -1224,18 +1287,24 @@ impl PreRefund {
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, ErrorCode> {
+        // Validate received point is not identity (spec Section 5.2)
+        if refund.a == RistrettoPoint::identity() {
+            return Err(ErrorCode::InvalidProof);
+        }
+
         let x_a = RistrettoPoint::generator()
             + spend_proof.com.iter()
                 .enumerate()
                 .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
-                .fold(RistrettoPoint::identity(), |a, b| a + b);
+                .fold(RistrettoPoint::identity(), |a, b| a + b)
+            + &params.h4 * &self.ctx;
 
         let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
         let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
         let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
 
         let gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalar(&refund.e);
+            transcript.add_scalars([&refund.e, &self.ctx].into_iter());
             transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
@@ -1250,8 +1319,39 @@ impl PreRefund {
             k: self.k,
             r: self.r,
             c: self.m,
+            ctx: self.ctx,
         })
     }
+}
+
+/// Converts a credit amount to a Scalar, validating that it is within the valid range.
+///
+/// This implements the `CreditToScalar` function from the spec (Section 3.8).
+/// The amount must satisfy `0 <= amount < 2^L`. Since the input is a `u128`,
+/// all values are in range (max u128 = 2^128 - 1 < 2^L when L=128).
+///
+/// Note: zero is a valid spend amount (re-anonymization), though `issue()` separately
+/// enforces `c > 0` for issuance.
+///
+/// # Arguments
+///
+/// * `amount` - The credit amount as a u128
+///
+/// # Returns
+///
+/// * `Ok(Scalar)` - The scalar representation of the amount
+///
+/// # Example
+///
+/// ```
+/// use anonymous_credit_tokens::credit_to_scalar;
+///
+/// let scalar = credit_to_scalar(100).unwrap();
+/// let zero = credit_to_scalar(0).unwrap(); // valid for spend amounts
+/// ```
+pub fn credit_to_scalar(amount: u128) -> Result<Scalar, ErrorCode> {
+    // Any u128 value is valid for L=128 since max u128 = 2^128 - 1 < 2^128
+    Ok(Scalar::from(amount))
 }
 
 /// Error codes for the protocol as defined in Section 5.3 of the spec.
