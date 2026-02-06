@@ -109,8 +109,9 @@ We now provide the details of our scheme. We remark that, in contrast to the inf
 \medskip\noindent
 {\bf Setup.}
 Fix a group $\G$ of prime order $q$ with generator~$g$, along with
-(random) generators $h_1, h_2, h_3 \in \G$. (These could be chosen by the issuer, or fixed public values.) 
+(random) generators $h_1, h_2, h_3, h_4 \in \G$. (These could be chosen by the issuer, or fixed public values.)
 We assume the number of credits a token can contain (and hence the maximum possible spend amount) is strictly less than $2^\ell<q/2$ for some known~$\ell$.\footnote{While one can consider a non-power-of-two bound, it is not clear that there is any advantage to doing so here.}
+During issuance, a request context scalar $\mathit{ctx} \in \Z_q$ is provided and bound into the token via $h_4$.
 
 \medskip\noindent{\bf Key generation.}
 An issuer chooses a secret key $x \leftarrow \Z_q$; the associated public key is~$w:=g^x$. 
@@ -131,28 +132,28 @@ To issue a token for~$c>0$ credits to some client, the client and issuer run the
 
 \item ({\bf Issuance.}) The issuer chooses
 $e \leftarrow \Z_q$ and sends
-$(A, e) = \left(\left(g \cdot h_1^c \cdot K\right)^{1/(e+x)}, e\right)$
-to the client. 
-It also proves that it computed this value correctly by proving that $\log_A \left(g \cdot h_1^c \cdot K\right) = \log_g \left(g^e \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof. 
-That is, let $X_A = g \cdot h_1^c \cdot K$ and $X_g = g^e \cdot w$. The issuer does:
+$(A, e) = \left(\left(g \cdot h_1^c \cdot h_4^{\mathit{ctx}} \cdot K\right)^{1/(e+x)}, e\right)$
+to the client.
+It also proves that it computed this value correctly by proving that $\log_A \left(g \cdot h_1^c \cdot h_4^{\mathit{ctx}} \cdot K\right) = \log_g \left(g^e \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof.
+That is, let $X_A = g \cdot h_1^c \cdot h_4^{\mathit{ctx}} \cdot K$ and $X_g = g^e \cdot w$. The issuer does:
 \begin{enumerate}
     \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= A^{\alpha}$ and $Y_g:=g^\alpha$.
-    \item Compute $\gamma:=H(A\|e\|Y_A\|Y_g)$.
+    \item Compute $\gamma:=H(c\|\mathit{ctx}\|e\|A\|X_A\|X_g\|Y_A\|Y_g)$.
     \item Compute $z:=\gamma\cdot (x+e)+\alpha$, and send $\gamma, z$ to the client.
 \end{enumerate}
 \end{itemize}
 \item The client verifies the proof $\gamma, z$ by computing $Y'_A:= A^z \cdot X_A^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
-checking if 
-$H( A\|e\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $((A, e, k, r), c)$; otherwise, the client outputs~$\perp$.
+checking if
+$H( c\|\mathit{ctx}\|e\|A\|X_A\|X_g\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $(A, e, k, r, c, \mathit{ctx})$; otherwise, the client outputs~$\perp$.
 \end{enumerate}
 
 \medskip\noindent{\bf Spending.}
-To spend $s<2^\ell$ credits using a token $(A, e, k, r)$ for $c$ credits (with $s \leq c< 2^\ell$), the client and issuer do the following ($\send_1, \send_2$, and $\hash$ are initially empty):
+To spend $s<2^\ell$ credits using a token $(A, e, k, r, c, \mathit{ctx})$ for $c$ credits (with $s \leq c< 2^\ell$), the client and issuer do the following ($\send_1, \send_2$, and $\hash$ are initially empty):
 \begin{itemize}
     \item ({\bf Client spend.}) The client reveals $k$ and proves knowledge of a BBS signature on a vector of the form $(c, k, r)$ for some $c, r$ with $c \geq s$. This is done as follows:
     \begin{enumerate}
-        \item The client chooses $r_1, r_2, c', r', e', r'_2, r'_3 \leftarrow \Z_q$. It then sets $B:= g \cdot h_1^c h_2^k h_3^r$, $A':=A^{r_1 r_2}$, $\bar B:=B^{r_1}$, $r_3 := r_1^{-1}$,
- $A_1:=(A')^{e'} \cdot \bar B^{r'_2}$, $A_2:= \bar B^{r'_3} \cdot h_1^{c'} h_3^{r'}$, $\send_1:=\send_1\|k\|A'\|\bar B$, and $\hash:=\hash\|A_1\|A_2$.
+        \item The client chooses $r_1, r_2, c', r', e', r'_2, r'_3 \leftarrow \Z_q$. It then sets $B:= g \cdot h_1^c h_2^k h_3^r h_4^{\mathit{ctx}}$, $A':=A^{r_1 r_2}$, $\bar B:=B^{r_1}$, $r_3 := r_1^{-1}$,
+ $A_1:=(A')^{e'} \cdot \bar B^{r'_2}$, $A_2:= \bar B^{r'_3} \cdot h_1^{c'} h_3^{r'}$, $\send_1:=\send_1\|k\|\mathit{ctx}\|A'\|\bar B$, and $\hash:=\hash\|A_1\|A_2$.
  
  \item Let $i_{\ell-1}, \ldots, i_0 \in \bool$ be the binary representation of $c-s$. % (so $c-s=\sum_{j=0}^{\ell-1} 2^j \cdot i_j$). 
 The client chooses $k^*, s_0, \ldots, s_{\ell-1} \leftarrow \Z_q$ and sets
@@ -199,17 +200,17 @@ Next, for $j=1, \ldots, \ell-1$ the client does: \begin{enumerate}
     \item Set $\send_2:=\send_2\|\gamma_{j,0}\|z_{j,0}\|z_{j,1}$.
 \end{enumerate}
 \item The client sets $\bar k:= \gamma k^* + k'$, $\bar s := \gamma r^* + s'$ and $\send_2:=\send_2\|\bar k\|\bar s$, and then sends $\send_1, \gamma, \send_2$ to the issuer.
-The client stores $c-s, k^*, r^*$ to be used later below.
+The client stores $c-s, k^*, r^*, \mathit{ctx}$ to be used later below.
 
 
     \end{enumerate}
             \item ({\bf Verification by the issuer.}) The issuer, with secret key~$x$, parses $\send_1, \send_2$ as
-            \begin{eqnarray*} & \send_1 = k\|A'\|\bar B\|\com_0\|\cdots\|\com_{\ell-1} & \\
+            \begin{eqnarray*} & \send_1 = k\|\mathit{ctx}\|A'\|\bar B\|\com_0\|\cdots\|\com_{\ell-1} & \\
             &\send_2 = \bar e \| \bar r_2\|\bar r_3\|\bar c \| \bar r\| w_{0,0}\|w_{0,1}\| \gamma_{0,0}\|z_{0,0}\|z_{0,1}\|\cdots \| \gamma_{\ell-1,0}\|z_{\ell-1,0}\|z_{\ell-1,1}\|\bar k\|\bar s \; .&
             \end{eqnarray*}
 It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially empty):
 \begin{enumerate}
-    \item Set $\bar A:=(A')^x$, $H_1:=g \cdot h_2^k$, $A_1:= (A')^{\bar e} \bar B^{\bar r_2} \bar A^{-\gamma}$, $A_2:= \bar B^{\bar r_3} h_1^{\bar c} h_3^{\bar r} H_1^{-\gamma}$, and $\hash:=\hash\|A_1\|A_2$. 
+    \item Set $\bar A:=(A')^x$, $H_1:=g \cdot h_2^k \cdot h_4^{\mathit{ctx}}$, $A_1:= (A')^{\bar e} \bar B^{\bar r_2} \bar A^{-\gamma}$, $A_2:= \bar B^{\bar r_3} h_1^{\bar c} h_3^{\bar r} H_1^{-\gamma}$, and $\hash:=\hash\|A_1\|A_2$. 
     \item Do:
            \begin{enumerate}
            \item Set $\gamma_{0,1}:=\gamma-\gamma_{0,0}$, $C_{0,0}:=\com_0$, and  $C_{0,1}:=\com_0/h_1$.
@@ -229,19 +230,19 @@ It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially emp
 Specifically, the issuer does the following (note this is almost identical to the issuance protocol described earlier):
 Choose
 $e^* \leftarrow \Z_q$ and send
-$(A^*, e^*) = \left(\left(g \cdot K'\right)^{1/(e^*+x)}, e^*\right)$
-to the client. 
-Also prove that it computed this value correctly by proving that $\log_{A^*} \left(g \cdot K'\right) = \log_g \left(g^{e^*} \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof. 
-That is, let $X_{A^*} = g \cdot K'$ and $X_g = g^{e^*} \cdot w$. The issuer does:
+$(A^*, e^*) = \left(\left(g \cdot K' \cdot h_4^{\mathit{ctx}}\right)^{1/(e^*+x)}, e^*\right)$
+to the client.
+Also prove that it computed this value correctly by proving that $\log_{A^*} \left(g \cdot K' \cdot h_4^{\mathit{ctx}}\right) = \log_g \left(g^{e^*} \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof.
+That is, let $X_{A^*} = g \cdot K' \cdot h_4^{\mathit{ctx}}$ and $X_g = g^{e^*} \cdot w$. The issuer does:
 \begin{enumerate}
-    \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= A^{\alpha}$ and $Y_g:=g^\alpha$.
-    \item Compute $\gamma:=H(A\|e\|Y_A\|Y_g)$.
-    \item Compute $z:=\gamma\cdot (x+e)+\alpha$, and send $\gamma, z$ to the client.
+    \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= (A^*)^{\alpha}$ and $Y_g:=g^\alpha$.
+    \item Compute $\gamma:=H(e^*\|\mathit{ctx}\|A^*\|X_{A^*}\|X_g\|Y_A\|Y_g)$.
+    \item Compute $z:=\gamma\cdot (x+e^*)+\alpha$, and send $\gamma, z$ to the client.
 \end{enumerate}
 
-\item ({\bf Client computes refund.}) The client verifies the proof $\gamma, z$ by computing $Y'_A:= A^z \cdot X_A^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
-checking if 
-$H( A\|e\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $((A, e, k^*, r^*), c-s)$; otherwise, the client outputs~$\perp$.
+\item ({\bf Client computes refund.}) The client verifies the proof $\gamma, z$ by computing $Y'_A:= (A^*)^z \cdot X_{A^*}^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
+checking if
+$H( e^*\|\mathit{ctx}\|A^*\|X_{A^*}\|X_g\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $(A^*, e^*, k^*, r^*, c-s, \mathit{ctx})$; otherwise, the client outputs~$\perp$.
 \end{itemize}
 \end{document}
 
