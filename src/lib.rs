@@ -99,10 +99,6 @@ use zeroize::ZeroizeOnDrop;
 
 use std::ops::Neg;
 
-/// The bit length used for binary decomposition of values in range proofs.
-/// This defines the maximum value (2^128 - 1) that can be represented.
-pub const L: usize = 128;
-
 mod transcript;
 use transcript::Transcript;
 
@@ -531,7 +527,7 @@ impl PreIssuance {
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let credit_amount = Scalar::from(20u128);
-    /// # let response = private_key.issue(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// #
     /// let credit_token = pre_issuance.to_credit_token(
     ///     &params,
@@ -643,9 +639,9 @@ impl PrivateKey {
     /// #
     /// // Issue 20 credits to the client
     /// let credit_amount = Scalar::from(20u128);
-    /// let response = private_key.issue(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
+    /// let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// ```
-    pub fn issue(
+    pub fn issue<const L: usize>(
         &self,
         params: &Params,
         request: &IssuanceRequest,
@@ -654,7 +650,7 @@ impl PrivateKey {
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, ErrorCode> {
         // Validate credit amount is within range (0 < c < 2^L)
-        if c == Scalar::ZERO || scalar_to_u128(&c).is_none() {
+        if c == Scalar::ZERO || !scalar_fits_in_bits::<L>(&c) {
             return Err(ErrorCode::InvalidAmount);
         }
 
@@ -708,7 +704,7 @@ impl PrivateKey {
 /// The proof includes a nullifier that prevents double-spending, and a range proof
 /// that ensures the remaining balance is non-negative.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct SpendProof {
+pub struct SpendProof<const L: usize> {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
     /// The request context for this spend
@@ -747,7 +743,9 @@ pub struct SpendProof {
     s_bar: Scalar,
 }
 
-impl SpendProof {
+impl<const L: usize> SpendProof<L> {
+    const _ASSERT: () = assert!(L <= 252, "L must be <= 252");
+
     /// Returns the nullifier associated with this spend.
     ///
     /// The nullifier is a unique identifier for this spend that should be recorded
@@ -758,6 +756,7 @@ impl SpendProof {
     ///
     /// The nullifier as a `Scalar` value
     pub fn nullifier(&self) -> Scalar {
+        let _ = Self::_ASSERT;
         self.k
     }
 
@@ -815,10 +814,10 @@ impl PrivateKey {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng);
     /// #
     /// // First check if we've seen this nullifier before
     /// let nullifier = spend_proof.nullifier();
@@ -827,10 +826,10 @@ impl PrivateKey {
     /// // Then process the refund
     /// let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// ```
-    pub fn refund(
+    pub fn refund<const L: usize>(
         &self,
         params: &Params,
-        spend_proof: &SpendProof,
+        spend_proof: &SpendProof<L>,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, ErrorCode> {
         // Validate received points are not identity (spec Section 5.2)
@@ -875,8 +874,8 @@ impl PrivateKey {
         }
 
         let k_prime = spend_proof.com.iter()
-            .enumerate()
-            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+            .zip(powers_of_two())
+            .map(|(com, pow2)| com * pow2)
             .fold(RistrettoPoint::identity(), |a, b| a + b);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
         let big_c = &params.h1 * &spend_proof.c_bar.neg()
@@ -944,6 +943,26 @@ pub struct PreRefund {
     ctx: Scalar,
 }
 
+/// Returns an iterator over successive powers of two as Scalars: 1, 2, 4, 8, ...
+///
+/// This avoids overflow issues with `2u128.pow(i)` when i >= 128.
+fn powers_of_two() -> impl Iterator<Item = Scalar> {
+    std::iter::successors(Some(Scalar::ONE), move |prev| Some(prev * Scalar::from(2u64)))
+}
+
+/// Checks whether all bits at positions >= L are zero in the scalar.
+///
+/// This validates that a scalar value fits within L bits, i.e., is in the range [0, 2^L).
+fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
+    let bytes = s.as_bytes();
+    for i in L..256 {
+        if (bytes[i / 8] >> (i % 8)) & 1 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Decomposes a scalar value into its binary representation.
 ///
 /// This helper function converts a scalar value into an array of L scalars,
@@ -958,7 +977,7 @@ pub struct PreRefund {
 /// # Returns
 ///
 /// An array of L scalars (0 or 1) representing the binary bits of the input
-fn bits_of(s: Scalar) -> [Scalar; L] {
+fn bits_of<const L: usize>(s: Scalar) -> [Scalar; L] {
     let bytes = s.as_bytes();
     let mut result = [Scalar::ZERO; L];
 
@@ -1021,21 +1040,21 @@ impl CreditToken {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// #
     /// // Spend 10 credits (where 10 <= token balance < 2^128)
     /// let spend_amount = Scalar::from(10u128);
-    /// let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
+    /// let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng);
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
     /// ```
-    pub fn prove_spend(
+    pub fn prove_spend<const L: usize>(
         &self,
         params: &Params,
         s: Scalar,
         mut rng: impl CryptoRngCore,
-    ) -> (SpendProof, PreRefund) {
+    ) -> (SpendProof<L>, PreRefund) {
         let r1 = Scalar::random(&mut rng);
         let r2 = Scalar::random(&mut rng);
         let c_prime = Scalar::random(&mut rng);
@@ -1055,7 +1074,7 @@ impl CreditToken {
         let a1 = a_prime * e_prime + b_bar * r2_prime;
         let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
 
-        let i = bits_of(self.c - s);
+        let i = bits_of::<L>(self.c - s);
 
         let k_star = Scalar::random(&mut rng);
         let s_i: Vec<Scalar> = (0..L)
@@ -1114,8 +1133,8 @@ impl CreditToken {
             );
         }
         let r_star = s_i.iter()
-            .enumerate()
-            .map(|(i, si)| si * Scalar::from(2u128.pow(i as u32)))
+            .zip(powers_of_two())
+            .map(|(si, pow2)| si * pow2)
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
@@ -1266,10 +1285,10 @@ impl PreRefund {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng);
     /// # let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     /// #
     /// // Construct the new credit token with the remaining balance
@@ -1280,10 +1299,10 @@ impl PreRefund {
     ///     public_key
     /// ).unwrap();
     /// ```
-    pub fn to_credit_token(
+    pub fn to_credit_token<const L: usize>(
         &self,
         params: &Params,
-        spend_proof: &SpendProof,
+        spend_proof: &SpendProof<L>,
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, ErrorCode> {
@@ -1294,8 +1313,8 @@ impl PreRefund {
 
         let x_a = RistrettoPoint::generator()
             + spend_proof.com.iter()
-                .enumerate()
-                .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+                .zip(powers_of_two())
+                .map(|(com, pow2)| com * pow2)
                 .fold(RistrettoPoint::identity(), |a, b| a + b)
             + &params.h4 * &self.ctx;
 
@@ -1327,8 +1346,8 @@ impl PreRefund {
 /// Converts a credit amount to a Scalar, validating that it is within the valid range.
 ///
 /// This implements the `CreditToScalar` function from the spec (Section 3.8).
-/// The amount must satisfy `0 <= amount < 2^L`. Since the input is a `u128`,
-/// all values are in range (max u128 = 2^128 - 1 < 2^L when L=128).
+/// The amount must satisfy `0 <= amount < 2^L`. For L < 128, values >= 2^L are
+/// rejected. For L >= 128, all u128 values are valid.
 ///
 /// Note: zero is a valid spend amount (re-anonymization), though `issue()` separately
 /// enforces `c > 0` for issuance.
@@ -1340,17 +1359,20 @@ impl PreRefund {
 /// # Returns
 ///
 /// * `Ok(Scalar)` - The scalar representation of the amount
+/// * `Err(ErrorCode::InvalidAmount)` - If the amount exceeds 2^L - 1
 ///
 /// # Example
 ///
 /// ```
 /// use anonymous_credit_tokens::credit_to_scalar;
 ///
-/// let scalar = credit_to_scalar(100).unwrap();
-/// let zero = credit_to_scalar(0).unwrap(); // valid for spend amounts
+/// let scalar = credit_to_scalar::<128>(100).unwrap();
+/// let zero = credit_to_scalar::<128>(0).unwrap(); // valid for spend amounts
 /// ```
-pub fn credit_to_scalar(amount: u128) -> Result<Scalar, ErrorCode> {
-    // Any u128 value is valid for L=128 since max u128 = 2^128 - 1 < 2^128
+pub fn credit_to_scalar<const L: usize>(amount: u128) -> Result<Scalar, ErrorCode> {
+    if L < 128 && amount >= (1u128 << L) {
+        return Err(ErrorCode::InvalidAmount);
+    }
     Ok(Scalar::from(amount))
 }
 

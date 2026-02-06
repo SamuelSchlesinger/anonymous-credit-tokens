@@ -18,7 +18,7 @@
 //! All protocol messages are encoded using deterministic CBOR (RFC 8949) for
 //! interoperability.
 
-use crate::{IssuanceRequest, IssuanceResponse, SpendProof, Refund, L, PrivateKey, PublicKey, PreIssuance, CreditToken, PreRefund, ErrorMsg, ErrorCode};
+use crate::{IssuanceRequest, IssuanceResponse, SpendProof, Refund, PrivateKey, PublicKey, PreIssuance, CreditToken, PreRefund, ErrorMsg, ErrorCode};
 use ciborium::value::Value;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 
@@ -208,7 +208,7 @@ impl IssuanceResponse {
 }
 
 /// CBOR encoding for SpendProof
-impl SpendProof {
+impl<const L: usize> SpendProof<L> {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// SpendProofMsg = {
