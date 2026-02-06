@@ -91,7 +91,7 @@
 //!
 //! See the README.md file for comprehensive usage examples and integration guidance.
 
-use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
+use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable, traits::MultiscalarMul};
 use group::Group;
 use rand_core::CryptoRngCore;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
@@ -873,10 +873,8 @@ impl PrivateKey {
             big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
         }
 
-        let k_prime = spend_proof.com.iter()
-            .zip(powers_of_two())
-            .map(|(com, pow2)| com * pow2)
-            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let pow2_scalars: Vec<Scalar> = powers_of_two().take(L).collect();
+        let k_prime = RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
         let big_c = &params.h1 * &spend_proof.c_bar.neg()
             + &params.h2 * &spend_proof.k_bar
@@ -1105,15 +1103,18 @@ impl CreditToken {
             *z_val = Scalar::random(&mut rng);
         }
 
+        let h2_w0_h3_z0 = &params.h2 * &w0 + &params.h3 * &z[0];
+        let h2_k0_h3_s0 = &params.h2 * &k0_prime + &params.h3 * &s_i_prime[0];
+
         big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][0] * gamma_i[0]),
-            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
+            &(h2_w0_h3_z0 - big_c[0][0] * gamma_i[0]),
+            &h2_k0_h3_s0,
             i[0].ct_eq(&Scalar::ZERO),
         );
 
         big_c_prime[0][1] = RistrettoPoint::conditional_select(
-            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
-            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][1] * gamma_i[0]),
+            &h2_k0_h3_s0,
+            &(h2_w0_h3_z0 - big_c[0][1] * gamma_i[0]),
             i[0].ct_eq(&Scalar::ZERO),
         );
 
@@ -1121,14 +1122,17 @@ impl CreditToken {
             big_c[j][0] = com[j];
             big_c[j][1] = com[j] - params.h1.basepoint();
 
+            let h3_z_j = &params.h3 * &z[j];
+            let h3_s_j = &params.h3 * &s_i_prime[j];
+
             big_c_prime[j][0] = RistrettoPoint::conditional_select(
-                &(&params.h3 * &z[j] - big_c[j][0] * gamma_i[j]),
-                &(&params.h3 * &s_i_prime[j]),
+                &(h3_z_j - big_c[j][0] * gamma_i[j]),
+                &h3_s_j,
                 i[j].ct_eq(&Scalar::ZERO),
             );
             big_c_prime[j][1] = RistrettoPoint::conditional_select(
-                &(&params.h3 * &s_i_prime[j]),
-                &(&params.h3 * &z[j] - big_c[j][1] * gamma_i[j]),
+                &h3_s_j,
+                &(h3_z_j - big_c[j][1] * gamma_i[j]),
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
@@ -1311,11 +1315,9 @@ impl PreRefund {
             return Err(ErrorCode::InvalidProof);
         }
 
+        let pow2_scalars: Vec<Scalar> = powers_of_two().take(L).collect();
         let x_a = RistrettoPoint::generator()
-            + spend_proof.com.iter()
-                .zip(powers_of_two())
-                .map(|(com, pow2)| com * pow2)
-                .fold(RistrettoPoint::identity(), |a, b| a + b)
+            + RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com)
             + &params.h4 * &self.ctx;
 
         let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
