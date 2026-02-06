@@ -18,7 +18,7 @@
 //! All protocol messages are encoded using deterministic CBOR (RFC 8949) for
 //! interoperability.
 
-use crate::{IssuanceRequest, IssuanceResponse, SpendProof, Refund, L, PrivateKey, PublicKey, PreIssuance, CreditToken, PreRefund};
+use crate::{IssuanceRequest, IssuanceResponse, SpendProof, Refund, L, PrivateKey, PublicKey, PreIssuance, CreditToken, PreRefund, ErrorMsg, ErrorCode};
 use ciborium::value::Value;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 
@@ -675,6 +675,67 @@ impl PreRefund {
     }
 }
 
+/// CBOR encoding for ErrorMsg
+impl ErrorMsg {
+    /// Encode to CBOR according to spec format:
+    /// ```text
+    /// ErrorMsg = {
+    ///     1: uint,   ; error_code
+    ///     2: tstr    ; error_message (for debugging only)
+    /// }
+    /// ```
+    pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
+        let map = vec![
+            (Value::Integer(1.into()), Value::Integer((self.error_code as u32).into())),
+            (Value::Integer(2.into()), Value::Text(self.error_message.clone())),
+        ];
+
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&Value::Map(map), &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Decode from CBOR
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
+        let value: Value = ciborium::from_reader(bytes)?;
+
+        match value {
+            Value::Map(map) => {
+                let mut error_code = None;
+                let mut error_message = None;
+
+                for (k, v) in map {
+                    match k {
+                        Value::Integer(i) if i == 1.into() => {
+                            if let Value::Integer(code) = v {
+                                let code: i128 = code.into();
+                                let code = u32::try_from(code)
+                                    .map_err(|_| CborError::InvalidValue("error_code out of range"))?;
+                                error_code = Some(
+                                    ErrorCode::from_u32(code)
+                                        .ok_or(CborError::InvalidValue("unknown error_code"))?,
+                                );
+                            }
+                        }
+                        Value::Integer(i) if i == 2.into() => {
+                            if let Value::Text(msg) = v {
+                                error_message = Some(msg);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                Ok(ErrorMsg {
+                    error_code: error_code.ok_or(CborError::InvalidStructure("missing field 1 (error_code)"))?,
+                    error_message: error_message.ok_or(CborError::InvalidStructure("missing field 2 (error_message)"))?,
+                })
+            }
+            _ => Err(CborError::InvalidStructure("expected CBOR map")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,5 +888,38 @@ mod tests {
         assert_eq!(pre_refund.r, decoded.r);
         assert_eq!(pre_refund.k, decoded.k);
         assert_eq!(pre_refund.m, decoded.m);
+    }
+
+    #[test]
+    fn test_error_msg_cbor_roundtrip() {
+        let error = ErrorMsg {
+            error_code: ErrorCode::InvalidProof,
+            error_message: "proof verification failed".to_string(),
+        };
+
+        let bytes = error.to_cbor().unwrap();
+        let decoded = ErrorMsg::from_cbor(&bytes).unwrap();
+
+        assert_eq!(error.error_code, decoded.error_code);
+        assert_eq!(error.error_message, decoded.error_message);
+    }
+
+    #[test]
+    fn test_error_msg_all_codes() {
+        for (code, name) in [
+            (ErrorCode::InvalidProof, "invalid proof"),
+            (ErrorCode::NullifierReuse, "double spend"),
+            (ErrorCode::MalformedRequest, "bad request"),
+            (ErrorCode::InvalidAmount, "amount too large"),
+        ] {
+            let error = ErrorMsg {
+                error_code: code,
+                error_message: name.to_string(),
+            };
+            let bytes = error.to_cbor().unwrap();
+            let decoded = ErrorMsg::from_cbor(&bytes).unwrap();
+            assert_eq!(error.error_code, decoded.error_code);
+            assert_eq!(error.error_message, decoded.error_message);
+        }
     }
 }

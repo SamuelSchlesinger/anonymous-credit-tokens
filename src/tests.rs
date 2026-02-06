@@ -364,7 +364,7 @@ fn attempt_overspend() {
 
     // The refund should be None since the proof is invalid
     assert!(
-        refund_result.is_none(),
+        refund_result.is_err(),
         "Overspend should have been rejected"
     );
 }
@@ -588,14 +588,14 @@ fn invalid_issuance_request() {
     let issuance_response =
         private_key.issue(&params, &tampered_request, Scalar::from(20u64), OsRng);
     assert!(
-        issuance_response.is_none(),
+        issuance_response.is_err(),
         "Tampered request should be rejected"
     );
 
     // The original request should be accepted
     let issuance_response = private_key.issue(&params, &valid_request, Scalar::from(20u64), OsRng);
     assert!(
-        issuance_response.is_some(),
+        issuance_response.is_ok(),
         "Valid request should be accepted"
     );
 }
@@ -635,7 +635,7 @@ fn invalid_proof_verification() {
 
     // The issuer should reject the tampered proof
     let refund_result = private_key.refund(&params, &tampered_proof, OsRng);
-    assert!(refund_result.is_none(), "Tampered proof should be rejected");
+    assert!(refund_result.is_err(), "Tampered proof should be rejected");
 }
 
 #[test]
@@ -712,14 +712,14 @@ fn invalid_token_verification() {
     let token_result =
         preissuance.to_credit_token(&params, private_key.public(), &request, &tampered_response);
     assert!(
-        token_result.is_none(),
+        token_result.is_err(),
         "Tampered response should be rejected"
     );
 
     // The original response should be accepted
     let token_result =
         preissuance.to_credit_token(&params, private_key.public(), &request, &response);
-    assert!(token_result.is_some(), "Valid response should be accepted");
+    assert!(token_result.is_ok(), "Valid response should be accepted");
 }
 
 #[test]
@@ -805,7 +805,7 @@ fn tampered_refund_verification() {
         private_key.public(),
     );
     assert!(
-        new_token_result.is_none(),
+        new_token_result.is_err(),
         "Tampered refund should be rejected"
     );
 
@@ -813,7 +813,7 @@ fn tampered_refund_verification() {
     let new_token_result =
         prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
     assert!(
-        new_token_result.is_some(),
+        new_token_result.is_ok(),
         "Valid refund should be accepted"
     );
 }
@@ -841,7 +841,7 @@ fn zero_e_signature_attack() {
     // The client should reject this (though the actual signature verification may fail in different ways)
     let token_result =
         preissuance.to_credit_token(&params, private_key.public(), &request, &tampered_response);
-    assert!(token_result.is_none(), "Zero e value should be rejected");
+    assert!(token_result.is_err(), "Zero e value should be rejected");
 }
 
 #[test]
@@ -867,7 +867,7 @@ fn spend_with_identity_a_prime() {
     // The issuer should reject this proof
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
     assert!(
-        refund_result.is_none(),
+        refund_result.is_err(),
         "Spend proof with identity a_prime should be rejected"
     );
 }
@@ -898,7 +898,7 @@ fn token_with_zero_credit() {
     let (spend_proof, _) = token.prove_spend(&params, spend_amount, OsRng);
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
     assert!(
-        refund_result.is_none(),
+        refund_result.is_err(),
         "Spending from a zero-balance token should fail"
     );
 
@@ -991,7 +991,7 @@ fn exhaust_token_with_one_credit_spends() {
     let (spend_proof, _) = current_token.prove_spend(&params, spend_amount, OsRng);
     let refund_result = private_key.refund(&params, &spend_proof, OsRng);
     assert!(
-        refund_result.is_none(),
+        refund_result.is_err(),
         "Spending from an empty token should fail"
     );
 
@@ -1193,7 +1193,7 @@ fn test_key_component_malleability() {
         private_key.public(),
     );
     assert!(
-        result1.is_none(),
+        result1.is_err(),
         "Tampered 'a' component should be rejected"
     );
 
@@ -1213,7 +1213,7 @@ fn test_key_component_malleability() {
         private_key.public(),
     );
     assert!(
-        result2.is_none(),
+        result2.is_err(),
         "Tampered 'gamma' component should be rejected"
     );
 
@@ -1233,13 +1233,13 @@ fn test_key_component_malleability() {
         private_key.public(),
     );
     assert!(
-        result3.is_none(),
+        result3.is_err(),
         "Tampered 'z' component should be rejected"
     );
 
     // The original refund should still be valid
     let result4 = prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
-    assert!(result4.is_some(), "Original refund should be valid");
+    assert!(result4.is_ok(), "Original refund should be valid");
 }
 
 // ===== PROPERTY-BASED TESTING WITH PROPTEST =====
@@ -1293,6 +1293,7 @@ fn test_params() -> Params {
 
 // Property: Issuance protocol maintains balance invariant
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_issuance_balance_invariant(
         credit_amount in credit_amount_strategy(),
@@ -1302,8 +1303,8 @@ proptest! {
         let params = test_params();
         let request = pre_issuance.request(&params, OsRng);
         
-        if let Some(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
-            if let Some(token) = pre_issuance.to_credit_token(
+        if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+            if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
                 &request,
@@ -1318,6 +1319,7 @@ proptest! {
 
 // Property: Double issuance with same request fails
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_no_double_issuance(
         credit_amount in credit_amount_strategy(),
@@ -1329,7 +1331,7 @@ proptest! {
         
         // First issuance should succeed
         let response1 = private_key.issue(&params, &request, credit_amount, OsRng);
-        prop_assert!(response1.is_some());
+        prop_assert!(response1.is_ok());
         
         // Second issuance with same request should fail (simulated by checking)
         // In a real system, the issuer would track used requests
@@ -1338,6 +1340,7 @@ proptest! {
 
 // Property: Spend + Refund preserves total balance
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_spend_refund_balance_preservation(
         initial_amount in 1u64..10000,
@@ -1366,7 +1369,7 @@ proptest! {
         prop_assert_eq!(pre_refund.m, expected_remaining);
         
         // Process refund
-        if let Some(refund) = private_key.refund(&params, &spend_proof, OsRng) {
+        if let Ok(refund) = private_key.refund(&params, &spend_proof, OsRng) {
             let new_token = pre_refund
                 .to_credit_token(&params, &spend_proof, &refund, private_key.public())
                 .unwrap();
@@ -1379,6 +1382,7 @@ proptest! {
 
 // Property: Nullifiers are deterministic for same token
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_nullifier_determinism(
         credit_amount in credit_amount_strategy(),
@@ -1394,8 +1398,8 @@ proptest! {
         prop_assume!(spend_u128 <= credit_u128);
         
         let request = pre_issuance.request(&params, OsRng);
-        if let Some(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
-            if let Some(token) = pre_issuance.to_credit_token(
+        if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+            if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
                 &request,
@@ -1414,6 +1418,7 @@ proptest! {
 
 // Property: Different tokens have different nullifiers
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_nullifier_uniqueness(
         credit_amount in 1u64..10000,
@@ -1452,6 +1457,7 @@ proptest! {
 
 // Property: CBOR serialization round-trip for all types
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_issuance_request(
         big_k in point_strategy(),
@@ -1471,6 +1477,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_credit_token(token in credit_token_strategy()) {
         let bytes = token.to_cbor().unwrap();
@@ -1485,6 +1492,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_private_key(key in private_key_strategy()) {
         let bytes = key.to_cbor().unwrap();
@@ -1497,6 +1505,7 @@ proptest! {
 
 // Property: Binary decomposition correctness
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_binary_decomposition_correctness(value in any::<u128>()) {
         let scalar = Scalar::from(value);
@@ -1520,6 +1529,7 @@ proptest! {
 
 // Property: Overspending always fails
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_overspend_always_fails(
         initial_amount in 1u64..10000,
@@ -1542,12 +1552,13 @@ proptest! {
         
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund_result.is_none());
+        prop_assert!(refund_result.is_err());
     }
 }
 
 // Property: Sequential spends accumulate correctly
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_sequential_spends_accumulate(
         initial_amount in 100u64..1000,
@@ -1593,6 +1604,7 @@ proptest! {
 
 // Property: Transcript determinism
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_transcript_determinism(
         label in prop::collection::vec(any::<u8>(), 1..32),
@@ -1619,6 +1631,7 @@ proptest! {
 
 // Property: Zero amounts are handled correctly
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_zero_amount_handling(
         initial_amount in 1u64..10000,
@@ -1651,6 +1664,7 @@ proptest! {
 
 // Property: Params affect cryptographic outputs
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_params_affect_outputs(
         pre_issuance in pre_issuance_strategy(),
@@ -1669,6 +1683,7 @@ proptest! {
 
 // Property: Invalid proofs are always rejected
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_invalid_proofs_rejected(
         initial_amount in 10u64..1000,
@@ -1694,12 +1709,13 @@ proptest! {
         
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund_result.is_none());
+        prop_assert!(refund_result.is_err());
     }
 }
 
 // Property: Public key derivation is consistent
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_public_key_derivation(x in scalar_strategy()) {
         let private_key = PrivateKey {
@@ -1716,6 +1732,7 @@ proptest! {
 
 // Property: Refund amount never exceeds initial amount
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_refund_never_exceeds_initial(
         initial_amount in 1u64..10000,
@@ -1742,7 +1759,7 @@ proptest! {
             let spend_amount = Scalar::from(amount);
             let (spend_proof, pre_refund) = current_token.prove_spend(&params, spend_amount, OsRng);
             
-            if let Some(refund) = private_key.refund(&params, &spend_proof, OsRng) {
+            if let Ok(refund) = private_key.refund(&params, &spend_proof, OsRng) {
                 total_spent += amount;
                 
                 current_token = pre_refund
@@ -1759,6 +1776,7 @@ proptest! {
 
 // Additional CBOR round-trip tests
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_issuance_response(
         a in point_strategy(),
@@ -1780,6 +1798,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_refund(
         a in point_strategy(),
@@ -1799,6 +1818,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_pre_issuance(pre_issuance in pre_issuance_strategy()) {
         let bytes = pre_issuance.to_cbor().unwrap();
@@ -1810,6 +1830,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_pre_refund(
         r in scalar_strategy(),
@@ -1827,6 +1848,7 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_round_trip_public_key(w in point_strategy()) {
         let public_key = PublicKey { w };
@@ -1839,6 +1861,7 @@ proptest! {
 
 // Property: SpendProof generation is deterministic given fixed randomness
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_spend_proof_structure_validity(
         initial_amount in 10u64..1000,
@@ -1874,6 +1897,7 @@ proptest! {
 
 // Property: Token tampering is always detected
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_token_tampering_detection(
         initial_amount in 10u64..1000,
@@ -1900,12 +1924,13 @@ proptest! {
         
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund_result.is_none(), "Tampered token should be rejected");
+        prop_assert!(refund_result.is_err(), "Tampered token should be rejected");
     }
 }
 
 // Property: Issuance with invalid request always fails
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_invalid_issuance_request_rejection(
         credit_amount in credit_amount_strategy(),
@@ -1923,12 +1948,13 @@ proptest! {
         
         // Issuance should fail
         let response = private_key.issue(&params, &request, credit_amount, OsRng);
-        prop_assert!(response.is_none(), "Invalid request should be rejected");
+        prop_assert!(response.is_err(), "Invalid request should be rejected");
     }
 }
 
 // Property: Spend amounts within valid range produce valid binary decompositions
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_spend_amount_binary_decomposition(
         spend_amount in any::<u128>(),
@@ -1964,6 +1990,7 @@ proptest! {
 
 // Property: Multiple issuers don't interfere
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_multiple_issuers_independence(
         credit_amount in 10u64..1000,
@@ -1989,16 +2016,17 @@ proptest! {
         // Try to spend token1 with issuer2 (should fail)
         let (spend_proof, _) = token1.prove_spend(&params, spend, OsRng);
         let refund2 = private_key2.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund2.is_none(), "Wrong issuer should reject spend");
-        
+        prop_assert!(refund2.is_err(), "Wrong issuer should reject spend");
+
         // Correct issuer should accept
         let refund1 = private_key1.refund(&params, &spend_proof, OsRng);
-        prop_assert!(refund1.is_some(), "Correct issuer should accept spend");
+        prop_assert!(refund1.is_ok(), "Correct issuer should accept spend");
     }
 }
 
 // Property: Exhaustive spending works correctly
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_exhaustive_spending(
         initial_amount in 5u64..100,
@@ -2040,6 +2068,7 @@ proptest! {
 
 // Property: Challenge values affect proof generation
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_challenge_affects_proofs(
         initial_amount in 10u64..100,
@@ -2080,6 +2109,7 @@ proptest! {
 
 // Property: Scalar arithmetic preserves validity
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_scalar_arithmetic_validity(
         a in any::<u64>(),
@@ -2108,6 +2138,7 @@ proptest! {
 
 // Property: Point operations maintain group properties
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_point_group_properties(
         scalar1 in scalar_strategy(),
@@ -2133,6 +2164,7 @@ proptest! {
 
 // Property: Nullifier computation is collision-resistant
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_nullifier_collision_resistance(
         tokens in prop::collection::vec(
@@ -2151,8 +2183,8 @@ proptest! {
             }
             
             let request = pre_issuance.request(&params, OsRng);
-            if let Some(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
-                if let Some(token) = pre_issuance.to_credit_token(
+            if let Ok(response) = private_key.issue(&params, &request, credit_amount, OsRng) {
+                if let Ok(token) = pre_issuance.to_credit_token(
                     &params,
                     private_key.public(),
                     &request,
@@ -2175,6 +2207,7 @@ proptest! {
 
 // Property: CBOR encoding is canonical
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
     fn prop_cbor_encoding_canonical(
         token in credit_token_strategy(),

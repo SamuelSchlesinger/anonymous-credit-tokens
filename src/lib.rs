@@ -502,8 +502,8 @@ impl PreIssuance {
     ///
     /// # Returns
     ///
-    /// * `Some(CreditToken)` - A valid credit token if the issuer's response is verified
-    /// * `None` - If the verification fails, indicating a potential invalid response
+    /// * `Ok(CreditToken)` - A valid credit token if the issuer's response is verified
+    /// * `Err(ErrorCode::InvalidProof)` - If the verification fails
     ///
     /// # Example
     ///
@@ -533,7 +533,7 @@ impl PreIssuance {
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
-    ) -> Option<CreditToken> {
+    ) -> Result<CreditToken, ErrorCode> {
         // Reconstruct the signature base points for verification
         let x_a = RistrettoPoint::generator() + &params.h1 * &response.c + request.big_k;
         let x_g = RistrettoPoint::generator() * response.e + public.w;
@@ -550,11 +550,11 @@ impl PreIssuance {
 
         // Verify that the challenge matches the expected value
         if gamma != response.gamma {
-            return None;
+            return Err(ErrorCode::InvalidProof);
         }
 
         // Construct the credit token with the verified signature
-        Some(CreditToken {
+        Ok(CreditToken {
             a: response.a,
             e: response.e,
             r: self.r,
@@ -601,8 +601,8 @@ impl PrivateKey {
     ///
     /// # Returns
     ///
-    /// * `Some(IssuanceResponse)` - The response containing the signature if the request is valid
-    /// * `None` - If the request verification fails
+    /// * `Ok(IssuanceResponse)` - The response containing the signature if the request is valid
+    /// * `Err(ErrorCode::InvalidProof)` - If the request verification fails
     ///
     /// # Example
     ///
@@ -626,7 +626,7 @@ impl PrivateKey {
         request: &IssuanceRequest,
         c: Scalar,
         mut rng: impl CryptoRngCore,
-    ) -> Option<IssuanceResponse> {
+    ) -> Result<IssuanceResponse, ErrorCode> {
         // Verify the client's zero-knowledge proof
         let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
             - request.big_k * request.gamma;
@@ -638,7 +638,7 @@ impl PrivateKey {
 
         // Verify that the client's proof is valid
         if gamma != request.gamma {
-            return None;
+            return Err(ErrorCode::InvalidProof);
         }
 
         // Create a BBS+ signature on the client's commitment and credit amount
@@ -661,7 +661,7 @@ impl PrivateKey {
         // Calculate the response value for the proof
         let z = gamma * (self.x + e) + alpha;
 
-        Some(IssuanceResponse { a, e, gamma, z, c })
+        Ok(IssuanceResponse { a, e, gamma, z, c })
     }
 }
 
@@ -753,8 +753,8 @@ impl PrivateKey {
     ///
     /// # Returns
     ///
-    /// * `Some(Refund)` - The refund token if the spend proof is valid
-    /// * `None` - If the spend proof verification fails
+    /// * `Ok(Refund)` - The refund token if the spend proof is valid
+    /// * `Err(ErrorCode::InvalidProof)` - If the spend proof verification fails
     ///
     /// # Example
     ///
@@ -785,9 +785,9 @@ impl PrivateKey {
         params: &Params,
         spend_proof: &SpendProof,
         mut rng: impl CryptoRngCore,
-    ) -> Option<Refund> {
+    ) -> Result<Refund, ErrorCode> {
         if spend_proof.a_prime == RistrettoPoint::identity() {
-            return None;
+            return Err(ErrorCode::InvalidProof);
         }
 
         let a_bar = spend_proof.a_prime * self.x;
@@ -840,7 +840,7 @@ impl PrivateKey {
         });
 
         if gamma != spend_proof.gamma {
-            return None;
+            return Err(ErrorCode::InvalidProof);
         }
 
         let e = Scalar::random(&mut rng);
@@ -860,7 +860,7 @@ impl PrivateKey {
 
         let z = refund_gamma * (self.x + e) + alpha;
 
-        Some(Refund {
+        Ok(Refund {
             a,
             e,
             gamma: refund_gamma,
@@ -1187,8 +1187,8 @@ impl PreRefund {
     ///
     /// # Returns
     ///
-    /// * `Some(CreditToken)` - A new credit token with the remaining balance if the refund is valid
-    /// * `None` - If the verification fails
+    /// * `Ok(CreditToken)` - A new credit token with the remaining balance if the refund is valid
+    /// * `Err(ErrorCode::InvalidProof)` - If the verification fails
     ///
     /// # Example
     ///
@@ -1223,7 +1223,7 @@ impl PreRefund {
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
-    ) -> Option<CreditToken> {
+    ) -> Result<CreditToken, ErrorCode> {
         let x_a = RistrettoPoint::generator()
             + spend_proof.com.iter()
                 .enumerate()
@@ -1240,11 +1240,11 @@ impl PreRefund {
         });
 
         if gamma != refund.gamma {
-            return None;
+            return Err(ErrorCode::InvalidProof);
         }
 
         // The client now has a new credit token
-        Some(CreditToken {
+        Ok(CreditToken {
             a: refund.a,
             e: refund.e,
             k: self.k,
@@ -1252,6 +1252,49 @@ impl PreRefund {
             c: self.m,
         })
     }
+}
+
+/// Error codes for the protocol as defined in Section 5.3 of the spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ErrorCode {
+    /// Proof verification failed
+    InvalidProof = 1,
+    /// Double-spend attempt detected
+    NullifierReuse = 2,
+    /// Request format is invalid
+    MalformedRequest = 3,
+    /// Credit amount exceeds maximum (2^L - 1)
+    InvalidAmount = 4,
+}
+
+impl ErrorCode {
+    /// Convert from a u32 value.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(ErrorCode::InvalidProof),
+            2 => Some(ErrorCode::NullifierReuse),
+            3 => Some(ErrorCode::MalformedRequest),
+            4 => Some(ErrorCode::InvalidAmount),
+            _ => None,
+        }
+    }
+}
+
+/// An error message as defined in Section 4.2 of the spec.
+///
+/// ```text
+/// ErrorMsg = {
+///     1: uint,   ; error_code
+///     2: tstr    ; error_message (for debugging only)
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ErrorMsg {
+    /// The error code identifying the type of error.
+    pub error_code: ErrorCode,
+    /// A human-readable error message for debugging.
+    pub error_message: String,
 }
 
 #[cfg(test)]
