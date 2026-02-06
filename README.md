@@ -109,7 +109,7 @@ use anonymous_credit_tokens::{credit_to_scalar, scalar_to_u128};
 
 // Convert u128 to Scalar for credit amounts
 let credit_amount_u128 = 500u128;
-let credit_amount_scalar = credit_to_scalar(credit_amount_u128).unwrap();
+let credit_amount_scalar = credit_to_scalar::<128>(credit_amount_u128).unwrap();
 
 // Use the scalar for issuing credits
 // ...
@@ -139,7 +139,7 @@ let issuance_request = preissuance.request(&params, OsRng);
 let credit_amount = Scalar::from(20u64);
 let ctx = Scalar::ZERO; // request context (e.g., derived from application context)
 let issuance_response = private_key
-    .issue(&params, &issuance_request, credit_amount, ctx, OsRng)
+    .issue::<128>(&params, &issuance_request, credit_amount, ctx, OsRng)
     .unwrap();
 
 // Client-side: Construct the credit token
@@ -153,7 +153,7 @@ let credit_token = preissuance
 ```rust
 // Client-side: Creates a spending proof (spending 10 out of 20 credits)
 let charge = Scalar::from(10u64);
-let (spend_proof, prerefund) = credit_token.prove_spend(&params, charge, OsRng);
+let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng);
 
 // Server-side: Verify and process the spending proof
 // IMPORTANT: Check that the nullifier hasn't been used before
@@ -191,7 +191,7 @@ let issuance_request = preissuance.request(&params, OsRng);
 // Server issues 40 credits
 let ctx = Scalar::ZERO; // request context
 let issuance_response = private_key
-    .issue(&params, &issuance_request, Scalar::from(40u64), ctx, OsRng)
+    .issue::<128>(&params, &issuance_request, Scalar::from(40u64), ctx, OsRng)
     .unwrap();
 
 // Client receives the credit token
@@ -202,7 +202,7 @@ let credit_token1 = preissuance
 // 3. First Purchase/Transaction
 // Client spends 20 credits
 let charge = Scalar::from(20u64);
-let (spend_proof, prerefund) = credit_token1.prove_spend(&params, charge, OsRng);
+let (spend_proof, prerefund) = credit_token1.prove_spend::<128>(&params, charge, OsRng);
 
 // Server checks nullifier and processes the spending
 let nullifier = spend_proof.nullifier();
@@ -222,10 +222,56 @@ let credit_token2 = prerefund
 // 4. Second Purchase/Transaction
 // Client spends remaining 20 credits
 let charge = Scalar::from(20u64);
-let (spend_proof2, prerefund2) = credit_token2.prove_spend(&params, charge, OsRng);
+let (spend_proof2, prerefund2) = credit_token2.prove_spend::<128>(&params, charge, OsRng);
 
 // Server processes as before...
 ```
+
+### The `L` Parameter (Range Proof Bit-Length)
+
+All cryptographic operations that involve credit amounts are parameterized by a const generic `L: usize`, which controls the bit-length of the range proofs. Credit values must fit in `L` bits, meaning they must be in the range `[0, 2^L)`.
+
+- **Typical value**: `L = 128` for u128-compatible amounts
+- **Trade-off**: Larger `L` allows higher credit amounts but increases proof size
+- **Constraint**: `L` must be `<= 252`
+- **Consistency**: The same `L` must be used across `issue`, `prove_spend`, and `to_credit_token` for a given token chain
+
+### Request Context (`ctx`)
+
+The `ctx` parameter passed during issuance binds the token to an application-specific context. Important privacy considerations:
+
+- The `ctx` value is **revealed in the clear** during spending
+- It **persists across refunds** (the refund token retains the same `ctx`)
+- If distinct `ctx` values are assigned per issuance, the **entire token chain becomes linkable**
+- To preserve unlinkability, use a **shared `ctx`** across clients within the same context (e.g., per-service or per-epoch)
+- `Scalar::ZERO` is a valid default when no context binding is needed
+
+### Re-anonymization
+
+Spending zero credits (`s = Scalar::ZERO`) is permitted and serves as a re-anonymization operation. This creates a new token with the same balance but a fresh nullifier, which can be useful for refreshing token privacy without actually spending any credits.
+
+### CBOR Serialization
+
+All protocol messages support CBOR encoding/decoding via the `cbor` module, following the wire format in the IETF draft specification. Each type provides `to_cbor()` and `from_cbor()` methods:
+
+```rust
+use anonymous_credit_tokens::cbor::CborError;
+
+// Encode a protocol message for transmission
+let bytes: Vec<u8> = issuance_request.to_cbor().unwrap();
+
+// Decode a received message
+let decoded = IssuanceRequest::from_cbor(&bytes).unwrap();
+```
+
+Types with CBOR support: `IssuanceRequest`, `IssuanceResponse`, `SpendProof`, `Refund`, `PrivateKey`, `PublicKey`, `PreIssuance`, `CreditToken`, `PreRefund`, `ErrorMsg`.
+
+### Error Handling
+
+The protocol defines structured error types:
+
+- **`ErrorCode`**: An enum with variants `InvalidProof`, `NullifierReuse`, `MalformedRequest`, and `InvalidAmount`
+- **`ErrorMsg`**: A CBOR-serializable struct containing an `ErrorCode` and a human-readable message for debugging
 
 ## Cryptographic Details
 

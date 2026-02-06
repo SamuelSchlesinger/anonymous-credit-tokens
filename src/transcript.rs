@@ -124,11 +124,11 @@ impl Transcript {
         self.update(scalar.as_bytes());
     }
 
-    /// Adds multiple Ristretto points to the transcript.
+    /// Adds multiple scalar values to the transcript.
     ///
     /// # Arguments
     ///
-    /// * `scalars` - An iterator over references to `RistrettoPoint`s to add to the transcript
+    /// * `scalars` - An iterator over references to `Scalar`s to add to the transcript
     pub(crate) fn add_scalars<'a>(&mut self, scalars: impl Iterator<Item = &'a Scalar>) {
         for scalar in scalars {
             self.add_scalar(scalar);

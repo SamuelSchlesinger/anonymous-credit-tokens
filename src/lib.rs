@@ -87,9 +87,40 @@
 //! - **Credit Token**: A cryptographic token representing a certain amount of credits
 //! - **Nullifier**: A unique identifier used to prevent double-spending
 //!
-//! ## Usage Examples
+//! ## Quick Start
 //!
-//! See the README.md file for comprehensive usage examples and integration guidance.
+//! ```
+//! use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
+//! use curve25519_dalek::Scalar;
+//! use rand_core::OsRng;
+//!
+//! // Setup: create system parameters and issuer keypair
+//! let params = Params::new("example-org", "payment-api", "production", "2024-01-15");
+//! let private_key = PrivateKey::random(OsRng);
+//!
+//! // Issuance: client requests 100 credits
+//! let preissuance = PreIssuance::random(OsRng);
+//! let request = preissuance.request(&params, OsRng);
+//! let response = private_key
+//!     .issue::<128>(&params, &request, Scalar::from(100u64), Scalar::ZERO, OsRng)
+//!     .unwrap();
+//! let token = preissuance
+//!     .to_credit_token(&params, private_key.public(), &request, &response)
+//!     .unwrap();
+//!
+//! // Spending: client spends 30 credits
+//! let (spend_proof, prerefund) = token.prove_spend::<128>(&params, Scalar::from(30u64), OsRng);
+//!
+//! // Server verifies proof and checks nullifier, then issues refund
+//! let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+//!
+//! // Client constructs new token with 70 credits remaining
+//! let new_token = prerefund
+//!     .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+//!     .unwrap();
+//! ```
+//!
+//! See the README.md file for comprehensive integration guidance.
 
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable, traits::MultiscalarMul};
 use group::Group;
@@ -243,7 +274,8 @@ impl Eq for Params {}
 impl Params {
     /// Generates random system parameters using the provided random number generator.
     ///
-    /// This is used internally to create the default parameters with a deterministic seed.
+    /// This is primarily intended for testing purposes. In production, use [`Params::new`]
+    /// to create deterministic parameters from a domain separator.
     ///
     /// # Arguments
     ///
@@ -455,6 +487,7 @@ impl PreIssuance {
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters for this deployment
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Returns
@@ -505,6 +538,7 @@ impl PreIssuance {
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters for this deployment
     /// * `public` - The issuer's public key
     /// * `request` - The original issuance request sent to the issuer
     /// * `response` - The issuer's response containing the signature components
@@ -610,10 +644,17 @@ impl PrivateKey {
     /// that allows the client to verify the signature's authenticity without revealing
     /// the issuer's private key.
     ///
+    /// # Type Parameters
+    ///
+    /// * `L` - The bit-length for credit amount range proofs. Credit values must be
+    ///   in the range `[1, 2^L)`. Typical value: `128` for u128-compatible amounts.
+    ///   Must be `<= 252`.
+    ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters for this deployment
     /// * `request` - The client's issuance request
-    /// * `c` - The amount of credits to issue
+    /// * `c` - The amount of credits to issue (must be in range `(0, 2^L)`)
     /// * `ctx` - The request context binding this credential to an application-specific
     ///   context. This value is revealed in the clear during spending and persists across
     ///   refunds. To preserve unlinkability, use a shared ctx across clients within the
@@ -624,6 +665,7 @@ impl PrivateKey {
     ///
     /// * `Ok(IssuanceResponse)` - The response containing the signature if the request is valid
     /// * `Err(ErrorCode::InvalidProof)` - If the request verification fails
+    /// * `Err(ErrorCode::InvalidAmount)` - If `c` is zero or `>= 2^L`
     ///
     /// # Example
     ///
@@ -794,6 +836,7 @@ impl PrivateKey {
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters for this deployment
     /// * `spend_proof` - The client's proof of valid spending
     /// * `rng` - A cryptographically secure random number generator
     ///
@@ -1015,9 +1058,15 @@ impl CreditToken {
     /// This function requires that `2^L > self.c >= s`. If this condition is not met,
     /// the proof will be invalid and will be rejected by the issuer.
     ///
+    /// # Type Parameters
+    ///
+    /// * `L` - The bit-length for the range proof. Must match the `L` used during issuance.
+    ///   Must be `<= 252`.
+    ///
     /// # Arguments
     ///
-    /// * `s` - The amount of credits to spend
+    /// * `params` - The system parameters for this deployment
+    /// * `s` - The amount of credits to spend (zero is allowed for re-anonymization)
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Returns
@@ -1267,6 +1316,7 @@ impl PreRefund {
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters for this deployment
     /// * `spend_proof` - The original spending proof sent to the issuer
     /// * `refund` - The issuer's refund response
     /// * `public_key` - The issuer's public key
