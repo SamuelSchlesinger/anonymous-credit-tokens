@@ -42,7 +42,8 @@ fn scalar_hex(s: &Scalar) -> String {
 fn fmt_hex_block(label: &str, bytes: &[u8], width: usize) -> String {
     let h = hex(bytes);
     let mut out = String::new();
-    let chunks: Vec<&str> = h.as_bytes()
+    let chunks: Vec<&str> = h
+        .as_bytes()
         .chunks(width)
         .map(|c| std::str::from_utf8(c).unwrap())
         .collect();
@@ -66,10 +67,9 @@ fn fmt_scalar_line(label: &str, s: &Scalar) -> String {
 fn generate_test_vectors() {
     // ── deterministic seed ──────────────────────────────────────
     let seed: [u8; 32] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
     ];
     let mut rng = ChaCha20Rng::from_seed(seed);
 
@@ -101,14 +101,11 @@ fn generate_test_vectors() {
         .unwrap();
     let token_cbor = token.to_cbor().unwrap();
 
-    let (spend_proof, prerefund) =
-        token.prove_spend::<8>(&params, Scalar::from(s), &mut rng);
+    let (spend_proof, prerefund) = token.prove_spend::<8>(&params, Scalar::from(s), &mut rng);
     let spend_proof_cbor = spend_proof.to_cbor().unwrap();
     let prerefund_cbor = prerefund.to_cbor().unwrap();
 
-    let refund = private_key
-        .refund(&params, &spend_proof, &mut rng)
-        .unwrap();
+    let refund = private_key.refund(&params, &spend_proof, &mut rng).unwrap();
     let refund_cbor = refund.to_cbor().unwrap();
 
     let new_token = prerefund
@@ -124,15 +121,43 @@ fn generate_test_vectors() {
     let mut md = String::new();
 
     // preamble
-    writeln!(md, "The following test vector was generated deterministically using a").unwrap();
-    writeln!(md, "ChaCha20 RNG seeded with the bytes `00 01 02 ... 1e 1f` and L=8.").unwrap();
-    writeln!(md, "The domain separator is `\"{domain_separator}\"`, credit amount").unwrap();
-    writeln!(md, "c={c}, spend amount s={s}, and ctx=0. Values labelled `*_cbor`").unwrap();
-    writeln!(md, "are the CBOR wire-format encodings (Section 4) of each protocol").unwrap();
+    writeln!(
+        md,
+        "The following test vector was generated deterministically using a"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "ChaCha20 RNG seeded with the bytes `00 01 02 ... 1e 1f` and L=8."
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "The domain separator is `\"{domain_separator}\"`, credit amount"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "c={c}, spend amount s={s}, and ctx=0. Values labelled `*_cbor`"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "are the CBOR wire-format encodings (Section 4) of each protocol"
+    )
+    .unwrap();
     writeln!(md, "message, displayed in hexadecimal.").unwrap();
     writeln!(md).unwrap();
-    writeln!(md, "Implementations SHOULD verify they can deserialize these CBOR").unwrap();
-    writeln!(md, "messages and that a full protocol run with the same deterministic").unwrap();
+    writeln!(
+        md,
+        "Implementations SHOULD verify they can deserialize these CBOR"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "messages and that a full protocol run with the same deterministic"
+    )
+    .unwrap();
     writeln!(md, "RNG produces identical output.").unwrap();
     writeln!(md).unwrap();
 
@@ -162,11 +187,26 @@ fn generate_test_vectors() {
     writeln!(md, "## Issuance").unwrap();
     writeln!(md).unwrap();
     writeln!(md, "~~~").unwrap();
-    write!(md, "{}", fmt_hex_block("preissuance_cbor", &preissuance_cbor, w)).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_hex_block("preissuance_cbor", &preissuance_cbor, w)
+    )
+    .unwrap();
     writeln!(md).unwrap();
-    write!(md, "{}", fmt_hex_block("issuance_request_cbor", &request_cbor, w)).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_hex_block("issuance_request_cbor", &request_cbor, w)
+    )
+    .unwrap();
     writeln!(md).unwrap();
-    write!(md, "{}", fmt_hex_block("issuance_response_cbor", &response_cbor, w)).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_hex_block("issuance_response_cbor", &response_cbor, w)
+    )
+    .unwrap();
     writeln!(md).unwrap();
     write!(md, "{}", fmt_hex_block("credit_token_cbor", &token_cbor, w)).unwrap();
     writeln!(md, "~~~").unwrap();
@@ -176,15 +216,30 @@ fn generate_test_vectors() {
     writeln!(md, "## Spending").unwrap();
     writeln!(md).unwrap();
     writeln!(md, "~~~").unwrap();
-    write!(md, "{}", fmt_scalar_line("nullifier", &spend_proof.nullifier())).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_scalar_line("nullifier", &spend_proof.nullifier())
+    )
+    .unwrap();
     writeln!(md).unwrap();
     write!(md, "{}", fmt_scalar_line("context", &spend_proof.context())).unwrap();
     writeln!(md).unwrap();
     write!(md, "{}", fmt_scalar_line("charge", &spend_proof.charge())).unwrap();
     writeln!(md).unwrap();
-    write!(md, "{}", fmt_hex_block("spend_proof_cbor", &spend_proof_cbor, w)).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_hex_block("spend_proof_cbor", &spend_proof_cbor, w)
+    )
+    .unwrap();
     writeln!(md).unwrap();
-    write!(md, "{}", fmt_hex_block("prerefund_cbor", &prerefund_cbor, w)).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_hex_block("prerefund_cbor", &prerefund_cbor, w)
+    )
+    .unwrap();
     writeln!(md, "~~~").unwrap();
     writeln!(md).unwrap();
 
@@ -200,11 +255,26 @@ fn generate_test_vectors() {
     writeln!(md, "## Refund Token").unwrap();
     writeln!(md).unwrap();
     writeln!(md, "~~~").unwrap();
-    write!(md, "{}", fmt_hex_block("refund_token_cbor", &new_token_cbor, w)).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_hex_block("refund_token_cbor", &new_token_cbor, w)
+    )
+    .unwrap();
     writeln!(md).unwrap();
-    write!(md, "{}", fmt_scalar_line("refund_token_credits", &new_token.credits())).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_scalar_line("refund_token_credits", &new_token.credits())
+    )
+    .unwrap();
     writeln!(md).unwrap();
-    write!(md, "{}", fmt_scalar_line("refund_token_nullifier", &new_token.nullifier())).unwrap();
+    write!(
+        md,
+        "{}",
+        fmt_scalar_line("refund_token_nullifier", &new_token.nullifier())
+    )
+    .unwrap();
     writeln!(md).unwrap();
     writeln!(md, "remaining_balance: {remaining}").unwrap();
     writeln!(md, "~~~").unwrap();
@@ -215,15 +285,16 @@ fn generate_test_vectors() {
         "/draft-act/draft-schlesinger-cfrg-act.md"
     );
 
-    let spec = std::fs::read_to_string(spec_path)
-        .expect("could not read spec markdown");
+    let spec = std::fs::read_to_string(spec_path).expect("could not read spec markdown");
 
     const START: &str = "<!-- TEST_VECTORS_START -->";
     const END: &str = "<!-- TEST_VECTORS_END -->";
 
-    let start_idx = spec.find(START)
+    let start_idx = spec
+        .find(START)
         .expect("missing TEST_VECTORS_START marker in spec");
-    let end_idx = spec.find(END)
+    let end_idx = spec
+        .find(END)
         .expect("missing TEST_VECTORS_END marker in spec");
 
     let mut new_spec = String::with_capacity(spec.len() + md.len());
@@ -232,8 +303,7 @@ fn generate_test_vectors() {
     new_spec.push_str(&md);
     new_spec.push_str(&spec[end_idx..]);
 
-    std::fs::write(spec_path, &new_spec)
-        .expect("could not write spec markdown");
+    std::fs::write(spec_path, &new_spec).expect("could not write spec markdown");
 
     // Also print to stdout for --nocapture inspection
     println!("{md}");
