@@ -129,7 +129,7 @@ use curve25519_dalek::{
     traits::MultiscalarMul,
 };
 use group::Group;
-use subtle::{ConditionallySelectable, ConstantTimeEq};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
 use std::ops::Neg;
@@ -1047,10 +1047,8 @@ fn bits_of<const L: usize>(s: Scalar) -> [Scalar; L] {
 
     // Extract each bit from the scalar's byte representation
     result.iter_mut().enumerate().for_each(|(i, result_elem)| {
-        let b = i / 8; // Byte index
-        let j = i % 8; // Bit position within the byte
-        let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-        *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
+        let bit = (bytes[i / 8] >> (i % 8)) & 1;
+        *result_elem = Scalar::conditional_select(&Scalar::ZERO, &Scalar::ONE, Choice::from(bit));
     });
 
     result
