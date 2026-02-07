@@ -95,13 +95,14 @@ fn decode_point(value: &Value) -> Result<RistrettoPoint, CborError> {
     }
 }
 
-/// Decode a Scalar from a CBOR byte string (little-endian)
+/// Decode a Scalar from a CBOR byte string (little-endian, canonical)
 fn decode_scalar(value: &Value) -> Result<Scalar, CborError> {
     match value {
         Value::Bytes(bytes) if bytes.len() == 32 => {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(bytes);
-            Ok(Scalar::from_bytes_mod_order(arr))
+            Option::from(Scalar::from_canonical_bytes(arr))
+                .ok_or(CborError::InvalidValue("non-canonical scalar encoding"))
         }
         _ => Err(CborError::InvalidStructure(
             "expected 32-byte array for scalar",

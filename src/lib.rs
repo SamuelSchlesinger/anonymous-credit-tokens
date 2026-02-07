@@ -262,16 +262,6 @@ impl std::fmt::Debug for Params {
     }
 }
 
-impl PartialEq for Params {
-    fn eq(&self, _other: &Self) -> bool {
-        // For testing purposes, assume all Params instances are different
-        // unless they are the same object. In real usage, Params should
-        // be created deterministically with domain separation.
-        false
-    }
-}
-
-impl Eq for Params {}
 
 impl Params {
     /// Generates random system parameters using the provided random number generator.

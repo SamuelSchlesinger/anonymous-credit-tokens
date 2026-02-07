@@ -1784,7 +1784,6 @@ proptest! {
     ) {
         let params1 = test_params();
         let params2 = Params::new("other-org", "other-service", "other-env", "2024-12-31");
-        prop_assume!(params1 != params2); // Different params should be different
 
         let request1 = pre_issuance.request(&params1, OsRng);
         let request2 = pre_issuance.request(&params2, OsRng);
