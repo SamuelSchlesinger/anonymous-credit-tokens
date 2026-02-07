@@ -1147,7 +1147,10 @@ impl CreditToken {
         let i = bits_of::<L>(self.c - s);
 
         let k_star = Scalar::random(&mut rng);
-        let s_i: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
+        let mut s_i = [Scalar::ZERO; L];
+        for s_val in s_i.iter_mut() {
+            *s_val = Scalar::random(&mut rng);
+        }
         let mut com = [RistrettoPoint::identity(); L];
         // Optimization: i[j] is always 0 or 1 (from bits_of), so h1 * i[j] is
         // either identity or h1. Use conditional_select instead of a full scalar mul.
