@@ -125,7 +125,8 @@
 //! See the README.md file for comprehensive integration guidance.
 
 use curve25519_dalek::{
-    RistrettoPoint, ristretto::RistrettoBasepointTable, traits::MultiscalarMul,
+    RistrettoPoint, constants::RISTRETTO_BASEPOINT_TABLE, ristretto::RistrettoBasepointTable,
+    traits::MultiscalarMul,
 };
 use group::Group;
 use subtle::{ConditionallySelectable, ConstantTimeEq};
@@ -211,7 +212,7 @@ impl PrivateKey {
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         let x = Scalar::random(&mut rng);
         let public = PublicKey {
-            w: RistrettoPoint::generator() * x,
+            w: RISTRETTO_BASEPOINT_TABLE * &x,
         };
         PrivateKey { x, public }
     }
@@ -575,11 +576,11 @@ impl PreIssuance {
             + &params.h1 * &response.c
             + &params.h4 * &response.ctx
             + request.big_k;
-        let x_g = RistrettoPoint::generator() * response.e + public.w;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &response.e + public.w;
 
         // Verify the response by checking the BBS+ signature proof
         let y_a = response.a * response.z + x_a * response.gamma.neg();
-        let y_g = RistrettoPoint::generator() * response.z + x_g * response.gamma.neg();
+        let y_g = RISTRETTO_BASEPOINT_TABLE * &response.z + x_g * response.gamma.neg();
 
         // Generate the expected challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
@@ -710,12 +711,12 @@ impl PrivateKey {
         let e = Scalar::random(&mut rng);
         let x_a = RistrettoPoint::generator() + &params.h1 * &c + &params.h4 * &ctx + request.big_k;
         let a = x_a * (e + self.x).invert();
-        let x_g = RistrettoPoint::generator() * e + self.public.w;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &e + self.public.w;
 
         // Generate a zero-knowledge proof that the signature is valid
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
-        let y_g = RistrettoPoint::generator() * alpha;
+        let y_g = RISTRETTO_BASEPOINT_TABLE * &alpha;
 
         // Generate the challenge for the proof using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
@@ -962,10 +963,10 @@ impl PrivateKey {
         let x_a = RistrettoPoint::generator() + k_prime + &params.h4 * &spend_proof.ctx;
         let a = x_a * (e + self.x).invert();
 
-        let x_g = RistrettoPoint::generator() * e + self.public.w;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &e + self.public.w;
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
-        let y_g = RistrettoPoint::generator() * alpha;
+        let y_g = RISTRETTO_BASEPOINT_TABLE * &alpha;
 
         let refund_gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalars([&e, &spend_proof.ctx].into_iter());
@@ -1406,9 +1407,9 @@ impl PreRefund {
             + RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com)
             + &params.h4 * &self.ctx;
 
-        let x_g = RistrettoPoint::generator() * refund.e + public_key.w;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &refund.e + public_key.w;
         let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
-        let y_g = RistrettoPoint::generator() * refund.z + x_g * refund.gamma.neg();
+        let y_g = RISTRETTO_BASEPOINT_TABLE * &refund.z + x_g * refund.gamma.neg();
 
         let gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalars([&refund.e, &self.ctx].into_iter());
