@@ -898,17 +898,9 @@ impl PrivateKey {
         spend_proof: &SpendProof<L>,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, ErrorCode> {
-        // Validate received points are not identity (spec Section 5.2)
+        // Validate A' is not identity (spec Section 3.5.2, step 3)
         if spend_proof.a_prime == RistrettoPoint::identity() {
             return Err(ErrorCode::InvalidProof);
-        }
-        if spend_proof.b_bar == RistrettoPoint::identity() {
-            return Err(ErrorCode::InvalidProof);
-        }
-        for com in &spend_proof.com {
-            if *com == RistrettoPoint::identity() {
-                return Err(ErrorCode::InvalidProof);
-            }
         }
 
         let a_bar = spend_proof.a_prime * self.x;
