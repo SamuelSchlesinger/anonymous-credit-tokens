@@ -920,23 +920,21 @@ impl PrivateKey {
             [spend_proof.b_bar, big_h1],
         ) + &params.h1 * &spend_proof.c_bar
             + &params.h3 * &spend_proof.r_bar;
-        let mut gamma01 = [Scalar::ZERO; L];
-        gamma01[0] = spend_proof.gamma - spend_proof.gamma0[0];
-        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
-        big_c[0][0] = spend_proof.com[0];
-        big_c[0][1] = spend_proof.com[0] - params.h1.basepoint();
+        let com0 = spend_proof.com[0];
+        let com0_minus_h1 = com0 - params.h1.basepoint();
+        let gamma01_0 = spend_proof.gamma - spend_proof.gamma0[0];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
         big_c_prime[0][0] = &params.h2 * &spend_proof.w00 + &params.h3 * &spend_proof.z[0][0]
-            - big_c[0][0] * spend_proof.gamma0[0];
+            - com0 * spend_proof.gamma0[0];
         big_c_prime[0][1] = &params.h2 * &spend_proof.w01 + &params.h3 * &spend_proof.z[0][1]
-            - big_c[0][1] * gamma01[0];
+            - com0_minus_h1 * gamma01_0;
         for j in 1..L {
-            gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
-            big_c[j][0] = spend_proof.com[j];
-            big_c[j][1] = spend_proof.com[j] - params.h1.basepoint();
+            let com_j = spend_proof.com[j];
+            let com_j_minus_h1 = com_j - params.h1.basepoint();
+            let gamma01_j = spend_proof.gamma - spend_proof.gamma0[j];
             big_c_prime[j][0] =
-                &params.h3 * &spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
-            big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
+                &params.h3 * &spend_proof.z[j][0] - com_j * spend_proof.gamma0[j];
+            big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - com_j_minus_h1 * gamma01_j;
         }
 
         let pow2_scalars: Vec<Scalar> = powers_of_two().take(L).collect();
