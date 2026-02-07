@@ -937,7 +937,7 @@ impl PrivateKey {
             big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - com_j_minus_h1 * gamma01_j;
         }
 
-        let pow2_scalars: Vec<Scalar> = powers_of_two().take(L).collect();
+        let pow2_scalars = powers_of_two::<L>();
         let k_prime = RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
         let big_c = &params.h1 * &spend_proof.c_bar.neg()
@@ -1005,13 +1005,20 @@ pub struct PreRefund {
     ctx: Scalar,
 }
 
-/// Returns an iterator over successive powers of two as Scalars: 1, 2, 4, 8, ...
+/// Returns an array of successive powers of two as Scalars: 1, 2, 4, 8, ...
 ///
-/// This avoids overflow issues with `2u128.pow(i)` when i >= 128.
-fn powers_of_two() -> impl Iterator<Item = Scalar> {
-    std::iter::successors(Some(Scalar::ONE), move |prev| {
-        Some(prev * Scalar::from(2u64))
-    })
+/// This avoids overflow issues with `2u128.pow(i)` when i >= 128 and
+/// returns a stack-allocated array instead of requiring a Vec collect.
+fn powers_of_two<const L: usize>() -> [Scalar; L] {
+    let two = Scalar::from(2u64);
+    let mut result = [Scalar::ZERO; L];
+    if L > 0 {
+        result[0] = Scalar::ONE;
+        for i in 1..L {
+            result[i] = result[i - 1] * two;
+        }
+    }
+    result
 }
 
 /// Checks whether all bits at positions >= L are zero in the scalar.
@@ -1225,10 +1232,11 @@ impl CreditToken {
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
+        let pow2 = powers_of_two::<L>();
         let r_star = s_i
             .iter()
-            .zip(powers_of_two())
-            .map(|(si, pow2)| si * pow2)
+            .zip(pow2.iter())
+            .map(|(si, p)| si * p)
             .fold(Scalar::ZERO, |x, y| x + y);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
@@ -1406,7 +1414,7 @@ impl PreRefund {
             return Err(ErrorCode::InvalidProof);
         }
 
-        let pow2_scalars: Vec<Scalar> = powers_of_two().take(L).collect();
+        let pow2_scalars = powers_of_two::<L>();
         let x_a = RistrettoPoint::generator()
             + RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com)
             + &params.h4 * &self.ctx;
