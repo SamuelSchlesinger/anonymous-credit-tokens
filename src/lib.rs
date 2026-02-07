@@ -1157,9 +1157,21 @@ impl CreditToken {
             .map(|_| Scalar::random(&mut rng))
             .collect();
         let mut com = [RistrettoPoint::identity(); L];
-        com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &s_i[0];
+        // Optimization: i[j] is always 0 or 1 (from bits_of), so h1 * i[j] is
+        // either identity or h1. Use conditional_select instead of a full scalar mul.
+        let h1_bit_0 = RistrettoPoint::conditional_select(
+            &RistrettoPoint::identity(),
+            &params.h1.basepoint(),
+            i[0].ct_eq(&Scalar::ONE),
+        );
+        com[0] = h1_bit_0 + &params.h2 * &k_star + &params.h3 * &s_i[0];
         for j in 1..L {
-            com[j] = &params.h1 * &i[j] + &params.h3 * &s_i[j];
+            let h1_bit = RistrettoPoint::conditional_select(
+                &RistrettoPoint::identity(),
+                &params.h1.basepoint(),
+                i[j].ct_eq(&Scalar::ONE),
+            );
+            com[j] = h1_bit + &params.h3 * &s_i[j];
         }
         let mut big_c = [[RistrettoPoint::identity(); 2]; L];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
@@ -1184,15 +1196,20 @@ impl CreditToken {
         let h2_w0_h3_z0 = &params.h2 * &w0 + &params.h3 * &z[0];
         let h2_k0_h3_s0 = &params.h2 * &k0_prime + &params.h3 * &s_i_prime[0];
 
+        // Optimization: big_c[0][1] = com[0] - h1, so big_c[0][1] * gamma_i[0] =
+        // com[0] * gamma_i[0] - h1 * gamma_i[0]. Compute com[0] * gamma_i[0] once
+        // and derive the second product via a cheaper basepoint-table mul.
+        let com0_gamma = com[0] * gamma_i[0];
+        let h1_gamma0 = &params.h1 * &gamma_i[0];
         big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(h2_w0_h3_z0 - big_c[0][0] * gamma_i[0]),
+            &(h2_w0_h3_z0 - com0_gamma),
             &h2_k0_h3_s0,
             i[0].ct_eq(&Scalar::ZERO),
         );
 
         big_c_prime[0][1] = RistrettoPoint::conditional_select(
             &h2_k0_h3_s0,
-            &(h2_w0_h3_z0 - big_c[0][1] * gamma_i[0]),
+            &(h2_w0_h3_z0 - com0_gamma + h1_gamma0),
             i[0].ct_eq(&Scalar::ZERO),
         );
 
@@ -1203,14 +1220,17 @@ impl CreditToken {
             let h3_z_j = &params.h3 * &z[j];
             let h3_s_j = &params.h3 * &s_i_prime[j];
 
+            // Same optimization as j=0: reuse com[j] * gamma_i[j] for both branches.
+            let com_gamma = com[j] * gamma_i[j];
+            let h1_gamma = &params.h1 * &gamma_i[j];
             big_c_prime[j][0] = RistrettoPoint::conditional_select(
-                &(h3_z_j - big_c[j][0] * gamma_i[j]),
+                &(h3_z_j - com_gamma),
                 &h3_s_j,
                 i[j].ct_eq(&Scalar::ZERO),
             );
             big_c_prime[j][1] = RistrettoPoint::conditional_select(
                 &h3_s_j,
-                &(h3_z_j - big_c[j][1] * gamma_i[j]),
+                &(h3_z_j - com_gamma + h1_gamma),
                 i[j].ct_eq(&Scalar::ZERO),
             );
         }
