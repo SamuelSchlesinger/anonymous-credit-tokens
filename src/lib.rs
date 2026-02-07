@@ -579,7 +579,10 @@ impl PreIssuance {
         let x_g = RISTRETTO_BASEPOINT_TABLE * &response.e + public.w;
 
         // Verify the response by checking the BBS+ signature proof
-        let y_a = response.a * response.z + x_a * response.gamma.neg();
+        let y_a = RistrettoPoint::multiscalar_mul(
+            [response.z, response.gamma.neg()],
+            [response.a, x_a],
+        );
         let y_g = RISTRETTO_BASEPOINT_TABLE * &response.z + x_g * response.gamma.neg();
 
         // Generate the expected challenge value using the Fiat-Shamir transform
@@ -908,13 +911,15 @@ impl PrivateKey {
         let big_h1 = RistrettoPoint::generator()
             + &params.h2 * &spend_proof.k
             + &params.h4 * &spend_proof.ctx;
-        let a1 = spend_proof.a_prime * spend_proof.e_bar
-            + spend_proof.b_bar * spend_proof.r2_bar
-            + a_bar * spend_proof.gamma.neg();
-        let a2 = spend_proof.b_bar * spend_proof.r3_bar
-            + &params.h1 * &spend_proof.c_bar
-            + &params.h3 * &spend_proof.r_bar
-            + big_h1 * spend_proof.gamma.neg();
+        let a1 = RistrettoPoint::multiscalar_mul(
+            [spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
+            [spend_proof.a_prime, spend_proof.b_bar, a_bar],
+        );
+        let a2 = RistrettoPoint::multiscalar_mul(
+            [spend_proof.r3_bar, spend_proof.gamma.neg()],
+            [spend_proof.b_bar, big_h1],
+        ) + &params.h1 * &spend_proof.c_bar
+            + &params.h3 * &spend_proof.r_bar;
         let mut gamma01 = [Scalar::ZERO; L];
         gamma01[0] = spend_proof.gamma - spend_proof.gamma0[0];
         let mut big_c = [[RistrettoPoint::identity(); 2]; L];
@@ -1408,7 +1413,10 @@ impl PreRefund {
             + &params.h4 * &self.ctx;
 
         let x_g = RISTRETTO_BASEPOINT_TABLE * &refund.e + public_key.w;
-        let y_a = refund.a * refund.z + x_a * refund.gamma.neg();
+        let y_a = RistrettoPoint::multiscalar_mul(
+            [refund.z, refund.gamma.neg()],
+            [refund.a, x_a],
+        );
         let y_g = RISTRETTO_BASEPOINT_TABLE * &refund.z + x_g * refund.gamma.neg();
 
         let gamma = Transcript::with(params, b"refund", |transcript| {
