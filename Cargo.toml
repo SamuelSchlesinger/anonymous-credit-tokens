@@ -8,7 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/SamuelSchlesinger/anonymous-credit-tokens"
 keywords = ["cryptography", "e-cash", "anonymous-credentials", "privacy", "zero-knowledge"]
 categories = ["cryptography"]
-exclude = ["draft-act/", ".github/", "docs/design.tex", "proptest.toml"]
+exclude = ["draft-act/", ".github/", "docs/", "proptest.toml"]
 
 [dependencies]
 ciborium = "0.2"
