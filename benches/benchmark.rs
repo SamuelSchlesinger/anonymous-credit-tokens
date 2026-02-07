@@ -1,35 +1,49 @@
 use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{
+    AxisScale, BatchSize, BenchmarkId, Criterion, PlotConfiguration, black_box, criterion_group,
+    criterion_main,
+};
 use curve25519_dalek::Scalar;
 use rand::{Rng, thread_rng};
 use rand_core::OsRng;
 use std::sync::Arc;
 
-// Create a shared parameter object once for all benchmarks
 fn create_params() -> Arc<Params> {
-    Arc::new(Params::new("bench-org", "bench-service", "bench-env", "2024-01-01"))
+    Arc::new(Params::new(
+        "bench-org",
+        "bench-service",
+        "bench-env",
+        "2024-01-01",
+    ))
 }
+
+/// Max credit value that fits in L bits: min(2^L - 1, 999).
+fn max_credit(l: u32) -> u64 {
+    if l >= 64 {
+        999
+    } else {
+        std::cmp::min((1u64 << l) - 1, 999)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// L-independent benchmarks
+// ---------------------------------------------------------------------------
 
 fn key_generation_benchmark(c: &mut Criterion) {
     c.bench_function("key_generation", |b| {
-        b.iter(|| {
-            black_box(PrivateKey::random(OsRng));
-        })
+        b.iter(|| black_box(PrivateKey::random(OsRng)))
     });
 }
 
 fn preissuance_generation_benchmark(c: &mut Criterion) {
     c.bench_function("preissuance_random", |b| {
-        b.iter(|| {
-            black_box(PreIssuance::random(OsRng));
-        })
+        b.iter(|| black_box(PreIssuance::random(OsRng)))
     });
 }
 
 fn issuance_request_benchmark(c: &mut Criterion) {
-    // Precompute params
     let params = create_params();
-
     c.bench_function("issuance_request", |b| {
         b.iter_batched(
             || {
@@ -42,49 +56,23 @@ fn issuance_request_benchmark(c: &mut Criterion) {
     });
 }
 
-fn issuance_benchmark(c: &mut Criterion) {
-    // Precompute params
-    let params = create_params();
-
-    c.bench_function("issuance", |b| {
-        b.iter_batched(
-            || {
-                let private_key = PrivateKey::random(OsRng);
-                let preissuance = PreIssuance::random(OsRng);
-                let issuance_request = preissuance.request(&params, OsRng);
-                let credit_amount = Scalar::from(thread_rng().gen_range(10..1000) as u64);
-                (
-                    private_key,
-                    Arc::clone(&params),
-                    issuance_request,
-                    credit_amount,
-                )
-            },
-            |(private_key, params, issuance_request, credit_amount)| {
-                black_box(
-                    private_key
-                        .issue::<128>(&params, &issuance_request, black_box(credit_amount), Scalar::ZERO, OsRng)
-                        .unwrap(),
-                )
-            },
-            BatchSize::SmallInput,
-        )
-    });
-}
-
 fn token_creation_benchmark(c: &mut Criterion) {
-    // Precompute params
     let params = create_params();
-
     c.bench_function("token_creation", |b| {
         b.iter_batched(
             || {
                 let private_key = PrivateKey::random(OsRng);
                 let preissuance = PreIssuance::random(OsRng);
                 let issuance_request = preissuance.request(&params, OsRng);
-                let credit_amount = Scalar::from(thread_rng().gen_range(10..1000) as u64);
+                let credit_amount = Scalar::from(thread_rng().gen_range(10u64..1000));
                 let issuance_response = private_key
-                    .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
+                    .issue::<16>(
+                        &params,
+                        &issuance_request,
+                        credit_amount,
+                        Scalar::ZERO,
+                        OsRng,
+                    )
                     .unwrap();
                 (
                     preissuance,
@@ -111,169 +99,244 @@ fn token_creation_benchmark(c: &mut Criterion) {
     });
 }
 
-fn spending_proof_benchmark(c: &mut Criterion) {
-    // Precompute params
-    let params = create_params();
+// ---------------------------------------------------------------------------
+// L-dependent benchmarks — one BenchmarkGroup per operation, parameterised
+// by L so criterion generates scaling charts automatically.
+// ---------------------------------------------------------------------------
 
-    c.bench_function("spending_proof", |b| {
-        b.iter_batched(
-            || {
-                let private_key = PrivateKey::random(OsRng);
-                let preissuance = PreIssuance::random(OsRng);
-                let issuance_request = preissuance.request(&params, OsRng);
-
-                // Random credit amount between 20 and 1000
-                let credit_amount = Scalar::from(thread_rng().gen_range(20..1000) as u64);
-
-                let issuance_response = private_key
-                    .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
-                    .unwrap();
-
-                let credit_token = preissuance
-                    .to_credit_token(
-                        &params,
-                        private_key.public(),
-                        &issuance_request,
-                        &issuance_response,
+macro_rules! bench_issuance {
+    ($group:expr, $params:expr, $l:literal) => {
+        $group.bench_with_input(BenchmarkId::from_parameter($l), &$l, |b, _| {
+            b.iter_batched(
+                || {
+                    let private_key = PrivateKey::random(OsRng);
+                    let preissuance = PreIssuance::random(OsRng);
+                    let issuance_request = preissuance.request(&$params, OsRng);
+                    let credit = Scalar::from(thread_rng().gen_range(1..=max_credit($l)));
+                    (private_key, issuance_request, credit)
+                },
+                |(pk, req, credit)| {
+                    black_box(
+                        pk.issue::<$l>(&$params, &req, credit, Scalar::ZERO, OsRng)
+                            .unwrap(),
                     )
-                    .unwrap();
-
-                // Random charge amount between 1 and credit_amount-1
-                let credit_value =
-                    u64::from_le_bytes(credit_amount.as_bytes()[0..8].try_into().unwrap());
-                let max_charge = if credit_value > 1 {
-                    credit_value - 1
-                } else {
-                    1
-                };
-                let charge = Scalar::from(thread_rng().gen_range(1..=max_charge) as u64);
-
-                (credit_token, Arc::clone(&params), charge)
-            },
-            |(credit_token, params, charge)| {
-                black_box(credit_token.prove_spend::<128>(&params, black_box(charge), OsRng))
-            },
-            BatchSize::SmallInput,
-        )
-    });
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    };
 }
 
-fn refund_benchmark(c: &mut Criterion) {
-    // Precompute params
+fn issuance_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("issuance");
+    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
     let params = create_params();
 
-    c.bench_function("refund", |b| {
-        b.iter_batched(
-            || {
-                let private_key = PrivateKey::random(OsRng);
-                let preissuance = PreIssuance::random(OsRng);
-                let issuance_request = preissuance.request(&params, OsRng);
+    bench_issuance!(group, params, 1);
+    bench_issuance!(group, params, 2);
+    bench_issuance!(group, params, 4);
+    bench_issuance!(group, params, 8);
+    bench_issuance!(group, params, 16);
+    bench_issuance!(group, params, 32);
+    bench_issuance!(group, params, 64);
+    bench_issuance!(group, params, 128);
 
-                // Random credit amount between 20 and 1000
-                let credit_amount = Scalar::from(thread_rng().gen_range(20..1000) as u64);
-
-                let issuance_response = private_key
-                    .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
-                    .unwrap();
-
-                let credit_token = preissuance
-                    .to_credit_token(
-                        &params,
-                        private_key.public(),
-                        &issuance_request,
-                        &issuance_response,
-                    )
-                    .unwrap();
-
-                // Random charge amount between 1 and credit_amount-1
-                let credit_value =
-                    u64::from_le_bytes(credit_amount.as_bytes()[0..8].try_into().unwrap());
-                let max_charge = if credit_value > 1 {
-                    credit_value - 1
-                } else {
-                    1
-                };
-                let charge = Scalar::from(thread_rng().gen_range(1..=max_charge) as u64);
-
-                let (spend_proof, _) = credit_token.prove_spend::<128>(&params, charge, OsRng);
-                (private_key, Arc::clone(&params), spend_proof)
-            },
-            |(private_key, params, spend_proof)| {
-                black_box(private_key.refund(&params, &spend_proof, OsRng).unwrap())
-            },
-            BatchSize::SmallInput,
-        )
-    });
+    group.finish();
 }
 
-fn refund_token_creation_benchmark(c: &mut Criterion) {
-    // Precompute params
+macro_rules! bench_spending_proof {
+    ($group:expr, $params:expr, $l:literal) => {
+        $group.bench_with_input(BenchmarkId::from_parameter($l), &$l, |b, _| {
+            b.iter_batched(
+                || {
+                    let private_key = PrivateKey::random(OsRng);
+                    let preissuance = PreIssuance::random(OsRng);
+                    let issuance_request = preissuance.request(&$params, OsRng);
+                    let credit_val = thread_rng().gen_range(1..=max_credit($l));
+                    let credit_amount = Scalar::from(credit_val);
+                    let issuance_response = private_key
+                        .issue::<$l>(
+                            &$params,
+                            &issuance_request,
+                            credit_amount,
+                            Scalar::ZERO,
+                            OsRng,
+                        )
+                        .unwrap();
+                    let credit_token = preissuance
+                        .to_credit_token(
+                            &$params,
+                            private_key.public(),
+                            &issuance_request,
+                            &issuance_response,
+                        )
+                        .unwrap();
+                    let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
+                    (credit_token, charge)
+                },
+                |(credit_token, charge)| {
+                    black_box(credit_token.prove_spend::<$l>(&$params, charge, OsRng))
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    };
+}
+
+fn spending_proof_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("spending_proof");
+    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
     let params = create_params();
 
-    c.bench_function("refund_token_creation", |b| {
-        b.iter_batched(
-            || {
-                let private_key = PrivateKey::random(OsRng);
-                let preissuance = PreIssuance::random(OsRng);
-                let issuance_request = preissuance.request(&params, OsRng);
+    bench_spending_proof!(group, params, 1);
+    bench_spending_proof!(group, params, 2);
+    bench_spending_proof!(group, params, 4);
+    bench_spending_proof!(group, params, 8);
+    bench_spending_proof!(group, params, 16);
+    bench_spending_proof!(group, params, 32);
+    bench_spending_proof!(group, params, 64);
+    bench_spending_proof!(group, params, 128);
 
-                // Random credit amount between 20 and 1000
-                let credit_amount = Scalar::from(thread_rng().gen_range(20..1000) as u64);
+    group.finish();
+}
 
-                let issuance_response = private_key
-                    .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
-                    .unwrap();
+macro_rules! bench_refund {
+    ($group:expr, $params:expr, $l:literal) => {
+        $group.bench_with_input(BenchmarkId::from_parameter($l), &$l, |b, _| {
+            b.iter_batched(
+                || {
+                    let private_key = PrivateKey::random(OsRng);
+                    let preissuance = PreIssuance::random(OsRng);
+                    let issuance_request = preissuance.request(&$params, OsRng);
+                    let credit_val = thread_rng().gen_range(1..=max_credit($l));
+                    let credit_amount = Scalar::from(credit_val);
+                    let issuance_response = private_key
+                        .issue::<$l>(
+                            &$params,
+                            &issuance_request,
+                            credit_amount,
+                            Scalar::ZERO,
+                            OsRng,
+                        )
+                        .unwrap();
+                    let credit_token = preissuance
+                        .to_credit_token(
+                            &$params,
+                            private_key.public(),
+                            &issuance_request,
+                            &issuance_response,
+                        )
+                        .unwrap();
+                    let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
+                    let (spend_proof, _) =
+                        credit_token.prove_spend::<$l>(&$params, charge, OsRng);
+                    (private_key, spend_proof)
+                },
+                |(pk, spend_proof)| {
+                    black_box(pk.refund(&$params, &spend_proof, OsRng).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    };
+}
 
-                let credit_token = preissuance
-                    .to_credit_token(
-                        &params,
-                        private_key.public(),
-                        &issuance_request,
-                        &issuance_response,
+fn refund_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("refund");
+    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
+    let params = create_params();
+
+    bench_refund!(group, params, 1);
+    bench_refund!(group, params, 2);
+    bench_refund!(group, params, 4);
+    bench_refund!(group, params, 8);
+    bench_refund!(group, params, 16);
+    bench_refund!(group, params, 32);
+    bench_refund!(group, params, 64);
+    bench_refund!(group, params, 128);
+
+    group.finish();
+}
+
+macro_rules! bench_refund_token_creation {
+    ($group:expr, $params:expr, $l:literal) => {
+        $group.bench_with_input(BenchmarkId::from_parameter($l), &$l, |b, _| {
+            b.iter_batched(
+                || {
+                    let private_key = PrivateKey::random(OsRng);
+                    let preissuance = PreIssuance::random(OsRng);
+                    let issuance_request = preissuance.request(&$params, OsRng);
+                    let credit_val = thread_rng().gen_range(1..=max_credit($l));
+                    let credit_amount = Scalar::from(credit_val);
+                    let issuance_response = private_key
+                        .issue::<$l>(
+                            &$params,
+                            &issuance_request,
+                            credit_amount,
+                            Scalar::ZERO,
+                            OsRng,
+                        )
+                        .unwrap();
+                    let credit_token = preissuance
+                        .to_credit_token(
+                            &$params,
+                            private_key.public(),
+                            &issuance_request,
+                            &issuance_response,
+                        )
+                        .unwrap();
+                    let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
+                    let (spend_proof, prerefund) =
+                        credit_token.prove_spend::<$l>(&$params, charge, OsRng);
+                    let refund = private_key.refund(&$params, &spend_proof, OsRng).unwrap();
+                    (prerefund, spend_proof, refund, private_key)
+                },
+                |(prerefund, spend_proof, refund, private_key)| {
+                    black_box(
+                        prerefund
+                            .to_credit_token(
+                                &$params,
+                                &spend_proof,
+                                &refund,
+                                private_key.public(),
+                            )
+                            .unwrap(),
                     )
-                    .unwrap();
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    };
+}
 
-                // Random charge amount between 1 and credit_amount-1
-                let credit_value =
-                    u64::from_le_bytes(credit_amount.as_bytes()[0..8].try_into().unwrap());
-                let max_charge = if credit_value > 1 {
-                    credit_value - 1
-                } else {
-                    1
-                };
-                let charge = Scalar::from(thread_rng().gen_range(1..=max_charge) as u64);
+fn refund_token_creation_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("refund_token_creation");
+    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
+    let params = create_params();
 
-                let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng);
-                let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
-                (
-                    prerefund,
-                    spend_proof,
-                    refund,
-                    private_key,
-                    Arc::clone(&params),
-                )
-            },
-            |(prerefund, spend_proof, refund, private_key, params)| {
-                black_box(
-                    prerefund
-                        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
-                        .unwrap(),
-                )
-            },
-            BatchSize::SmallInput,
-        )
-    });
+    bench_refund_token_creation!(group, params, 1);
+    bench_refund_token_creation!(group, params, 2);
+    bench_refund_token_creation!(group, params, 4);
+    bench_refund_token_creation!(group, params, 8);
+    bench_refund_token_creation!(group, params, 16);
+    bench_refund_token_creation!(group, params, 32);
+    bench_refund_token_creation!(group, params, 64);
+    bench_refund_token_creation!(group, params, 128);
+
+    group.finish();
 }
 
 criterion_group!(
     benches,
+    // L-independent
     key_generation_benchmark,
     preissuance_generation_benchmark,
     issuance_request_benchmark,
-    issuance_benchmark,
     token_creation_benchmark,
-    spending_proof_benchmark,
-    refund_benchmark,
-    refund_token_creation_benchmark,
+    // L-dependent scaling
+    issuance_scaling,
+    spending_proof_scaling,
+    refund_scaling,
+    refund_token_creation_scaling,
 );
 criterion_main!(benches);
