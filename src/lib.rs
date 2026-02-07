@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![deny(missing_docs)]
+
 //! # Anonymous Credit Tokens
 //!
 //! A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
@@ -261,7 +263,6 @@ impl std::fmt::Debug for Params {
             .finish()
     }
 }
-
 
 impl Params {
     /// Generates random system parameters using the provided random number generator.

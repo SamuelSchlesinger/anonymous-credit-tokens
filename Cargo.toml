@@ -2,11 +2,13 @@
 name = "anonymous-credit-tokens"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.85"
 description = "An implementation of Anonymous Credit Tokens, an online variant of e-cash"
 license = "Apache-2.0"
 repository = "https://github.com/SamuelSchlesinger/anonymous-credit-tokens"
 keywords = ["cryptography", "e-cash", "anonymous-credentials", "privacy", "zero-knowledge"]
 categories = ["cryptography"]
+exclude = ["draft-act/", ".github/", "docs/design.tex", "proptest.toml"]
 
 [dependencies]
 ciborium = "0.2"
@@ -16,7 +18,6 @@ group = "0.13.0"
 rand_core = "0.6.4"
 subtle = "2.6.1"
 zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
-
 
 [dev-dependencies]
 proptest = "1.6.0"
