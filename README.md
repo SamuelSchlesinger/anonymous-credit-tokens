@@ -153,7 +153,7 @@ let credit_token = preissuance
 ```rust
 // Client-side: Creates a spending proof (spending 10 out of 20 credits)
 let charge = Scalar::from(10u64);
-let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng);
+let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng).unwrap();
 
 // Server-side: Verify and process the spending proof
 // IMPORTANT: Check that the nullifier hasn't been used before
@@ -164,7 +164,7 @@ if nullifier_store.is_used(&nullifier) {
 nullifier_store.mark_used(nullifier);
 
 // Server-side: Create a refund
-let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 
 // Client-side: Construct a new credit token with remaining credits
 let new_credit_token = prerefund
@@ -202,7 +202,7 @@ let credit_token1 = preissuance
 // 3. First Purchase/Transaction
 // Client spends 20 credits
 let charge = Scalar::from(20u64);
-let (spend_proof, prerefund) = credit_token1.prove_spend::<128>(&params, charge, OsRng);
+let (spend_proof, prerefund) = credit_token1.prove_spend::<128>(&params, charge, OsRng).unwrap();
 
 // Server checks nullifier and processes the spending
 let nullifier = spend_proof.nullifier();
@@ -212,7 +212,7 @@ if nullifier_store.is_used(&nullifier) {
 nullifier_store.mark_used(nullifier);
 
 // Server issues a refund
-let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 
 // Client receives a new credit token with 20 credits remaining
 let credit_token2 = prerefund
@@ -222,7 +222,7 @@ let credit_token2 = prerefund
 // 4. Second Purchase/Transaction
 // Client spends remaining 20 credits
 let charge = Scalar::from(20u64);
-let (spend_proof2, prerefund2) = credit_token2.prove_spend::<128>(&params, charge, OsRng);
+let (spend_proof2, prerefund2) = credit_token2.prove_spend::<128>(&params, charge, OsRng).unwrap();
 
 // Server processes as before...
 ```
@@ -233,7 +233,7 @@ All cryptographic operations that involve credit amounts are parameterized by a 
 
 - **Typical value**: `L = 128` for u128-compatible amounts
 - **Trade-off**: Larger `L` allows higher credit amounts but increases proof size
-- **Constraint**: `L` must be `<= 252`
+- **Constraint**: `L` must be `<= 128`
 - **Consistency**: The same `L` must be used across `issue`, `prove_spend`, and `to_credit_token` for a given token chain
 
 ### Request Context (`ctx`)
@@ -249,6 +249,24 @@ The `ctx` parameter passed during issuance binds the token to an application-spe
 ### Re-anonymization
 
 Spending zero credits (`s = Scalar::ZERO`) is permitted and serves as a re-anonymization operation. This creates a new token with the same balance but a fresh nullifier, which can be useful for refreshing token privacy without actually spending any credits.
+
+### Partial Credit Return (Pre-authorization)
+
+When processing a spend, the issuer can choose to return some credits back to the client. The `refund()` method accepts a `t` parameter where `0 <= t <= s`, and the resulting token will have `c - s + t` credits instead of `c - s`. This enables pre-authorization patterns:
+
+```rust
+// Client holds 200 credits for a hotel booking
+let (spend_proof, prerefund) = token.prove_spend::<128>(&params, Scalar::from(200u64), OsRng).unwrap();
+
+// Hotel only charges 150, returns 50
+let refund = private_key.refund(&params, &spend_proof, Scalar::from(50u64), OsRng).unwrap();
+let new_token = prerefund
+    .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+    .unwrap();
+// new_token has original_balance - 200 + 50 = original_balance - 150 credits
+```
+
+Use `Scalar::ZERO` for `t` to consume the full spend amount (backward-compatible behavior).
 
 ### CBOR Serialization
 

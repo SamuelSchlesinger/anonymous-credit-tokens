@@ -101,11 +101,12 @@ fn generate_test_vectors() {
         .unwrap();
     let token_cbor = token.to_cbor().unwrap();
 
-    let (spend_proof, prerefund) = token.prove_spend::<8>(&params, Scalar::from(s), &mut rng);
+    let (spend_proof, prerefund) = token.prove_spend::<8>(&params, Scalar::from(s), &mut rng).unwrap();
     let spend_proof_cbor = spend_proof.to_cbor().unwrap();
     let prerefund_cbor = prerefund.to_cbor().unwrap();
 
-    let refund = private_key.refund(&params, &spend_proof, &mut rng).unwrap();
+    let t: u128 = 10;
+    let refund = private_key.refund::<8>(&params, &spend_proof, Scalar::from(t), &mut rng).unwrap();
     let refund_cbor = refund.to_cbor().unwrap();
 
     let new_token = prerefund
@@ -114,7 +115,7 @@ fn generate_test_vectors() {
     let new_token_cbor = new_token.to_cbor().unwrap();
 
     let remaining = scalar_to_credit::<8>(&new_token.credits()).unwrap();
-    assert_eq!(remaining, c - s, "remaining balance should be c - s");
+    assert_eq!(remaining, c - s + t, "remaining balance should be c - s + t");
 
     // ── build markdown ──────────────────────────────────────────
     let w = 64; // hex chars per line
@@ -138,7 +139,7 @@ fn generate_test_vectors() {
     .unwrap();
     writeln!(
         md,
-        "c={c}, spend amount s={s}, and ctx=0. Values labelled `*_cbor`"
+        "c={c}, spend amount s={s}, partial return t={t}, and ctx=0. Values labelled `*_cbor`"
     )
     .unwrap();
     writeln!(
@@ -169,6 +170,7 @@ fn generate_test_vectors() {
     writeln!(md, "L: 8").unwrap();
     writeln!(md, "c: {c}").unwrap();
     writeln!(md, "s: {s}").unwrap();
+    writeln!(md, "t: {t}").unwrap();
     writeln!(md, "ctx: {}", scalar_hex(&ctx)).unwrap();
     writeln!(md, "~~~").unwrap();
     writeln!(md).unwrap();

@@ -175,7 +175,7 @@ macro_rules! bench_spending_proof {
                     (credit_token, charge)
                 },
                 |(credit_token, charge)| {
-                    black_box(credit_token.prove_spend::<$l>(&$params, charge, OsRng))
+                    black_box(credit_token.prove_spend::<$l>(&$params, charge, OsRng).unwrap())
                 },
                 BatchSize::SmallInput,
             )
@@ -228,10 +228,10 @@ macro_rules! bench_refund {
                         )
                         .unwrap();
                     let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
-                    let (spend_proof, _) = credit_token.prove_spend::<$l>(&$params, charge, OsRng);
+                    let (spend_proof, _) = credit_token.prove_spend::<$l>(&$params, charge, OsRng).unwrap();
                     (private_key, spend_proof)
                 },
-                |(pk, spend_proof)| black_box(pk.refund(&$params, &spend_proof, OsRng).unwrap()),
+                |(pk, spend_proof)| black_box(pk.refund(&$params, &spend_proof, Scalar::ZERO, OsRng).unwrap()),
                 BatchSize::SmallInput,
             )
         });
@@ -284,8 +284,8 @@ macro_rules! bench_refund_token_creation {
                         .unwrap();
                     let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
                     let (spend_proof, prerefund) =
-                        credit_token.prove_spend::<$l>(&$params, charge, OsRng);
-                    let refund = private_key.refund(&$params, &spend_proof, OsRng).unwrap();
+                        credit_token.prove_spend::<$l>(&$params, charge, OsRng).unwrap();
+                    let refund = private_key.refund(&$params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
                     (prerefund, spend_proof, refund, private_key)
                 },
                 |(prerefund, spend_proof, refund, private_key)| {

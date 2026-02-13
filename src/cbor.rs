@@ -445,7 +445,8 @@ impl Refund {
     ///     1: bstr,  ; A* (compressed Ristretto point, 32 bytes)
     ///     2: bstr,  ; e* (scalar, 32 bytes)
     ///     3: bstr,  ; gamma (scalar, 32 bytes)
-    ///     4: bstr   ; z (scalar, 32 bytes)
+    ///     4: bstr,  ; z (scalar, 32 bytes)
+    ///     5: bstr   ; t (scalar, 32 bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -454,6 +455,7 @@ impl Refund {
             (Value::Integer(2.into()), encode_scalar(&self.e)),
             (Value::Integer(3.into()), encode_scalar(&self.gamma)),
             (Value::Integer(4.into()), encode_scalar(&self.z)),
+            (Value::Integer(5.into()), encode_scalar(&self.t)),
         ];
 
         let mut bytes = Vec::new();
@@ -471,6 +473,7 @@ impl Refund {
                 let mut e = None;
                 let mut gamma = None;
                 let mut z = None;
+                let mut t = None;
 
                 for (k, v) in map {
                     match k {
@@ -478,6 +481,7 @@ impl Refund {
                         Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&v)?),
                         Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
                         Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 5.into() => t = Some(decode_scalar(&v)?),
                         _ => {}
                     }
                 }
@@ -487,6 +491,7 @@ impl Refund {
                     e: e.ok_or(CborError::InvalidStructure("missing field 2 (e*)"))?,
                     gamma: gamma.ok_or(CborError::InvalidStructure("missing field 3 (gamma)"))?,
                     z: z.ok_or(CborError::InvalidStructure("missing field 4 (z)"))?,
+                    t: t.ok_or(CborError::InvalidStructure("missing field 5 (t)"))?,
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -531,11 +536,21 @@ impl PrivateKey {
                     }
                 }
 
+                let x = x.ok_or(CborError::InvalidStructure("missing field 1 (x)"))?;
+                let w = w.ok_or(CborError::InvalidStructure("missing field 2 (w)"))?;
+
+                // Validate w == g^x to prevent use of inconsistent key material
+                use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+                let expected_w = RISTRETTO_BASEPOINT_TABLE * &x;
+                if w != expected_w {
+                    return Err(CborError::InvalidValue(
+                        "public key w does not match secret scalar x",
+                    ));
+                }
+
                 Ok(PrivateKey {
-                    x: x.ok_or(CborError::InvalidStructure("missing field 1 (x)"))?,
-                    public: PublicKey {
-                        w: w.ok_or(CborError::InvalidStructure("missing field 2 (w)"))?,
-                    },
+                    x,
+                    public: PublicKey { w },
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
@@ -868,8 +883,9 @@ mod tests {
         let e = Scalar::random(&mut OsRng);
         let gamma = Scalar::random(&mut OsRng);
         let z = Scalar::random(&mut OsRng);
+        let t = Scalar::random(&mut OsRng);
 
-        let refund = Refund { a, e, gamma, z };
+        let refund = Refund { a, e, gamma, z, t };
 
         let bytes = refund.to_cbor().unwrap();
         let decoded = Refund::from_cbor(&bytes).unwrap();
@@ -878,13 +894,14 @@ mod tests {
         assert_eq!(refund.e, decoded.e);
         assert_eq!(refund.gamma, decoded.gamma);
         assert_eq!(refund.z, decoded.z);
+        assert_eq!(refund.t, decoded.t);
     }
 
     #[test]
     fn test_private_key_cbor_roundtrip() {
         let x = Scalar::random(&mut OsRng);
         let public = PublicKey {
-            w: RistrettoPoint::random(&mut OsRng),
+            w: curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE * &x,
         };
 
         let private_key = PrivateKey { x, public };
@@ -894,6 +911,24 @@ mod tests {
 
         assert_eq!(private_key.x, decoded.x);
         assert_eq!(private_key.public.w, decoded.public.w);
+    }
+
+    #[test]
+    fn test_private_key_cbor_rejects_inconsistent_w() {
+        let x = Scalar::random(&mut OsRng);
+        // Deliberately use a wrong public key
+        let wrong_w = RistrettoPoint::random(&mut OsRng);
+        let private_key = PrivateKey {
+            x,
+            public: PublicKey { w: wrong_w },
+        };
+
+        let bytes = private_key.to_cbor().unwrap();
+        let result = PrivateKey::from_cbor(&bytes);
+        assert!(
+            result.is_err(),
+            "Inconsistent w should be rejected during deserialization"
+        );
     }
 
     #[test]

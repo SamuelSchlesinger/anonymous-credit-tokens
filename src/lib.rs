@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
 //! # Anonymous Credit Tokens
 //!
@@ -111,10 +112,10 @@
 //!     .unwrap();
 //!
 //! // Spending: client spends 30 credits
-//! let (spend_proof, prerefund) = token.prove_spend::<128>(&params, Scalar::from(30u64), OsRng);
+//! let (spend_proof, prerefund) = token.prove_spend::<128>(&params, Scalar::from(30u64), OsRng).unwrap();
 //!
 //! // Server verifies proof and checks nullifier, then issues refund
-//! let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+//! let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 //!
 //! // Client constructs new token with 70 credits remaining
 //! let new_token = prerefund
@@ -643,7 +644,7 @@ impl PrivateKey {
     ///
     /// * `L` - The bit-length for credit amount range proofs. Credit values must be
     ///   in the range `[1, 2^L)`. Typical value: `128` for u128-compatible amounts.
-    ///   Must be `<= 252`.
+    ///   Must be `<= 128`.
     ///
     /// # Arguments
     ///
@@ -788,7 +789,7 @@ pub struct SpendProof<const L: usize> {
 }
 
 impl<const L: usize> SpendProof<L> {
-    const _ASSERT: () = assert!(L <= 252, "L must be <= 252");
+    const _ASSERT: () = assert!(L <= 128, "L must be <= 128");
 
     /// Returns the nullifier associated with this spend.
     ///
@@ -831,6 +832,10 @@ impl PrivateKey {
     /// token for the remaining balance. The refund token can be used by the client to
     /// construct a new credit token with the remaining balance.
     ///
+    /// The issuer may choose to return `t` credits (where `0 <= t <= s`) back to the
+    /// client via the partial credit return mechanism. The resulting token will have
+    /// `c - s + t` credits. Use `Scalar::ZERO` for `t` to consume the full spend amount.
+    ///
     /// # Security Warning
     ///
     /// This method implements only the proof verification and refund issuance portions
@@ -851,8 +856,8 @@ impl PrivateKey {
     ///     return Err(ErrorCode::NullifierReuse);
     /// }
     ///
-    /// // Step 2: Verify proof and create refund
-    /// let refund = private_key.refund(params, spend_proof, rand_core::OsRng)?;
+    /// // Step 2: Verify proof and create refund (returning 0 credits)
+    /// let refund = private_key.refund(params, spend_proof, Scalar::ZERO, rand_core::OsRng)?;
     ///
     /// // Step 3: Record nullifier (atomically in production)
     /// nullifier_db.insert(nullifier);
@@ -865,12 +870,14 @@ impl PrivateKey {
     ///
     /// * `params` - The system parameters for this deployment
     /// * `spend_proof` - The client's proof of valid spending
+    /// * `t` - Credits to return to the client (`0 <= t <= s`, must fit in `L` bits)
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Returns
     ///
     /// * `Ok(Refund)` - The refund token if the spend proof is valid
     /// * `Err(ErrorCode::InvalidProof)` - If the spend proof verification fails
+    /// * `Err(ErrorCode::InvalidAmount)` - If `t > s` or `t` does not fit in `L` bits
     ///
     /// # Example
     ///
@@ -887,19 +894,20 @@ impl PrivateKey {
     /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng);
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     /// #
     /// // First check if we've seen this nullifier before
     /// let nullifier = spend_proof.nullifier();
     /// // ... check nullifier database
     ///
-    /// // Then process the refund
-    /// let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    /// // Then process the refund, returning 0 credits
+    /// let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     /// ```
     pub fn refund<const L: usize>(
         &self,
         params: &Params,
         spend_proof: &SpendProof<L>,
+        t: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, ErrorCode> {
         // Validate A' is not identity (spec Section 3.5.2, step 3)
@@ -961,9 +969,19 @@ impl PrivateKey {
             return Err(ErrorCode::InvalidProof);
         }
 
+        // Validate partial return amount
+        if !scalar_fits_in_bits::<L>(&t) {
+            return Err(ErrorCode::InvalidAmount);
+        }
+        let t_val = scalar_to_u128(&t).ok_or(ErrorCode::InvalidAmount)?;
+        let s_val = scalar_to_u128(&spend_proof.s).ok_or(ErrorCode::InvalidAmount)?;
+        if t_val > s_val {
+            return Err(ErrorCode::InvalidAmount);
+        }
+
         let e = Scalar::random(&mut rng);
 
-        let x_a = RistrettoPoint::generator() + k_prime + &params.h4 * &spend_proof.ctx;
+        let x_a = RistrettoPoint::generator() + k_prime + &params.h1 * &t + &params.h4 * &spend_proof.ctx;
         let a = x_a * (e + self.x).invert();
 
         let x_g = RISTRETTO_BASEPOINT_TABLE * &e + self.public.w;
@@ -972,7 +990,7 @@ impl PrivateKey {
         let y_g = RISTRETTO_BASEPOINT_TABLE * &alpha;
 
         let refund_gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalars([&e, &spend_proof.ctx].into_iter());
+            transcript.add_scalars([&e, &t, &spend_proof.ctx].into_iter());
             transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
@@ -983,6 +1001,7 @@ impl PrivateKey {
             e,
             gamma: refund_gamma,
             z,
+            t,
         })
     }
 }
@@ -1079,15 +1098,10 @@ impl CreditToken {
     /// The proof includes a range proof to demonstrate that the remaining balance is
     /// non-negative, and a nullifier to prevent double-spending.
     ///
-    /// # Precondition
-    ///
-    /// This function requires that `2^L > self.c >= s`. If this condition is not met,
-    /// the proof will be invalid and will be rejected by the issuer.
-    ///
     /// # Type Parameters
     ///
     /// * `L` - The bit-length for the range proof. Must match the `L` used during issuance.
-    ///   Must be `<= 252`.
+    ///   Must be `<= 128`.
     ///
     /// # Arguments
     ///
@@ -1097,9 +1111,8 @@ impl CreditToken {
     ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// * `SpendProof` - The proof of valid spending to send to the issuer
-    /// * `PreRefund` - The client's state to keep for later creating a new credit token
+    /// * `Ok((SpendProof, PreRefund))` - The proof and client state if inputs are valid
+    /// * `Err(ErrorCode::InvalidAmount)` - If `s` does not fit in `L` bits or `s > c`
     ///
     /// # Example
     ///
@@ -1118,7 +1131,7 @@ impl CreditToken {
     /// #
     /// // Spend 10 credits (where 10 <= token balance < 2^128)
     /// let spend_amount = Scalar::from(10u128);
-    /// let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng);
+    /// let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
     /// ```
@@ -1127,7 +1140,22 @@ impl CreditToken {
         params: &Params,
         s: Scalar,
         mut rng: impl CryptoRngCore,
-    ) -> (SpendProof<L>, PreRefund) {
+    ) -> Result<(SpendProof<L>, PreRefund), ErrorCode> {
+        // Validate spend amount fits in L bits
+        if !scalar_fits_in_bits::<L>(&s) {
+            return Err(ErrorCode::InvalidAmount);
+        }
+        // Validate token balance fits in L bits (defense-in-depth)
+        if !scalar_fits_in_bits::<L>(&self.c) {
+            return Err(ErrorCode::InvalidAmount);
+        }
+        // Validate s <= c (can't spend more than the balance)
+        let s_val = scalar_to_u128(&s).ok_or(ErrorCode::InvalidAmount)?;
+        let c_val = scalar_to_u128(&self.c).ok_or(ErrorCode::InvalidAmount)?;
+        if s_val > c_val {
+            return Err(ErrorCode::InvalidAmount);
+        }
+
         let r1 = Scalar::random(&mut rng);
         let r2 = Scalar::random(&mut rng);
         let c_prime = Scalar::random(&mut rng);
@@ -1313,7 +1341,7 @@ impl CreditToken {
             ctx: self.ctx,
         };
 
-        (
+        Ok((
             SpendProof {
                 k: self.k,
                 ctx: self.ctx,
@@ -1335,7 +1363,7 @@ impl CreditToken {
                 s_bar,
             },
             prerefund,
-        )
+        ))
     }
 }
 
@@ -1354,6 +1382,19 @@ pub struct Refund {
     gamma: Scalar,
     /// A response value for the proof of knowledge of the signature
     z: Scalar,
+    /// Credits returned to the client (`0 <= t <= s`).
+    t: Scalar,
+}
+
+impl Refund {
+    /// Returns the partial credit return amount chosen by the issuer.
+    ///
+    /// When the issuer processes a spend of `s` credits, it may choose to
+    /// return `t` credits (where `0 <= t <= s`) back to the client. The
+    /// resulting token will have `c - s + t` credits instead of `c - s`.
+    pub fn partial_return(&self) -> Scalar {
+        self.t
+    }
 }
 
 impl PreRefund {
@@ -1391,8 +1432,8 @@ impl PreRefund {
     /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng);
-    /// # let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
+    /// # let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     /// #
     /// // Construct the new credit token with the remaining balance
     /// let new_credit_token = prerefund.to_credit_token(
@@ -1417,6 +1458,7 @@ impl PreRefund {
         let pow2_scalars = powers_of_two::<L>();
         let x_a = RistrettoPoint::generator()
             + RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com)
+            + &params.h1 * &refund.t
             + &params.h4 * &self.ctx;
 
         let x_g = RISTRETTO_BASEPOINT_TABLE * &refund.e + public_key.w;
@@ -1427,7 +1469,7 @@ impl PreRefund {
         let y_g = RISTRETTO_BASEPOINT_TABLE * &refund.z + x_g * refund.gamma.neg();
 
         let gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalars([&refund.e, &self.ctx].into_iter());
+            transcript.add_scalars([&refund.e, &refund.t, &self.ctx].into_iter());
             transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
         });
 
@@ -1441,7 +1483,7 @@ impl PreRefund {
             e: refund.e,
             k: self.k,
             r: self.r,
-            c: self.m,
+            c: self.m + refund.t,
             ctx: self.ctx,
         })
     }
@@ -1455,7 +1497,7 @@ impl PreRefund {
 ///
 /// # Type Parameters
 ///
-/// * `L` - The bit-length for credit values. Must be `<= 252`.
+/// * `L` - The bit-length for credit values. Must be `<= 128`.
 ///
 /// # Arguments
 ///

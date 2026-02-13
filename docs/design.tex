@@ -64,13 +64,13 @@ $(\keygen$, $\issue$, $\spend)$ with the following syntax:
     \item $\issue$ is an interactive protocol run by the issuer and a client. The issuer has as input its private key $\sk$ and a (non-negative integer) value~$c$, and the client has as input the issuer's public key $\pk$ and the same value~$c$. At the end of the protocol, the client outputs a credit token~$(\tok, c)$ with  
     $\tok=\perp$ indicating that it detected cheating by the issuer.
  %   \item $\vrfycred$, run by a client, takes as input a public key~$\pk$, a time period~$T$, and a credential~$\cred$; it outputs a bit.
-    \item $\spend$ is an interactive protocol run by the issuer and a client. 
-    The issuer has as input its private key~$\sk$ and a (non-negative integer) value~$s$, and the client has as input the issuer's public key~$\pk$, the same value~$s$, and a token $(\tok, c)$ with $s \leq c$. 
-    At the end of the protocol, the issuer outputs a nullifier~$k$ with $k=\perp$ indicating that it detected cheating by the client; the client outputs $(\tok', c')$ with $\tok=\perp$ indicating that it detected cheating by the issuer.
+    \item $\spend$ is an interactive protocol run by the issuer and a client.
+    The issuer has as input its private key~$\sk$, a (non-negative integer) value~$s$, and a partial credit return $t$ with $0 \leq t \leq s$. The client has as input the issuer's public key~$\pk$, the same value~$s$, and a token $(\tok, c)$ with $s \leq c$.
+    At the end of the protocol, the issuer outputs a nullifier~$k$ with $k=\perp$ indicating that it detected cheating by the client; the client outputs $(\tok', c')$ with $c' = c - s + t$ and $\tok=\perp$ indicating that it detected cheating by the issuer.
 \end{itemize}
 \end{definition}
 
-Correctness requires that (in honest executions) issuance always succeeds in producing a token worth the appropriate number of credits, and that spending $s$ credits from token worth $c$ credits should succeed (at the issuer) and result in a new token worth $c'=c-s$ credits for the client. 
+Correctness requires that (in honest executions) issuance always succeeds in producing a token worth the appropriate number of credits, and that spending $s$ credits from token worth $c$ credits should succeed (at the issuer) and result in a new token worth $c'=c-s+t$ credits for the client, where $0 \leq t \leq s$ is a partial credit return chosen by the issuer.
 We also require that the nullifiers output by the issuer are distinct.
 
 \begin{definition}
@@ -82,8 +82,8 @@ An anonymous credit scheme is {\sf correct} if for any efficient adversary $\A$ 
         \item If the $i$th query is of the form $\issue(c)$, run $\issue$ honestly between the issuer and a client on shared input~$c$; let $(\tok_i, c_i)$ be the client's output.
         If $\tok_i=\perp$ or $c_i\neq c$, set $\flag:=1$.
         
-        \item If the $i$th query is of the form $\spend(s, j)$ we require $j < i$ and $s \leq c_j$. 
-        Run $\spend$ honestly between the issuer and a client on shared input~$s$ and with the client using token $(\tok_j, c_j)$. Let $k$ be the output of the issuer, and let $(\tok_i, c_i)$ be the output of the client. Set $\flag:=1$ if $k=\perp$ or $\tok_i=\perp$ or $c_i \neq c_j-s$ or $k$ was every previously output be the issuer following a $\spend$ query.
+        \item If the $i$th query is of the form $\spend(s, j)$ we require $j < i$ and $s \leq c_j$.
+        Run $\spend$ honestly between the issuer and a client on shared input~$s$ and with the client using token $(\tok_j, c_j)$. The issuer also chooses $t$ with $0 \leq t \leq s$. Let $k$ be the output of the issuer, and let $(\tok_i, c_i)$ be the output of the client. Set $\flag:=1$ if $k=\perp$ or $\tok_i=\perp$ or $c_i \neq c_j-s+t$ or $k$ was every previously output be the issuer following a $\spend$ query.
     \end{itemize}
 \end{enumerate}
 \end{definition}
@@ -99,7 +99,7 @@ Roughly, a credit token for $c$ credits is a signature on $(c, k)$, where $k$ is
 Spending $s$ credits using a $c$-credit token (with $c \geq s$) associated with nullifier~$k$ then involves the following steps:
 \begin{enumerate}
     \item The client sends $k$ to the issuer, and proves possession of a BBS signature on $(c, k)$ with~$c \geq s$. (We currently use binary decomposition to prove the latter; other methods could also be used.)
-    \item The client obtains a fresh BBS signature from the issuer on $(c-s, k^*)$ for a fresh~$k^*$. (Note this must be done even when $c-s=0$ if the client wants to maintain anonymity.)
+    \item The client obtains a fresh BBS signature from the issuer on $(c-s+t, k^*)$ for a fresh~$k^*$, where $0 \leq t \leq s$ is a partial credit return chosen by the issuer. (Note this must be done even when $c-s+t=0$ if the client wants to maintain anonymity.)
 \end{enumerate}
 The purpose of the nullifier is to prevent double spending: the issuer can store a database of previously used nullifiers, and reject a spend attempt if $k$ has been used before. (This check is not included in the description below.)
 
@@ -226,23 +226,23 @@ It rejects if $A'=1$. Otherwise, it does the following ($\hash$ is initially emp
        \item The issuer computes $K':=\prod_{i=0}^{\ell-1} \com_i^{2^i}$, $\com:=h_1^s\cdot K'$, $C:=h_1^{-\bar c} h_2^{\bar k} h_3^{\bar s} \com^{-\gamma}$, and $\hash:=\hash\|C$. It aborts if $\gamma \neq H(\send_1\|\hash)$.
 \end{enumerate}
 
-\item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step, and recall that $K'=h_1^{c-s} h_2^{k^*} h_3^{r^*}$. Thus, the issuer can use this value to issue a new token.
+\item ({\bf Issuing a refund.}) Let $K'$ be the value computed in the previous step, and recall that $K'=h_1^{c-s} h_2^{k^*} h_3^{r^*}$. The issuer chooses $t$ with $0 \leq t \leq s$ and $t < 2^\ell$ (a partial credit return). It can then use $K'$ and $t$ to issue a new token.
 Specifically, the issuer does the following (note this is almost identical to the issuance protocol described earlier):
 Choose
 $e^* \leftarrow \Z_q$ and send
-$(A^*, e^*) = \left(\left(g \cdot K' \cdot h_4^{\mathit{ctx}}\right)^{1/(e^*+x)}, e^*\right)$
+$(A^*, e^*) = \left(\left(g \cdot K' \cdot h_1^t \cdot h_4^{\mathit{ctx}}\right)^{1/(e^*+x)}, e^*\right)$
 to the client.
-Also prove that it computed this value correctly by proving that $\log_{A^*} \left(g \cdot K' \cdot h_4^{\mathit{ctx}}\right) = \log_g \left(g^{e^*} \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof.
-That is, let $X_{A^*} = g \cdot K' \cdot h_4^{\mathit{ctx}}$ and $X_g = g^{e^*} \cdot w$. The issuer does:
+Also prove that it computed this value correctly by proving that $\log_{A^*} \left(g \cdot K' \cdot h_1^t \cdot h_4^{\mathit{ctx}}\right) = \log_g \left(g^{e^*} \cdot w\right)$ using a standard ``equality-of-discrete-logarithms'' proof.
+That is, let $X_{A^*} = g \cdot K' \cdot h_1^t \cdot h_4^{\mathit{ctx}}$ and $X_g = g^{e^*} \cdot w$. The issuer does:
 \begin{enumerate}
     \item Choose $\alpha \leftarrow \Z_q$ and compute $Y_A:= (A^*)^{\alpha}$ and $Y_g:=g^\alpha$.
-    \item Compute $\gamma:=H(e^*\|\mathit{ctx}\|A^*\|X_{A^*}\|X_g\|Y_A\|Y_g)$.
-    \item Compute $z:=\gamma\cdot (x+e^*)+\alpha$, and send $\gamma, z$ to the client.
+    \item Compute $\gamma:=H(e^*\|t\|\mathit{ctx}\|A^*\|X_{A^*}\|X_g\|Y_A\|Y_g)$.
+    \item Compute $z:=\gamma\cdot (x+e^*)+\alpha$, and send $\gamma, z, t$ to the client.
 \end{enumerate}
 
-\item ({\bf Client computes refund.}) The client verifies the proof $\gamma, z$ by computing $Y'_A:= (A^*)^z \cdot X_{A^*}^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
+\item ({\bf Client computes refund.}) The client reconstructs $X_{A^*} = g \cdot K' \cdot h_1^t \cdot h_4^{\mathit{ctx}}$ using $t$ received from the issuer, and verifies the proof $\gamma, z$ by computing $Y'_A:= (A^*)^z \cdot X_{A^*}^{-\gamma}$ and $Y'_g:=g^z \cdot X_g^{-\gamma}$ and then
 checking if
-$H( e^*\|\mathit{ctx}\|A^*\|X_{A^*}\|X_g\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $(A^*, e^*, k^*, r^*, c-s, \mathit{ctx})$; otherwise, the client outputs~$\perp$.
+$H( e^*\|t\|\mathit{ctx}\|A^*\|X_{A^*}\|X_g\|Y'_A \| Y'_g ) \isequal \gamma$. If so, the client outputs $(A^*, e^*, k^*, r^*, c-s+t, \mathit{ctx})$; otherwise, the client outputs~$\perp$.
 \end{itemize}
 \end{document}
 
