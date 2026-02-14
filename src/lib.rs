@@ -139,6 +139,11 @@
 //!     .unwrap();
 //! ```
 //!
+//! ## References
+//!
+//! - [IETF CFRG Draft](https://datatracker.ietf.org/doc/draft-schlesinger-cfrg-act/) - The cryptographic protocol specification
+//! - [IETF Privacy Pass Draft](https://datatracker.ietf.org/doc/draft-schlesinger-privacypass-act/) - The deployment specification
+//!
 //! See the README.md file for comprehensive integration guidance.
 
 use curve25519_dalek::{

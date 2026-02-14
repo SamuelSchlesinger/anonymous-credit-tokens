@@ -14,7 +14,8 @@
 
 //! CBOR serialization for Anonymous Credit Token protocol messages.
 //!
-//! This module implements the CBOR wire format as specified in the IETF draft.
+//! This module implements the CBOR wire format as specified in the
+//! [IETF draft](https://datatracker.ietf.org/doc/draft-schlesinger-cfrg-act/).
 //! All protocol messages are encoded using deterministic CBOR (RFC 8949) for
 //! interoperability.
 

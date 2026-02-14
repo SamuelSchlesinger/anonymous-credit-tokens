@@ -396,7 +396,8 @@ See the [LICENSE](LICENSE) file for details.
 
 The implementation is based on the Anonymous Credit Scheme designed by Jonathan Katz and Samuel Schlesinger. For more details:
 
-- [IETF Draft Specification](https://samuelschlesinger.github.io/ietf-anonymous-credit-tokens/draft-schlesinger-cfrg-act.html) - The formal specification being developed for standardization
+- [IETF CFRG Draft](https://datatracker.ietf.org/doc/draft-schlesinger-cfrg-act/) - The cryptographic protocol specification
+- [IETF Privacy Pass Draft](https://datatracker.ietf.org/doc/draft-schlesinger-privacypass-act/) - The deployment specification for Privacy Pass integration
 - [Design Document](docs/design.pdf) - The original design document
 
 ## Disclaimer
