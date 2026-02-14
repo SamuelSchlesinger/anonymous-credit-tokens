@@ -85,7 +85,7 @@ fn token_creation_benchmark(c: &mut Criterion) {
             |(preissuance, params, private_key, issuance_request, issuance_response)| {
                 black_box(
                     preissuance
-                        .to_credit_token(
+                        .to_credit_token::<16>(
                             &params,
                             private_key.public(),
                             &issuance_request,
@@ -164,7 +164,7 @@ macro_rules! bench_spending_proof {
                         )
                         .unwrap();
                     let credit_token = preissuance
-                        .to_credit_token(
+                        .to_credit_token::<$l>(
                             &$params,
                             private_key.public(),
                             &issuance_request,
@@ -220,7 +220,7 @@ macro_rules! bench_refund {
                         )
                         .unwrap();
                     let credit_token = preissuance
-                        .to_credit_token(
+                        .to_credit_token::<$l>(
                             &$params,
                             private_key.public(),
                             &issuance_request,
@@ -275,7 +275,7 @@ macro_rules! bench_refund_token_creation {
                         )
                         .unwrap();
                     let credit_token = preissuance
-                        .to_credit_token(
+                        .to_credit_token::<$l>(
                             &$params,
                             private_key.public(),
                             &issuance_request,
