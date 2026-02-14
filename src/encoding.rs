@@ -20,7 +20,7 @@
 //! big-endian length prefix.
 
 use crate::{
-    CreditToken, IssuanceRequest, IssuanceResponse, L, PreIssuance, PreRefund, PrivateKey,
+    CreditToken, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund, PrivateKey,
     PublicKey, Refund, SpendProof,
 };
 use curve25519_dalek::ristretto::CompressedRistretto;
@@ -90,6 +90,9 @@ fn read_var(data: &[u8], off: &mut usize) -> Result<Vec<u8>, EncodingError> {
     }
     let len = u16::from_be_bytes([data[*off], data[*off + 1]]) as usize;
     *off += 2;
+    if len < 1 {
+        return Err(EncodingError::TooShort);
+    }
     if data.len() < *off + len {
         return Err(EncodingError::TooShort);
     }
@@ -150,7 +153,7 @@ impl IssuanceResponse {
 
 // --- SpendProof: k[32] || s[32] || A'[32] || B_bar[32] || Com[L*32] || len(pok)[2] || pok[...] ---
 
-impl SpendProof {
+impl<const L: usize> SpendProof<L> {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(4 * 32 + L * 32 + 2 + self.pok.len());
         write_scalar(&mut buf, &self.k);

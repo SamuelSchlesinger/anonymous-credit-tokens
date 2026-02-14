@@ -42,7 +42,7 @@ fn main() {
 
     // Server issues 40 credits
     let issuance_response = private_key
-        .issue(&params, &issuance_request, Scalar::from(40u64), OsRng)
+        .issue::<128>(&params, &issuance_request, Scalar::from(40u64), OsRng)
         .unwrap();
 
     // Client receives the credit token
@@ -59,7 +59,7 @@ fn main() {
     // 3. First Purchase/Transaction
     // Client spends 20 credits
     let charge = Scalar::from(20u64);
-    let (spend_proof, prerefund) = credit_token.prove_spend(&params, charge, OsRng);
+    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng);
 
     // Server checks nullifier and processes the spending
     let nullifier = spend_proof.nullifier();
@@ -69,11 +69,11 @@ fn main() {
     nullifier_store.mark_used(nullifier);
 
     // Server issues a refund
-    let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
 
     // Client receives a new credit token with 20 credits remaining
     credit_token = prerefund
-        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
     println!("Credits: {:?}", credit_token.credits().to_bytes()[0]);
 }
