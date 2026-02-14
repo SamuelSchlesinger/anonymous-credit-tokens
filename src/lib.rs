@@ -94,6 +94,7 @@
 use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
 use group::Group;
 use rand_core::CryptoRngCore;
+use sha2::{Sha512, Digest};
 use sigma_proofs::LinearRelation;
 use std::ops::Neg;
 
@@ -251,7 +252,7 @@ impl std::fmt::Debug for Params {
 impl Params {
     /// Generates random system parameters using the provided random number generator.
     ///
-    /// This is used internally to create the default parameters with a deterministic seed.
+    /// This is primarily useful for testing and benchmarking where deterministic domain separation is not needed.
     ///
     /// # Arguments
     ///
@@ -261,10 +262,23 @@ impl Params {
     ///
     /// A new `Params` instance with randomly generated points
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
+        let g = RistrettoPoint::generator();
+        let h1 = RistrettoPoint::random(&mut rng);
+        let h2 = RistrettoPoint::random(&mut rng);
+        let h3 = RistrettoPoint::random(&mut rng);
+
+        // Pairwise inequality check (negligible probability of failure)
+        assert_ne!(h1, h2, "H1 and H2 must be distinct");
+        assert_ne!(h1, h3, "H1 and H3 must be distinct");
+        assert_ne!(h2, h3, "H2 and H3 must be distinct");
+        assert_ne!(h1, g, "H1 and G must be distinct");
+        assert_ne!(h2, g, "H2 and G must be distinct");
+        assert_ne!(h3, g, "H3 and G must be distinct");
+
         Params {
-            h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
+            h1: RistrettoBasepointTable::create(&h1),
+            h2: RistrettoBasepointTable::create(&h2),
+            h3: RistrettoBasepointTable::create(&h3),
             domain_separator: b"random".to_vec(),
         }
     }
@@ -299,27 +313,30 @@ impl Params {
             "ACT-v1:{}:{}:{}:{}",
             organization, service, deployment_id, version
         );
-
-        // Hash the domain separator with length prefix to create a seed
-        let mut hasher = blake3::Hasher::new();
         let domain_separator_bytes = domain_separator.as_bytes();
-        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
-        hasher.update(domain_separator_bytes);
-        let seed = hasher.finalize();
 
-        // Generate H1, H2, H3 using counter-based approach
-        let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
-        let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
-        let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
+        // DST for hash_to_ristretto255 per the ACT(ristretto255, SHAKE128) suite
+        let dst = format!("HashToGroup-{}", domain_separator);
+        let dst_bytes = dst.as_bytes();
 
-        // Pairwise inequality assertion (spec: SetGenerators)
-        let g = RistrettoPoint::generator();
-        assert_ne!(h1, h2, "H1 and H2 must be distinct");
-        assert_ne!(h1, h3, "H1 and H3 must be distinct");
-        assert_ne!(h2, h3, "H2 and H3 must be distinct");
-        assert_ne!(h1, g, "H1 and G must be distinct");
-        assert_ne!(h2, g, "H2 and G must be distinct");
-        assert_ne!(h3, g, "H3 and G must be distinct");
+        // SetGenerators algorithm from the spec:
+        // Initialize H1, H2, H3 to the generator G0 (ensures the while loop runs)
+        let g0 = RistrettoPoint::generator();
+        let mut h1 = g0;
+        let mut h2 = g0;
+        let mut h3 = g0;
+        let mut counter: u8 = 0;
+
+        while h1 == g0 || h2 == g0 || h3 == g0 || h1 == h2 || h1 == h3 || h2 == h3 {
+            let ctr = [counter];
+            let msg_h1 = [b"GenH1" as &[u8], &ctr, domain_separator_bytes].concat();
+            let msg_h2 = [b"GenH2" as &[u8], &ctr, domain_separator_bytes].concat();
+            let msg_h3 = [b"GenH3" as &[u8], &ctr, domain_separator_bytes].concat();
+            h1 = hash_to_ristretto255(&msg_h1, dst_bytes);
+            h2 = hash_to_ristretto255(&msg_h2, dst_bytes);
+            h3 = hash_to_ristretto255(&msg_h3, dst_bytes);
+            counter = counter.checked_add(1).expect("SetGenerators: counter overflow");
+        }
 
         Params {
             h1: RistrettoBasepointTable::create(&h1),
@@ -334,44 +351,78 @@ impl Params {
         &self.domain_separator
     }
 
-    /// Hash to Ristretto255 point using BLAKE3 with counter.
-    ///
-    /// This implements a deterministic hash-to-curve function that maps
-    /// the domain separator, seed, and counter to a Ristretto255 point.
-    /// All inputs are length-prefixed to ensure domain separation.
-    ///
-    /// # Arguments
-    ///
-    /// * `domain_separator` - The domain separator string
-    /// * `seed` - The seed bytes (typically from hashing the domain separator)
-    /// * `counter` - A counter to generate different points from the same seed
-    ///
-    /// # Returns
-    ///
-    /// A deterministically generated Ristretto255 point
-    fn hash_to_ristretto(domain_separator: &str, seed: &[u8], counter: u32) -> RistrettoPoint {
-        let mut hasher = blake3::Hasher::new();
+}
 
-        // Add domain separator with length prefix
-        let domain_separator_bytes = domain_separator.as_bytes();
-        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
-        hasher.update(domain_separator_bytes);
+/// Implements expand_message_xmd from RFC 9380 Section 5.3.1 using SHA-512.
+fn expand_message_xmd_sha512(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec<u8> {
+    let b_in_bytes: usize = 64; // SHA-512 output length
+    let _r_in_bytes: usize = 128; // SHA-512 block size
+    let ell = (len_in_bytes + b_in_bytes - 1) / b_in_bytes;
 
-        // Add seed with length prefix
-        hasher.update(&(seed.len() as u64).to_be_bytes());
-        hasher.update(seed);
+    assert!(ell <= 255, "expand_message_xmd: ell too large");
+    assert!(dst.len() <= 255, "expand_message_xmd: DST too long");
+    assert!(
+        len_in_bytes <= 65535,
+        "expand_message_xmd: len_in_bytes too large"
+    );
 
-        // Add counter with length prefix (4 bytes for u32)
-        hasher.update(&(4u64).to_be_bytes());
-        hasher.update(&counter.to_le_bytes());
+    // DST_prime = DST || I2OSP(len(DST), 1)
+    let dst_len_byte = [dst.len() as u8];
 
-        // Generate 64 bytes for from_uniform_bytes
-        let mut uniform_bytes = [0u8; 64];
-        let mut output_reader = hasher.finalize_xof();
-        output_reader.fill(&mut uniform_bytes);
+    // Z_pad = I2OSP(0, r_in_bytes)
+    let z_pad = [0u8; 128];
 
-        RistrettoPoint::from_uniform_bytes(&uniform_bytes)
+    // l_i_b_str = I2OSP(len_in_bytes, 2)
+    let l_i_b_str = (len_in_bytes as u16).to_be_bytes();
+
+    // b_0 = H(Z_pad || msg || l_i_b_str || I2OSP(0, 1) || DST_prime)
+    let mut hasher = Sha512::new();
+    hasher.update(z_pad);
+    hasher.update(msg);
+    hasher.update(l_i_b_str);
+    hasher.update([0u8]);
+    hasher.update(dst);
+    hasher.update(dst_len_byte);
+    let b_0: [u8; 64] = hasher.finalize().into();
+
+    // b_1 = H(b_0 || I2OSP(1, 1) || DST_prime)
+    let mut hasher = Sha512::new();
+    hasher.update(b_0);
+    hasher.update([1u8]);
+    hasher.update(dst);
+    hasher.update(dst_len_byte);
+    let mut b_vals: Vec<[u8; 64]> = vec![hasher.finalize().into()];
+
+    for i in 2..=ell {
+        // b_i = H(strxor(b_0, b_{i-1}) || I2OSP(i, 1) || DST_prime)
+        let mut xored = [0u8; 64];
+        for j in 0..64 {
+            xored[j] = b_0[j] ^ b_vals[i - 2][j];
+        }
+        let mut hasher = Sha512::new();
+        hasher.update(xored);
+        hasher.update([i as u8]);
+        hasher.update(dst);
+        hasher.update(dst_len_byte);
+        b_vals.push(hasher.finalize().into());
     }
+
+    let mut uniform_bytes = Vec::with_capacity(ell * b_in_bytes);
+    for b in &b_vals {
+        uniform_bytes.extend_from_slice(b);
+    }
+    uniform_bytes.truncate(len_in_bytes);
+    uniform_bytes
+}
+
+/// Implements hash_to_ristretto255 per RFC 9380.
+///
+/// Uses expand_message_xmd with SHA-512 to generate 64 uniform bytes,
+/// then maps to a Ristretto point using `from_uniform_bytes`.
+fn hash_to_ristretto255(msg: &[u8], dst: &[u8]) -> RistrettoPoint {
+    let uniform_bytes = expand_message_xmd_sha512(msg, dst, 64);
+    let bytes: [u8; 64] = uniform_bytes.try_into().expect("expected 64 bytes");
+    RistrettoPoint::from_uniform_bytes(&bytes)
 }
 
 /// Client state maintained during the issuance protocol.
@@ -488,7 +539,9 @@ impl PreIssuance {
             params.h3.basepoint(),
             big_k,
         );
-        let prover = statement.into_nizk(b"request").unwrap();
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"request");
+        let prover = statement.into_nizk(&session_id).unwrap();
         let witness = vec![self.k, self.r];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
@@ -549,7 +602,9 @@ impl PreIssuance {
         // Verify that the challenge matches the expected value
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, response.a, g, x_a, x_g);
-        let verifier = statement.into_nizk(b"respond").unwrap();
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"respond");
+        let verifier = statement.into_nizk(&session_id).unwrap();
         if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
         }
@@ -634,7 +689,9 @@ impl PrivateKey {
             params.h3.basepoint(),
             request.big_k,
         );
-        let verifier = statement.into_nizk(b"request").unwrap();
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"request");
+        let verifier = statement.into_nizk(&session_id).unwrap();
         if verifier.verify_compact(&request.pok).is_err() {
             return Err(Error::InvalidIssuanceRequestProof);
         }
@@ -650,7 +707,9 @@ impl PrivateKey {
         // Generate a zero-knowledge proof that the signature is valid
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a, g, x_a, x_g);
-        let prover = statement.into_nizk(b"respond").unwrap();
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"respond");
+        let prover = statement.into_nizk(&session_id).unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
@@ -676,7 +735,7 @@ pub struct SpendProof {
     b_bar: RistrettoPoint,
     /// Commitments for the binary decomposition of the remaining balance
     com: [RistrettoPoint; L],
-    /// The NISigmaProtocol batchable proof
+    /// The NISigmaProtocol compact proof
     pok: Vec<u8>,
 }
 
@@ -905,7 +964,7 @@ impl PrivateKey {
         let mut session_id = params.domain_separator.clone();
         session_id.extend_from_slice(b"spend");
         let nizk = statement.into_nizk(&session_id).unwrap();
-        if nizk.verify_batchable(&spend_proof.pok).is_err() {
+        if nizk.verify_compact(&spend_proof.pok).is_err() {
             return Err(Error::InvalidClientSpendProof);
         }
 
@@ -919,7 +978,9 @@ impl PrivateKey {
 
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
-        let prover = statement.into_nizk(b"refund").unwrap();
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"refund");
+        let prover = statement.into_nizk(&session_id).unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
@@ -1101,7 +1162,7 @@ impl CreditToken {
         let mut session_id = params.domain_separator.clone();
         session_id.extend_from_slice(b"spend");
         let nizk = statement.into_nizk(&session_id).unwrap();
-        let pok = nizk.prove_batchable(&witness, &mut rng).unwrap();
+        let pok = nizk.prove_compact(&witness, &mut rng).unwrap();
 
         // 10. Compute r_star for PreRefund
         let r_star = s_com
@@ -1154,6 +1215,7 @@ impl PreRefund {
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters used for verification
     /// * `spend_proof` - The original spending proof sent to the issuer
     /// * `refund` - The issuer's refund response
     /// * `public_key` - The issuer's public key
@@ -1161,7 +1223,7 @@ impl PreRefund {
     /// # Returns
     ///
     /// * `Ok(CreditToken)` - A new credit token with the remaining balance if the refund is valid
-    /// * `Err(Error)r - If the verification fails
+    /// * `Err(Error)` - If the verification fails
     ///
     /// # Example
     ///
@@ -1184,6 +1246,7 @@ impl PreRefund {
     /// #
     /// // Construct the new credit token with the remaining balance
     /// let new_credit_token = prerefund.to_credit_token(
+    ///     &params,
     ///     &spend_proof,
     ///     &refund,
     ///     public_key
@@ -1191,6 +1254,7 @@ impl PreRefund {
     /// ```
     pub fn to_credit_token(
         &self,
+        params: &Params,
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
@@ -1207,7 +1271,9 @@ impl PreRefund {
 
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
-        let verifier = statement.into_nizk(b"refund").unwrap();
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"refund");
+        let verifier = statement.into_nizk(&session_id).unwrap();
         if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);
         }

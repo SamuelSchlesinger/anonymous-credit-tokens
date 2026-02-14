@@ -109,7 +109,7 @@ fn full_cycle() {
         let (spend_proof, prerefund) = credit_token1.prove_spend(&params, charge1, OsRng);
         let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
         let credit_token2 = prerefund
-            .to_credit_token(&spend_proof, &refund, private_key.public())
+            .to_credit_token(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
 
         // Second charge: remaining credits
@@ -119,7 +119,7 @@ fn full_cycle() {
         let (spend_proof, prerefund) = credit_token2.prove_spend(&params, charge2, OsRng);
         let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
         let _credit_token3 = prerefund
-            .to_credit_token(&spend_proof, &refund, private_key.public())
+            .to_credit_token(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
     }
 }
@@ -174,7 +174,7 @@ fn double_spend_prevention() {
 
     // Create new token from refund
     let new_token = prerefund1
-        .to_credit_token(&spend_proof1, &refund1, private_key.public())
+        .to_credit_token(&params, &spend_proof1, &refund1, private_key.public())
         .unwrap();
 
     // Attempt to use the same original token (double-spend attempt)
@@ -245,7 +245,7 @@ fn spend_exact_balance() {
     // Verify the refund still processes correctly
     let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     let new_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
 
     // New token should have zero balance
@@ -315,7 +315,7 @@ fn sequential_spends() {
         // Get refund and create new token
         let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
         current_token = prerefund
-            .to_credit_token(&spend_proof, &refund, private_key.public())
+            .to_credit_token(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
 
         // Verify the new token has the correct balance
@@ -415,7 +415,7 @@ fn zero_spend_scenario() {
 
     // Create new token
     let new_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
 
     // New token should have the same balance
@@ -498,10 +498,10 @@ fn multiple_tokens_with_same_issuer() {
 
     // Create new tokens
     let new_token1 = prerefund1
-        .to_credit_token(&spend_proof1, &refund1, private_key.public())
+        .to_credit_token(&params, &spend_proof1, &refund1, private_key.public())
         .unwrap();
     let new_token2 = prerefund2
-        .to_credit_token(&spend_proof2, &refund2, private_key.public())
+        .to_credit_token(&params, &spend_proof2, &refund2, private_key.public())
         .unwrap();
 
     // Check remaining balances
@@ -680,7 +680,7 @@ fn large_amount_issuance() {
     // The refund should process correctly
     let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     let new_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
 
     // The new token should have the expected balance
@@ -778,11 +778,11 @@ fn tampered_refund_verification() {
 
     // The client should reject the tampered refund
     let new_token_result =
-        prerefund.to_credit_token(&spend_proof, &tampered_refund, private_key.public());
+        prerefund.to_credit_token(&params, &spend_proof, &tampered_refund, private_key.public());
     assert_eq!(new_token_result, Err(Error::InvalidRefundProof));
 
     // The original refund should be accepted
-    let new_token_result = prerefund.to_credit_token(&spend_proof, &refund, private_key.public());
+    let new_token_result = prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
     assert!(new_token_result.is_ok(), "Valid refund should be accepted");
 }
 
@@ -868,7 +868,7 @@ fn token_with_zero_credit() {
     let (spend_proof, prerefund) = token.prove_spend(&params, zero_spend, OsRng);
     let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     let new_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
     assert_eq!(
         new_token.c,
@@ -937,7 +937,7 @@ fn exhaust_token_with_one_credit_spends() {
         // Get refund and create new token
         let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
         current_token = prerefund
-            .to_credit_token(&spend_proof, &refund, private_key.public())
+            .to_credit_token(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
     }
 
@@ -959,7 +959,7 @@ fn exhaust_token_with_one_credit_spends() {
     let (spend_proof, prerefund) = current_token.prove_spend(&params, zero_spend, OsRng);
     let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     let new_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
     assert_eq!(
         new_token.c,
@@ -995,7 +995,7 @@ fn test_binary_decomposition_max_value() {
     // Process the refund
     let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
     let new_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
 
     // Verify the remaining balance
@@ -1011,7 +1011,7 @@ fn test_binary_decomposition_max_value() {
     // Process the refund
     let refund2 = private_key.refund(&params, &spend_proof2, OsRng).unwrap();
     let final_token = prerefund2
-        .to_credit_token(&spend_proof2, &refund2, private_key.public())
+        .to_credit_token(&params, &spend_proof2, &refund2, private_key.public())
         .unwrap();
 
     // Verify the final token has zero balance
@@ -1105,7 +1105,7 @@ fn test_key_component_malleability() {
     };
 
     // This should fail validation
-    let result1 = prerefund.to_credit_token(&spend_proof, &tampered_refund1, private_key.public());
+    let result1 = prerefund.to_credit_token(&params, &spend_proof, &tampered_refund1, private_key.public());
 
     assert_eq!(result1, Err(Error::InvalidRefundProof));
 
@@ -1117,7 +1117,7 @@ fn test_key_component_malleability() {
     };
 
     // This should fail validation
-    let result2 = prerefund.to_credit_token(&spend_proof, &tampered_refund2, private_key.public());
+    let result2 = prerefund.to_credit_token(&params, &spend_proof, &tampered_refund2, private_key.public());
 
     assert_eq!(result2, Err(Error::InvalidRefundProof));
 
@@ -1129,11 +1129,11 @@ fn test_key_component_malleability() {
     };
 
     // This should fail validation
-    let result3 = prerefund.to_credit_token(&spend_proof, &tampered_refund3, private_key.public());
+    let result3 = prerefund.to_credit_token(&params, &spend_proof, &tampered_refund3, private_key.public());
     assert_eq!(result3, Err(Error::InvalidRefundProof));
 
     // The original refund should still be valid
-    let result4 = prerefund.to_credit_token(&spend_proof, &refund, private_key.public());
+    let result4 = prerefund.to_credit_token(&params, &spend_proof, &refund, private_key.public());
     assert!(result4.is_ok(), "Original refund should be valid");
 }
 
@@ -1272,7 +1272,7 @@ proptest! {
         // Process refund
         if let Ok(refund) = private_key.refund(&params, &spend_proof, OsRng) {
             let new_token = pre_refund
-                .to_credit_token(&spend_proof, &refund, private_key.public())
+                .to_credit_token(&params, &spend_proof, &refund, private_key.public())
                 .unwrap();
 
             // New token should have the remaining balance
@@ -1492,7 +1492,7 @@ proptest! {
 
             let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
             current_token = pre_refund
-                .to_credit_token(&spend_proof, &refund, private_key.public())
+                .to_credit_token(&params, &spend_proof, &refund, private_key.public())
                 .unwrap();
 
             prop_assert_eq!(current_token.c, Scalar::from(remaining));
@@ -1529,7 +1529,7 @@ proptest! {
 
         let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
         let new_token = pre_refund
-            .to_credit_token(&spend_proof, &refund, private_key.public())
+            .to_credit_token(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
 
         prop_assert_eq!(new_token.c, initial_credits);
@@ -1641,7 +1641,7 @@ proptest! {
                 total_spent += amount;
 
                 current_token = pre_refund
-                    .to_credit_token(&spend_proof, &refund, private_key.public())
+                    .to_credit_token(&params, &spend_proof, &refund, private_key.public())
                     .unwrap();
 
                 // Current balance + total spent should equal initial amount
@@ -1939,7 +1939,7 @@ proptest! {
             if remaining > 0 {
                 let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
                 token = pre_refund
-                    .to_credit_token(&spend_proof, &refund, private_key.public())
+                    .to_credit_token(&params, &spend_proof, &refund, private_key.public())
                     .unwrap();
             }
         }

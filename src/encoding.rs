@@ -25,14 +25,17 @@ use crate::{
 };
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::{RistrettoPoint, Scalar};
+use group::Group;
 
 /// Error type for TLS presentation language encoding/decoding.
 #[derive(Debug, PartialEq)]
 pub enum EncodingError {
     /// Input data is too short to decode the expected structure.
     TooShort,
-    /// A compressed Ristretto point could not be decompressed.
+    /// A compressed Ristretto point could not be decompressed or is the identity.
     InvalidPoint,
+    /// A scalar is not in canonical form (value >= group order).
+    InvalidScalar,
     /// Trailing bytes remain after decoding.
     TrailingData,
 }
@@ -48,6 +51,10 @@ fn write_scalar(buf: &mut Vec<u8>, scalar: &Scalar) {
 }
 
 fn write_var(buf: &mut Vec<u8>, data: &[u8]) {
+    assert!(
+        data.len() <= u16::MAX as usize,
+        "variable-length field exceeds u16::MAX"
+    );
     buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
     buf.extend_from_slice(data);
 }
@@ -60,6 +67,9 @@ fn read_point(data: &[u8], off: &mut usize) -> Result<RistrettoPoint, EncodingEr
         .map_err(|_| EncodingError::InvalidPoint)?
         .decompress()
         .ok_or(EncodingError::InvalidPoint)?;
+    if pt == RistrettoPoint::identity() {
+        return Err(EncodingError::InvalidPoint);
+    }
     *off += 32;
     Ok(pt)
 }
@@ -71,7 +81,7 @@ fn read_scalar(data: &[u8], off: &mut usize) -> Result<Scalar, EncodingError> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&data[*off..*off + 32]);
     *off += 32;
-    Ok(Scalar::from_bytes_mod_order(arr))
+    Option::from(Scalar::from_canonical_bytes(arr)).ok_or(EncodingError::InvalidScalar)
 }
 
 fn read_var(data: &[u8], off: &mut usize) -> Result<Vec<u8>, EncodingError> {
@@ -155,8 +165,6 @@ impl SpendProof {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, EncodingError> {
-        use group::Group;
-
         let mut off = 0;
         let k = read_scalar(data, &mut off)?;
         let s = read_scalar(data, &mut off)?;
