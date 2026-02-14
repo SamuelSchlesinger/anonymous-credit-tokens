@@ -32,6 +32,8 @@ use group::Group;
 pub enum EncodingError {
     /// Input data is too short to decode the expected structure.
     TooShort,
+    /// A variable-length field exceeds the maximum representable length (u16::MAX).
+    TooLong,
     /// A compressed Ristretto point could not be decompressed or is the identity.
     InvalidPoint,
     /// A scalar is not in canonical form (value >= group order).
@@ -50,13 +52,14 @@ fn write_scalar(buf: &mut Vec<u8>, scalar: &Scalar) {
     buf.extend_from_slice(scalar.as_bytes());
 }
 
-fn write_var(buf: &mut Vec<u8>, data: &[u8]) {
-    assert!(
-        data.len() <= u16::MAX as usize,
-        "variable-length field exceeds u16::MAX"
-    );
-    buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
+fn write_var(buf: &mut Vec<u8>, data: &[u8]) -> Result<(), EncodingError> {
+    let len: u16 = data
+        .len()
+        .try_into()
+        .map_err(|_| EncodingError::TooLong)?;
+    buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
+    Ok(())
 }
 
 fn read_point(data: &[u8], off: &mut usize) -> Result<RistrettoPoint, EncodingError> {
@@ -112,11 +115,11 @@ fn check_exact(data: &[u8], off: usize) -> Result<(), EncodingError> {
 // --- IssuanceRequest: K[32] || len(pok)[2] || pok[...] ---
 
 impl IssuanceRequest {
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodingError> {
         let mut buf = Vec::new();
         write_point(&mut buf, &self.big_k);
-        write_var(&mut buf, &self.pok);
-        buf
+        write_var(&mut buf, &self.pok)?;
+        Ok(buf)
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, EncodingError> {
@@ -131,14 +134,14 @@ impl IssuanceRequest {
 // --- IssuanceResponse: A[32] || e[32] || c[32] || ctx[32] || len(pok)[2] || pok[...] ---
 
 impl IssuanceResponse {
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodingError> {
         let mut buf = Vec::new();
         write_point(&mut buf, &self.a);
         write_scalar(&mut buf, &self.e);
         write_scalar(&mut buf, &self.c);
         write_scalar(&mut buf, &self.ctx);
-        write_var(&mut buf, &self.pok);
-        buf
+        write_var(&mut buf, &self.pok)?;
+        Ok(buf)
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, EncodingError> {
@@ -156,7 +159,7 @@ impl IssuanceResponse {
 // --- SpendProof: k[32] || s[32] || ctx[32] || A'[32] || B_bar[32] || Com[L*32] || len(pok)[2] || pok[...] ---
 
 impl<const L: usize> SpendProof<L> {
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodingError> {
         let mut buf = Vec::with_capacity(5 * 32 + L * 32 + 2 + self.pok.len());
         write_scalar(&mut buf, &self.k);
         write_scalar(&mut buf, &self.s);
@@ -166,8 +169,8 @@ impl<const L: usize> SpendProof<L> {
         for com_j in &self.com {
             write_point(&mut buf, com_j);
         }
-        write_var(&mut buf, &self.pok);
-        buf
+        write_var(&mut buf, &self.pok)?;
+        Ok(buf)
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, EncodingError> {
@@ -198,13 +201,13 @@ impl<const L: usize> SpendProof<L> {
 // --- Refund: A*[32] || e*[32] || t[32] || len(pok)[2] || pok[...] ---
 
 impl Refund {
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodingError> {
         let mut buf = Vec::new();
         write_point(&mut buf, &self.a);
         write_scalar(&mut buf, &self.e);
         write_scalar(&mut buf, &self.t);
-        write_var(&mut buf, &self.pok);
-        buf
+        write_var(&mut buf, &self.pok)?;
+        Ok(buf)
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, EncodingError> {
@@ -302,6 +305,10 @@ impl PrivateKey {
         let x = read_scalar(data, &mut off)?;
         let w = read_point(data, &mut off)?;
         check_exact(data, off)?;
+        // Verify that the public key matches the secret scalar
+        if w != RistrettoPoint::generator() * x {
+            return Err(EncodingError::InvalidPoint);
+        }
         Ok(PrivateKey {
             x,
             public: PublicKey { w },
@@ -337,7 +344,7 @@ mod tests {
         OsRng.fill_bytes(&mut pok);
 
         let request = IssuanceRequest { big_k, pok };
-        let bytes = request.to_bytes();
+        let bytes = request.to_bytes().unwrap();
         let decoded = IssuanceRequest::from_bytes(&bytes).unwrap();
 
         assert_eq!(request.big_k, decoded.big_k);
@@ -354,7 +361,7 @@ mod tests {
         OsRng.fill_bytes(&mut pok);
 
         let response = IssuanceResponse { a, e, c, ctx, pok };
-        let bytes = response.to_bytes();
+        let bytes = response.to_bytes().unwrap();
         let decoded = IssuanceResponse::from_bytes(&bytes).unwrap();
 
         assert_eq!(response.a, decoded.a);
@@ -373,7 +380,7 @@ mod tests {
         OsRng.fill_bytes(&mut pok);
 
         let refund = Refund { a, e, t, pok };
-        let bytes = refund.to_bytes();
+        let bytes = refund.to_bytes().unwrap();
         let decoded = Refund::from_bytes(&bytes).unwrap();
 
         assert_eq!(refund.a, decoded.a);
@@ -384,17 +391,26 @@ mod tests {
 
     #[test]
     fn test_private_key_roundtrip() {
-        let x = Scalar::random(&mut OsRng);
-        let public = PublicKey {
-            w: RistrettoPoint::random(&mut OsRng),
-        };
-
-        let private_key = PrivateKey { x, public };
+        let private_key = PrivateKey::random(OsRng);
         let bytes = private_key.to_bytes();
         let decoded = PrivateKey::from_bytes(&bytes).unwrap();
 
         assert_eq!(private_key.x, decoded.x);
         assert_eq!(private_key.public.w, decoded.public.w);
+    }
+
+    #[test]
+    fn test_private_key_mismatched_public_key() {
+        let x = Scalar::random(&mut OsRng);
+        let wrong_w = RistrettoPoint::random(&mut OsRng);
+        // Manually serialize x || wrong_w
+        let mut bytes = Vec::with_capacity(64);
+        bytes.extend_from_slice(x.as_bytes());
+        bytes.extend_from_slice(wrong_w.compress().as_bytes());
+        assert_eq!(
+            PrivateKey::from_bytes(&bytes).unwrap_err(),
+            EncodingError::InvalidPoint
+        );
     }
 
     #[test]

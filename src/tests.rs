@@ -1373,7 +1373,7 @@ proptest! {
         pok in vec_strategy(),
     ) {
         let request = IssuanceRequest { big_k, pok};
-        let bytes = request.to_bytes();
+        let bytes = request.to_bytes().unwrap();
         let decoded = IssuanceRequest::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(request.big_k, decoded.big_k);
@@ -1667,7 +1667,7 @@ proptest! {
         pok in vec_strategy(),
     ) {
         let response = IssuanceResponse { a, e, c, ctx, pok };
-        let bytes = response.to_bytes();
+        let bytes = response.to_bytes().unwrap();
         let decoded = IssuanceResponse::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(response.a, decoded.a);
@@ -1688,7 +1688,7 @@ proptest! {
         pok in vec_strategy(),
     ) {
         let refund = Refund { a, e, t, pok };
-        let bytes = refund.to_bytes();
+        let bytes = refund.to_bytes().unwrap();
         let decoded = Refund::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(refund.a, decoded.a);

@@ -397,7 +397,6 @@ impl Params {
 /// Implements expand_message_xmd from RFC 9380 Section 5.3.1 using SHA-512.
 fn expand_message_xmd_sha512(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec<u8> {
     let b_in_bytes: usize = 64; // SHA-512 output length
-    let _r_in_bytes: usize = 128; // SHA-512 block size
     let ell = (len_in_bytes + b_in_bytes - 1) / b_in_bytes;
 
     assert!(ell <= 255, "expand_message_xmd: ell too large");
