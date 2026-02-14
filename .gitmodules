@@ -1,0 +1,4 @@
+[submodule "draft-act"]
+	path = draft-act
+	url = https://github.com/SamuelSchlesinger/draft-act.git
+	branch = samschles/sigma-draft-compliance

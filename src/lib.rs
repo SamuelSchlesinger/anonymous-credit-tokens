@@ -96,7 +96,7 @@ use group::Group;
 use rand_core::CryptoRngCore;
 use sigma_proofs::LinearRelation;
 use std::ops::Neg;
-use subtle::{ConditionallySelectable, ConstantTimeEq};
+
 use zeroize::ZeroizeOnDrop;
 
 #[derive(Debug, PartialEq)]
@@ -116,10 +116,7 @@ pub enum Error {
 /// This defines the maximum value (2^128 - 1) that can be represented.
 pub const L: usize = 128;
 
-mod transcript;
-use transcript::Transcript;
-
-pub mod cbor;
+pub mod encoding;
 
 /// Attempts to convert a Scalar to a u128 value.
 ///
@@ -227,11 +224,16 @@ pub struct Params {
     h2: RistrettoBasepointTable,
     /// Third generator point used in commitment schemes
     h3: RistrettoBasepointTable,
+    /// Domain separator bytes for cryptographic isolation
+    domain_separator: Vec<u8>,
 }
 
 impl PartialEq for Params {
     fn eq(&self, other: &Params) -> bool {
-        self.h1.basepoint() == other.h1.basepoint() && self.h2.basepoint() == other.h2.basepoint() && self.h3.basepoint() == other.h2.basepoint()
+        self.h1.basepoint() == other.h1.basepoint()
+            && self.h2.basepoint() == other.h2.basepoint()
+            && self.h3.basepoint() == other.h3.basepoint()
+            && self.domain_separator == other.domain_separator
     }
 }
 
@@ -241,6 +243,7 @@ impl std::fmt::Debug for Params {
             .field("h1", &"RistrettoBasepointTable")
             .field("h2", &"RistrettoBasepointTable")
             .field("h3", &"RistrettoBasepointTable")
+            .field("domain_separator", &self.domain_separator)
             .finish()
     }
 }
@@ -262,6 +265,7 @@ impl Params {
             h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
+            domain_separator: b"random".to_vec(),
         }
     }
 
@@ -308,11 +312,26 @@ impl Params {
         let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
         let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
 
+        // Pairwise inequality assertion (spec: SetGenerators)
+        let g = RistrettoPoint::generator();
+        assert_ne!(h1, h2, "H1 and H2 must be distinct");
+        assert_ne!(h1, h3, "H1 and H3 must be distinct");
+        assert_ne!(h2, h3, "H2 and H3 must be distinct");
+        assert_ne!(h1, g, "H1 and G must be distinct");
+        assert_ne!(h2, g, "H2 and G must be distinct");
+        assert_ne!(h3, g, "H3 and G must be distinct");
+
         Params {
             h1: RistrettoBasepointTable::create(&h1),
             h2: RistrettoBasepointTable::create(&h2),
             h3: RistrettoBasepointTable::create(&h3),
+            domain_separator: domain_separator.into_bytes(),
         }
+    }
+
+    /// Returns the domain separator bytes.
+    pub fn domain_separator(&self) -> &[u8] {
+        &self.domain_separator
     }
 
     /// Hash to Ristretto255 point using BLAKE3 with counter.
@@ -657,30 +676,8 @@ pub struct SpendProof {
     b_bar: RistrettoPoint,
     /// Commitments for the binary decomposition of the remaining balance
     com: [RistrettoPoint; L],
-    /// The challenge value for the zero-knowledge proof
-    gamma: Scalar,
-    /// Response value for the signature proof
-    e_bar: Scalar,
-    /// Response value for signature transformations
-    r2_bar: Scalar,
-    /// Response value for signature transformations
-    r3_bar: Scalar,
-    /// Response value for the credit amount
-    c_bar: Scalar,
-    /// Response value for the blinding factor
-    r_bar: Scalar,
-    /// Response value for the range proof (bit 0, value 0)
-    w00: Scalar,
-    /// Response value for the range proof (bit 0, value 1)
-    w01: Scalar,
-    /// Challenge values for each bit in the range proof
-    gamma0: [Scalar; L],
-    /// Response values for the range proof bit commitments
-    z: [[Scalar; 2]; L],
-    /// Response value for the credit identifier
-    k_bar: Scalar,
-    /// Response value for the range proof sum commitment
-    s_bar: Scalar,
+    /// The NISigmaProtocol batchable proof
+    pok: Vec<u8>,
 }
 
 impl SpendProof {
@@ -705,6 +702,124 @@ impl SpendProof {
     pub fn charge(&self) -> Scalar {
         self.s
     }
+}
+
+/// Builds the spend relation shared by both prover and verifier.
+///
+/// All image values (a_bar, h1_prime, com_total) are computed by the caller
+/// and passed in, so both prover and verifier build an identical statement.
+///
+/// The relation contains 2L+3 equations:
+///   1. A_bar = e*(-A') + r2*B_bar               (BBS signature validity)
+///   2. H1' = r3*B_bar + c*(-H1) + r*(-H3)       (credential structure)
+///   3..2+2L. Range proof equations                (2L equations)
+///   2L+3. Com_total = c*H1 + kstar*H2 + Σ s_com[j]*(H3*2^j)  (commitment consistency)
+///
+/// Witness layout (3L+7 scalars):
+///   [e, r2, r3, c, r, b[0..L-1], s_com[0..L-1], s2[0..L-1], kstar, k2]
+///
+/// Note: The binary constraints use the reformulation
+///   Com[j] = b[j]*Com[j] + s2[j]*H3
+/// rather than the mathematically equivalent
+///   Identity = b[j]*(H1-Com[j]) + s2[j]*H3
+/// because the sigma-proofs library rejects equations with Identity as the
+/// image (trivial kernel check). Accordingly, the witness values for s2 and k2
+/// are (1-b[j])*s_com[j] and (1-b[0])*kstar respectively.
+fn build_spend_relation(
+    params: &Params,
+    a_prime: RistrettoPoint,
+    b_bar: RistrettoPoint,
+    com: &[RistrettoPoint; L],
+    a_bar: RistrettoPoint,
+    h1_prime: RistrettoPoint,
+    com_total: RistrettoPoint,
+) -> LinearRelation<RistrettoPoint> {
+    let mut statement = LinearRelation::new();
+
+    let h1 = params.h1.basepoint();
+    let h2 = params.h2.basepoint();
+    let h3 = params.h3.basepoint();
+
+    // --- Eq 1: A_bar = e*(-A') + r2*B_bar ---
+    let [e_var, r2_var] = statement.allocate_scalars::<2>();
+    let [neg_a_prime_var, b_bar_var, a_bar_var] = statement.allocate_elements::<3>();
+    statement.append_equation(a_bar_var, e_var * neg_a_prime_var + r2_var * b_bar_var);
+    statement.set_elements([
+        (neg_a_prime_var, a_prime.neg()),
+        (b_bar_var, b_bar),
+        (a_bar_var, a_bar),
+    ]);
+
+    // --- Eq 2: H1_prime = r3*B_bar + c*(-H1) + r*(-H3) ---
+    let [r3_var, c_var, r_var] = statement.allocate_scalars::<3>();
+    let [neg_h1_var, neg_h3_var, h1_prime_var] = statement.allocate_elements::<3>();
+    statement.append_equation(
+        h1_prime_var,
+        r3_var * b_bar_var + c_var * neg_h1_var + r_var * neg_h3_var,
+    );
+    statement.set_elements([
+        (neg_h1_var, h1.neg()),
+        (neg_h3_var, h3.neg()),
+        (h1_prime_var, h1_prime),
+    ]);
+
+    // --- Range proof: 2L equations ---
+    let b_vars = statement.allocate_scalars_vec(L);
+    let s_com_vars = statement.allocate_scalars_vec(L);
+    let s2_vars = statement.allocate_scalars_vec(L);
+    let [kstar_var, k2_var] = statement.allocate_scalars::<2>();
+
+    // Allocate shared element variables for range proof
+    let [h1_rp_var, h2_rp_var, h3_rp_var] = statement.allocate_elements::<3>();
+    statement.set_elements([(h1_rp_var, h1), (h2_rp_var, h2), (h3_rp_var, h3)]);
+
+    // Allocate and set Com element variables
+    let com_vars: Vec<_> = com
+        .iter()
+        .map(|com_j| statement.allocate_element_with(*com_j))
+        .collect();
+
+    // Bit 0: opening  Com[0] = b[0]*H1 + kstar*H2 + s_com[0]*H3
+    statement.append_equation(
+        com_vars[0],
+        b_vars[0] * h1_rp_var + kstar_var * h2_rp_var + s_com_vars[0] * h3_rp_var,
+    );
+    // Bit 0: binary (reformulated)  Com[0] = b[0]*Com[0] + k2*H2 + s2[0]*H3
+    statement.append_equation(
+        com_vars[0],
+        b_vars[0] * com_vars[0] + k2_var * h2_rp_var + s2_vars[0] * h3_rp_var,
+    );
+
+    // Bits 1..L-1
+    for j in 1..L {
+        // Opening: Com[j] = b[j]*H1 + s_com[j]*H3
+        statement.append_equation(
+            com_vars[j],
+            b_vars[j] * h1_rp_var + s_com_vars[j] * h3_rp_var,
+        );
+        // Binary (reformulated): Com[j] = b[j]*Com[j] + s2[j]*H3
+        statement.append_equation(
+            com_vars[j],
+            b_vars[j] * com_vars[j] + s2_vars[j] * h3_rp_var,
+        );
+    }
+
+    // --- Consistency equation: Com_total = c*H1 + kstar*H2 + Σ s_com[j]*(H3*2^j) ---
+    let [h1_con_var, h2_con_var, com_total_var] = statement.allocate_elements::<3>();
+    statement.set_elements([
+        (h1_con_var, h1),
+        (h2_con_var, h2),
+        (com_total_var, com_total),
+    ]);
+
+    let mut consistency_rhs = c_var * h1_con_var + kstar_var * h2_con_var;
+    for j in 0..L {
+        let coeff_h3_var = statement.allocate_element_with(h3 * Scalar::from(2u128.pow(j as u32)));
+        consistency_rhs = consistency_rhs + s_com_vars[j] * coeff_h3_var;
+    }
+    statement.append_equation(com_total_var, consistency_rhs);
+
+    statement
 }
 
 impl PrivateKey {
@@ -764,58 +879,33 @@ impl PrivateKey {
             return Err(Error::IdentityPointError);
         }
 
+        // Compute image values
         let a_bar = spend_proof.a_prime * self.x;
-        let big_h1 = RistrettoPoint::generator() + &params.h2 * &spend_proof.k;
-        let a1 = spend_proof.a_prime * spend_proof.e_bar
-            + spend_proof.b_bar * spend_proof.r2_bar
-            + a_bar * spend_proof.gamma.neg();
-        let a2 = spend_proof.b_bar * spend_proof.r3_bar
-            + &params.h1 * &spend_proof.c_bar
-            + &params.h3 * &spend_proof.r_bar
-            + big_h1 * spend_proof.gamma.neg();
-        let mut gamma01 = [Scalar::ZERO; L];
-        gamma01[0] = spend_proof.gamma - spend_proof.gamma0[0];
-        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
-        big_c[0][0] = spend_proof.com[0];
-        big_c[0][1] = spend_proof.com[0] - params.h1.basepoint();
-        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-        big_c_prime[0][0] = &params.h2 * &spend_proof.w00 + &params.h3 * &spend_proof.z[0][0]
-            - big_c[0][0] * spend_proof.gamma0[0];
-        big_c_prime[0][1] = &params.h2 * &spend_proof.w01 + &params.h3 * &spend_proof.z[0][1]
-            - big_c[0][1] * gamma01[0];
-        for j in 1..L {
-            gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
-            big_c[j][0] = spend_proof.com[j];
-            big_c[j][1] = spend_proof.com[j] - params.h1.basepoint();
-            big_c_prime[j][0] =
-                &params.h3 * &spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
-            big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
-        }
-
+        let h1_prime = RistrettoPoint::generator() + &params.h2 * &spend_proof.k;
         let k_prime = spend_proof
             .com
             .iter()
             .enumerate()
-            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
+            .map(|(j, com)| com * Scalar::from(2u128.pow(j as u32)))
             .fold(RistrettoPoint::identity(), |a, b| a + b);
-        let com_ = &params.h1 * &spend_proof.s + k_prime;
-        let big_c = &params.h1 * &spend_proof.c_bar.neg()
-            + &params.h2 * &spend_proof.k_bar
-            + &params.h3 * &spend_proof.s_bar
-            - com_ * spend_proof.gamma;
+        let com_total = &params.h1 * &spend_proof.s + k_prime;
 
-        let gamma = Transcript::with(params, b"spend", |transcript| {
-            transcript.add_scalar(&spend_proof.k);
-            transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
-            transcript.add_elements([&a1, &a2].into_iter());
-            transcript.add_elements(spend_proof.com.iter());
-            for c_prime in big_c_prime.iter() {
-                transcript.add_elements(c_prime.iter());
-            }
-            transcript.add_element(&big_c);
-        });
+        // Build the same spend relation as the prover
+        let statement = build_spend_relation(
+            params,
+            spend_proof.a_prime,
+            spend_proof.b_bar,
+            &spend_proof.com,
+            a_bar,
+            h1_prime,
+            com_total,
+        );
 
-        if gamma != spend_proof.gamma {
+        // Verify NIZK
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"spend");
+        let nizk = statement.into_nizk(&session_id).unwrap();
+        if nizk.verify_batchable(&spend_proof.pok).is_err() {
             return Err(Error::InvalidClientSpendProof);
         }
 
@@ -947,13 +1037,9 @@ impl CreditToken {
         s: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> (SpendProof, PreRefund) {
+        // 1. Randomize the signature
         let r1 = Scalar::random(&mut rng);
         let r2 = Scalar::random(&mut rng);
-        let c_prime = Scalar::random(&mut rng);
-        let r_prime = Scalar::random(&mut rng);
-        let e_prime = Scalar::random(&mut rng);
-        let r2_prime = Scalar::random(&mut rng);
-        let r3_prime = Scalar::random(&mut rng);
 
         let b = RistrettoPoint::generator()
             + &params.h1 * &self.c
@@ -962,141 +1048,72 @@ impl CreditToken {
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
         let r3 = r1.invert();
-        let a1 = a_prime * e_prime + b_bar * r2_prime;
-        let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
 
-        let i = bits_of(self.c - s);
+        // 2. Binary decompose remaining balance
+        let m = self.c - s;
+        let bits = bits_of(m);
 
-        let k_star = Scalar::random(&mut rng);
-        let s_i: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
+        // 3. Generate commitment randomizers
+        let kstar = Scalar::random(&mut rng);
+        let s_com: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
+
+        // 4. Compute commitments
         let mut com = [RistrettoPoint::identity(); L];
-        com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &s_i[0];
+        com[0] = &params.h1 * &bits[0] + &params.h2 * &kstar + &params.h3 * &s_com[0];
         for j in 1..L {
-            com[j] = &params.h1 * &i[j] + &params.h3 * &s_i[j];
-        }
-        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
-        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-
-        big_c[0][0] = com[0];
-        big_c[0][1] = com[0] - params.h1.basepoint();
-        let k0_prime = Scalar::random(&mut rng);
-        let mut s_i_prime = [Scalar::ZERO; L];
-        for s_prime in s_i_prime.iter_mut() {
-            *s_prime = Scalar::random(&mut rng);
-        }
-        let mut gamma_i = [Scalar::ZERO; L];
-        for gamma in gamma_i.iter_mut() {
-            *gamma = Scalar::random(&mut rng);
-        }
-        let w0 = Scalar::random(&mut rng);
-        let mut z = [Scalar::ZERO; L];
-        for z_val in z.iter_mut() {
-            *z_val = Scalar::random(&mut rng);
+            com[j] = &params.h1 * &bits[j] + &params.h3 * &s_com[j];
         }
 
-        big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][0] * gamma_i[0]),
-            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-
-        big_c_prime[0][1] = RistrettoPoint::conditional_select(
-            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
-            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][1] * gamma_i[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-
-        for j in 1..L {
-            big_c[j][0] = com[j];
-            big_c[j][1] = com[j] - params.h1.basepoint();
-
-            big_c_prime[j][0] = RistrettoPoint::conditional_select(
-                &(&params.h3 * &z[j] - big_c[j][0] * gamma_i[j]),
-                &(&params.h3 * &s_i_prime[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-            big_c_prime[j][1] = RistrettoPoint::conditional_select(
-                &(&params.h3 * &s_i_prime[j]),
-                &(&params.h3 * &z[j] - big_c[j][1] * gamma_i[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-        }
-        let r_star = s_i
+        // 5. Compute derived public values (image elements)
+        let a_bar = b_bar * r2 - a_prime * self.e; // Equivalent to a_prime * sk
+        let h1_prime = RistrettoPoint::generator() + &params.h2 * &self.k;
+        let k_prime = com
             .iter()
             .enumerate()
-            .map(|(i, si)| si * Scalar::from(2u128.pow(i as u32)))
-            .fold(Scalar::ZERO, |x, y| x + y);
-        let k_prime = Scalar::random(&mut rng);
-        let s_prime = Scalar::random(&mut rng);
-        let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &s_prime;
+            .map(|(j, c)| c * Scalar::from(2u128.pow(j as u32)))
+            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let com_total = &params.h1 * &s + k_prime;
 
-        let gamma = Transcript::with(params, b"spend", |transcript| {
-            transcript.add_scalar(&self.k);
-            transcript.add_elements([&a_prime, &b_bar].into_iter());
-            transcript.add_elements([&a1, &a2].into_iter());
-            transcript.add_elements(com.iter());
-            for c_prime in big_c_prime.iter() {
-                transcript.add_elements(c_prime.iter());
-            }
-            transcript.add_element(&c_);
-        });
+        // 6. Compute derived witness values
+        // Binary constraint reformulation: s2[j] = (1-b[j])*s_com[j], k2 = (1-b[0])*kstar
+        let s2: Vec<Scalar> = (0..L).map(|j| (Scalar::ONE - bits[j]) * s_com[j]).collect();
+        let k2 = (Scalar::ONE - bits[0]) * kstar;
 
-        let e_bar = gamma.neg() * self.e + e_prime;
-        let r2_bar = gamma * r2 + r2_prime;
-        let r3_bar = gamma * r3 + r3_prime;
-        let c_bar = gamma.neg() * self.c + c_prime;
-        let r_bar = gamma.neg() * self.r + r_prime;
-        let mut gamma00 = [Scalar::ZERO; L];
-        gamma00[0] = Scalar::conditional_select(
-            &gamma_i[0],
-            &(gamma - gamma_i[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        let w00 = Scalar::conditional_select(
-            &w0,
-            &(gamma00[0] * k_star + k0_prime),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        let w01 = Scalar::conditional_select(
-            &((gamma - gamma00[0]) * k_star + k0_prime),
-            &w0,
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        let mut z00 = [[Scalar::ZERO; 2]; L];
-        z00[0][0] = Scalar::conditional_select(
-            &z[0],
-            &(gamma00[0] * s_i[0] + s_i_prime[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        z00[0][1] = Scalar::conditional_select(
-            &((gamma - gamma00[0]) * s_i[0] + s_i_prime[0]),
-            &z[0],
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        for j in 1..L {
-            gamma00[j] = Scalar::conditional_select(
-                &gamma_i[j],
-                &(gamma - gamma_i[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-            z00[j][0] = Scalar::conditional_select(
-                &z[j],
-                &(gamma00[j] * s_i[j] + s_i_prime[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-            z00[j][1] = Scalar::conditional_select(
-                &((gamma - gamma00[j]) * s_i[j] + s_i_prime[j]),
-                &z[j],
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-        }
-        let k_bar = gamma * k_star + k_prime;
-        let s_bar = gamma * r_star + s_prime;
+        // 7. Build spend relation (all image values pre-computed)
+        let statement =
+            build_spend_relation(params, a_prime, b_bar, &com, a_bar, h1_prime, com_total);
+
+        // 8. Build witness vector in allocation order:
+        // [e, r2, r3, c, r, b[0..L-1], s_com[0..L-1], s2[0..L-1], kstar, k2]
+        let mut witness = Vec::with_capacity(3 * L + 7);
+        witness.push(self.e);
+        witness.push(r2);
+        witness.push(r3);
+        witness.push(self.c);
+        witness.push(self.r);
+        witness.extend_from_slice(&bits);
+        witness.extend_from_slice(&s_com);
+        witness.extend_from_slice(&s2);
+        witness.push(kstar);
+        witness.push(k2);
+
+        // 9. Create NIZK proof
+        let mut session_id = params.domain_separator.clone();
+        session_id.extend_from_slice(b"spend");
+        let nizk = statement.into_nizk(&session_id).unwrap();
+        let pok = nizk.prove_batchable(&witness, &mut rng).unwrap();
+
+        // 10. Compute r_star for PreRefund
+        let r_star = s_com
+            .iter()
+            .enumerate()
+            .map(|(j, sj)| sj * Scalar::from(2u128.pow(j as u32)))
+            .fold(Scalar::ZERO, |acc, x| acc + x);
 
         let prerefund = PreRefund {
-            k: k_star,
+            k: kstar,
             r: r_star,
-            m: self.c - s,
+            m,
         };
 
         (
@@ -1106,18 +1123,7 @@ impl CreditToken {
                 a_prime,
                 b_bar,
                 com,
-                gamma,
-                e_bar,
-                r2_bar,
-                r3_bar,
-                c_bar,
-                r_bar,
-                w00,
-                w01,
-                gamma0: gamma00,
-                z: z00,
-                k_bar,
-                s_bar,
+                pok,
             },
             prerefund,
         )
@@ -1171,7 +1177,7 @@ impl PreRefund {
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
     /// # let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();

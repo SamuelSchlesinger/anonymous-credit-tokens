@@ -45,7 +45,6 @@ name = "anonymous-credit-tokens"
 version = "0.2.1"
 dependencies = [
  "blake3",
- "ciborium",
  "criterion",
  "curve25519-dalek",
  "group",

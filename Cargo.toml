@@ -7,7 +7,6 @@ license-file = "LICENSE"
 repository = "https://github.com/SamuelSchlesinger/anonymous-credit-tokens"
 
 [dependencies]
-ciborium = "0.2"
 blake3 = "1.8.1"
 curve25519-dalek = { version = "4.1.3", features = ["group", "ff", "digest", "zeroize", "precomputed-tables"] }
 group = "0.13.0"

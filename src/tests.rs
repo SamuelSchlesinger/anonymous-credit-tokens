@@ -628,7 +628,11 @@ fn invalid_proof_verification() {
     let tampered_value = spend_value + thread_rng().gen_range(1..10) as u64;
     let tampered_proof = SpendProof {
         s: Scalar::from(tampered_value), // Changed to a different amount
-        ..spend_proof
+        k: spend_proof.k,
+        a_prime: spend_proof.a_prime,
+        b_bar: spend_proof.b_bar,
+        com: spend_proof.com,
+        pok: spend_proof.pok.clone(),
     };
 
     // The issuer should reject the tampered proof
@@ -741,36 +745,6 @@ fn test_params_generation_deterministic() {
     assert_ne!(
         params1.h1.basepoint().compress(),
         params3.h1.basepoint().compress()
-    );
-}
-
-#[test]
-fn transcript_add_elements_test() {
-    use curve25519_dalek::RistrettoPoint;
-
-    // Create points to add to the transcript
-    let point1 = RistrettoPoint::generator();
-    let point2 = RistrettoPoint::generator() * Scalar::from(2u64);
-    let point3 = RistrettoPoint::generator() * Scalar::from(3u64);
-
-    let params = Params::random(OsRng);
-
-    // Create a transcript and add elements using add_elements
-    let mut transcript1 = Transcript::new(&params, b"test");
-    transcript1.add_elements([&point1, &point2, &point3].into_iter());
-    let challenge1 = transcript1.challenge();
-
-    // Create another transcript and add the same elements one by one
-    let mut transcript2 = Transcript::new(&params, b"test");
-    transcript2.add_element(&point1);
-    transcript2.add_element(&point2);
-    transcript2.add_element(&point3);
-    let challenge2 = transcript2.challenge();
-
-    // The challenges should be identical
-    assert_eq!(
-        challenge1, challenge2,
-        "add_elements should produce the same result as multiple add_element calls"
     );
 }
 
@@ -1045,45 +1019,6 @@ fn test_binary_decomposition_max_value() {
         final_token.c,
         Scalar::ZERO,
         "Final token should have zero balance"
-    );
-}
-
-#[test]
-fn test_transcript_with_empty_input() {
-    // Test the transcript system with empty input
-    let label = b"empty_test";
-
-    let params = Params::random(OsRng);
-
-    // Create a transcript with no elements
-    let gamma = Transcript::with(&params, label, |_transcript| {
-        // No elements added
-    });
-
-    // The challenge should still be a valid random-looking scalar
-    assert_ne!(gamma, Scalar::ZERO, "Challenge should not be zero");
-    assert_ne!(gamma, Scalar::ONE, "Challenge should not be one");
-
-    // Create another transcript with the same empty input
-    let gamma2 = Transcript::with(&params, label, |_transcript| {
-        // No elements added
-    });
-
-    // The challenges should be the same (deterministic based on label)
-    assert_eq!(
-        gamma, gamma2,
-        "Challenges with same empty input should match"
-    );
-
-    // Create a transcript with a different label
-    let gamma3 = Transcript::with(&params, b"different_label", |_transcript| {
-        // No elements added
-    });
-
-    // The challenge should be different from the first one
-    assert_ne!(
-        gamma, gamma3,
-        "Challenges with different labels should not match"
     );
 }
 
@@ -1421,17 +1356,17 @@ proptest! {
     }
 }
 
-// Property: CBOR serialization round-trip for all types
+// Property: Encoding round-trip for IssuanceRequest
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_issuance_request(
+    fn prop_encoding_round_trip_issuance_request(
         big_k in point_strategy(),
         pok in vec_strategy(),
     ) {
         let request = IssuanceRequest { big_k, pok};
-        let bytes = request.to_cbor().unwrap();
-        let decoded = IssuanceRequest::from_cbor(&bytes).unwrap();
+        let bytes = request.to_bytes();
+        let decoded = IssuanceRequest::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(request.big_k, decoded.big_k);
         prop_assert_eq!(&request.pok, &decoded.pok);
@@ -1441,9 +1376,9 @@ proptest! {
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_credit_token(token in credit_token_strategy()) {
-        let bytes = token.to_cbor().unwrap();
-        let decoded = CreditToken::from_cbor(&bytes).unwrap();
+    fn prop_encoding_round_trip_credit_token(token in credit_token_strategy()) {
+        let bytes = token.to_bytes();
+        let decoded = CreditToken::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(token.a, decoded.a);
         prop_assert_eq!(token.e, decoded.e);
@@ -1456,9 +1391,9 @@ proptest! {
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_private_key(key in private_key_strategy()) {
-        let bytes = key.to_cbor().unwrap();
-        let decoded = PrivateKey::from_cbor(&bytes).unwrap();
+    fn prop_encoding_round_trip_private_key(key in private_key_strategy()) {
+        let bytes = key.to_bytes();
+        let decoded = PrivateKey::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(key.x, decoded.x);
         prop_assert_eq!(key.public.w, decoded.public.w);
@@ -1568,33 +1503,6 @@ proptest! {
     }
 }
 
-// Property: Transcript determinism
-proptest! {
-    #![proptest_config(fast_config())]
-    #[test]
-    fn prop_transcript_determinism(
-        label in prop::collection::vec(any::<u8>(), 1..32),
-        points in prop::collection::vec(point_strategy(), 1..5),
-    ) {
-        let params = test_params();
-        // Create two transcripts with same inputs
-        let challenge1 = Transcript::with(&params, &label, |transcript| {
-            for point in &points {
-                transcript.add_element(point);
-            }
-        });
-
-        let challenge2 = Transcript::with(&params, &label, |transcript| {
-            for point in &points {
-                transcript.add_element(point);
-            }
-        });
-
-        // Challenges should be identical
-        prop_assert_eq!(challenge1, challenge2);
-    }
-}
-
 // Property: Zero amounts are handled correctly
 proptest! {
     #![proptest_config(fast_config())]
@@ -1654,7 +1562,6 @@ proptest! {
     fn prop_invalid_proofs_rejected(
         initial_amount in 10u64..1000,
         spend_amount in 1u64..10,
-        tampering_scalar in scalar_strategy(),
         private_key in private_key_strategy(),
         pre_issuance in pre_issuance_strategy(),
     ) {
@@ -1670,8 +1577,10 @@ proptest! {
 
         let (mut spend_proof, _) = token.prove_spend(&params, spend_credits, OsRng);
 
-        // Tamper with the proof
-        spend_proof.gamma = spend_proof.gamma + tampering_scalar;
+        // Tamper with the proof by modifying the pok bytes
+        if !spend_proof.pok.is_empty() {
+            spend_proof.pok[0] ^= 0xFF;
+        }
 
         // Refund should fail
         let refund_result = private_key.refund(&params, &spend_proof, OsRng);
@@ -1743,19 +1652,19 @@ proptest! {
     }
 }
 
-// Additional CBOR round-trip tests
+// Additional encoding round-trip tests
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_issuance_response(
+    fn prop_encoding_round_trip_issuance_response(
         a in point_strategy(),
         e in scalar_strategy(),
         c in scalar_strategy(),
         pok in vec_strategy(),
     ) {
         let response = IssuanceResponse { a, e, c, pok };
-        let bytes = response.to_cbor().unwrap();
-        let decoded = IssuanceResponse::from_cbor(&bytes).unwrap();
+        let bytes = response.to_bytes();
+        let decoded = IssuanceResponse::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(response.a, decoded.a);
         prop_assert_eq!(response.e, decoded.e);
@@ -1767,14 +1676,14 @@ proptest! {
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_refund(
+    fn prop_encoding_round_trip_refund(
         a in point_strategy(),
         e in scalar_strategy(),
         pok in vec_strategy(),
     ) {
         let refund = Refund { a, e, pok };
-        let bytes = refund.to_cbor().unwrap();
-        let decoded = Refund::from_cbor(&bytes).unwrap();
+        let bytes = refund.to_bytes();
+        let decoded = Refund::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(refund.a, decoded.a);
         prop_assert_eq!(refund.e, decoded.e);
@@ -1785,9 +1694,9 @@ proptest! {
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_pre_issuance(pre_issuance in pre_issuance_strategy()) {
-        let bytes = pre_issuance.to_cbor().unwrap();
-        let decoded = PreIssuance::from_cbor(&bytes).unwrap();
+    fn prop_encoding_round_trip_pre_issuance(pre_issuance in pre_issuance_strategy()) {
+        let bytes = pre_issuance.to_bytes();
+        let decoded = PreIssuance::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(pre_issuance.r, decoded.r);
         prop_assert_eq!(pre_issuance.k, decoded.k);
@@ -1797,14 +1706,14 @@ proptest! {
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_pre_refund(
+    fn prop_encoding_round_trip_pre_refund(
         r in scalar_strategy(),
         k in scalar_strategy(),
         m in scalar_strategy(),
     ) {
         let pre_refund = PreRefund { r, k, m };
-        let bytes = pre_refund.to_cbor().unwrap();
-        let decoded = PreRefund::from_cbor(&bytes).unwrap();
+        let bytes = pre_refund.to_bytes();
+        let decoded = PreRefund::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(pre_refund.r, decoded.r);
         prop_assert_eq!(pre_refund.k, decoded.k);
@@ -1815,16 +1724,16 @@ proptest! {
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_round_trip_public_key(w in point_strategy()) {
+    fn prop_encoding_round_trip_public_key(w in point_strategy()) {
         let public_key = PublicKey { w };
-        let bytes = public_key.to_cbor().unwrap();
-        let decoded = PublicKey::from_cbor(&bytes).unwrap();
+        let bytes = public_key.to_bytes();
+        let decoded = PublicKey::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(public_key.w, decoded.w);
     }
 }
 
-// Property: SpendProof generation is deterministic given fixed randomness
+// Property: SpendProof generation has valid structure
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
@@ -1853,10 +1762,9 @@ proptest! {
         prop_assert_eq!(spend_proof.s, spend_credits, "Spend amount should match");
         prop_assert_ne!(spend_proof.a_prime, RistrettoPoint::identity(), "a_prime should not be identity");
 
-        // Verify the com array has correct length
+        // Verify the com array has correct length and pok is non-empty
         prop_assert_eq!(spend_proof.com.len(), L);
-        prop_assert_eq!(spend_proof.gamma0.len(), L);
-        prop_assert_eq!(spend_proof.z.len(), L);
+        prop_assert!(!spend_proof.pok.is_empty(), "pok should not be empty");
     }
 }
 
@@ -2040,11 +1948,11 @@ proptest! {
     }
 }
 
-// Property: Challenge values affect proof generation
+// Property: Different tokens produce different proofs
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_challenge_affects_proofs(
+    fn prop_different_tokens_different_proofs(
         initial_amount in 10u64..100,
         spend_amount in 1u64..10,
         private_key in private_key_strategy(),
@@ -2075,9 +1983,8 @@ proptest! {
         let (proof2, _) = token2.prove_spend(&params, spend_credits, OsRng);
 
         // Proofs should be different despite same spend amount
-        prop_assert_ne!(proof1.gamma, proof2.gamma);
-        prop_assert_ne!(proof1.k_bar, proof2.k_bar);
-        prop_assert_ne!(proof1.r_bar, proof2.r_bar);
+        prop_assert_ne!(&proof1.pok, &proof2.pok);
+        prop_assert_ne!(proof1.k, proof2.k);
     }
 }
 
@@ -2179,23 +2086,23 @@ proptest! {
     }
 }
 
-// Property: CBOR encoding is canonical
+// Property: Encoding is canonical (encode-decode-encode roundtrip produces same bytes)
 proptest! {
     #![proptest_config(fast_config())]
     #[test]
-    fn prop_cbor_encoding_canonical(
+    fn prop_encoding_canonical(
         token in credit_token_strategy(),
     ) {
         // Encode twice
-        let bytes1 = token.to_cbor().unwrap();
-        let bytes2 = token.to_cbor().unwrap();
+        let bytes1 = token.to_bytes();
+        let bytes2 = token.to_bytes();
 
         // Should produce identical bytes (canonical encoding)
         prop_assert_eq!(&bytes1, &bytes2);
 
         // Decode and re-encode
-        let decoded = CreditToken::from_cbor(&bytes1).unwrap();
-        let bytes3 = decoded.to_cbor().unwrap();
+        let decoded = CreditToken::from_bytes(&bytes1).unwrap();
+        let bytes3 = decoded.to_bytes();
 
         // Should still be identical
         prop_assert_eq!(&bytes1, &bytes3);
