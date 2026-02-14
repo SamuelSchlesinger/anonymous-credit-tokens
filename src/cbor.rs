@@ -176,7 +176,7 @@ impl IssuanceRequest {
                         Value::Integer(i) if i == 2.into() => { set_field!(gamma, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 3.into() => { set_field!(k_bar, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 4.into() => { set_field!(r_bar, decode_scalar(&v)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -241,7 +241,7 @@ impl IssuanceResponse {
                         Value::Integer(i) if i == 4.into() => { set_field!(z, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 5.into() => { set_field!(c, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 6.into() => { set_field!(ctx, decode_scalar(&v)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -447,7 +447,7 @@ impl<const L: usize> SpendProof<L> {
                         Value::Integer(i) if i == 16.into() => { set_field!(k_bar, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 17.into() => { set_field!(s_bar, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 18.into() => { set_field!(ctx, decode_scalar(&val)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -522,7 +522,7 @@ impl Refund {
                         Value::Integer(i) if i == 3.into() => { set_field!(gamma, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 4.into() => { set_field!(z, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 5.into() => { set_field!(t, decode_scalar(&v)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -572,7 +572,7 @@ impl PrivateKey {
                     match k {
                         Value::Integer(i) if i == 1.into() => { set_field!(x, decode_scalar(&v)?); }
                         Value::Integer(i) if i == 2.into() => { set_field!(w, decode_point(&v)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -651,7 +651,7 @@ impl PreIssuance {
                     match key {
                         Value::Integer(i) if i == 1.into() => { set_field!(r, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 2.into() => { set_field!(k, decode_scalar(&val)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -714,7 +714,7 @@ impl CreditToken {
                         Value::Integer(i) if i == 4.into() => { set_field!(r, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 5.into() => { set_field!(c, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 6.into() => { set_field!(ctx, decode_scalar(&val)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -773,7 +773,7 @@ impl PreRefund {
                         Value::Integer(i) if i == 2.into() => { set_field!(k, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 3.into() => { set_field!(m, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 4.into() => { set_field!(ctx, decode_scalar(&val)?); }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 
@@ -853,7 +853,7 @@ impl ErrorMsg {
                                 return Err(CborError::InvalidStructure("expected text for error_message"));
                             }
                         }
-                        _ => {}
+                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
 

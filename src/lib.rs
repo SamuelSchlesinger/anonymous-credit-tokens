@@ -90,6 +90,22 @@
 //! - **Credit Token**: A cryptographic token representing a certain amount of credits
 //! - **Nullifier**: A unique identifier used to prevent double-spending
 //!
+//! ## Privacy Considerations
+//!
+//! - **Request Context (`ctx`)**: The `ctx` value is revealed in the clear during every
+//!   spend operation and persists unchanged across the entire issuance-spend-refund chain.
+//!   If each issuance uses a distinct `ctx` (e.g., a per-user or per-session identifier),
+//!   then every subsequent spend and refund becomes linkable back to that original issuance
+//!   and to each other, completely defeating the anonymity guarantees of the scheme. To
+//!   preserve unlinkability, assign the same `ctx` to all clients within a given context
+//!   (e.g., per-service or per-epoch), or use `Scalar::ZERO` when context binding is not
+//!   needed. See the `ctx` parameter on [`PrivateKey::issue`] for more details.
+//!
+//! - **Nullifier Storage**: The issuer **must** record every nullifier from verified spend
+//!   proofs and reject any proof whose nullifier has been seen before. Failure to do so
+//!   allows double-spending. Nullifier storage must be persistent and the record-then-refund
+//!   sequence must be atomic to prevent race conditions.
+//!
 //! ## Quick Start
 //!
 //! ```
@@ -313,6 +329,19 @@ impl Params {
     /// );
     /// ```
     pub fn new(organization: &str, service: &str, deployment_id: &str, version: &str) -> Self {
+        // Validate that no component contains a colon, which would create ambiguous
+        // domain separators and could cause different deployments to share parameters.
+        assert!(
+            !organization.contains(':'),
+            "organization must not contain ':'"
+        );
+        assert!(!service.contains(':'), "service must not contain ':'");
+        assert!(
+            !deployment_id.contains(':'),
+            "deployment_id must not contain ':'"
+        );
+        assert!(!version.contains(':'), "version must not contain ':'");
+
         // Construct the structured domain separator
         let domain_separator = format!(
             "ACT-v1:{}:{}:{}:{}",
@@ -567,7 +596,7 @@ impl PreIssuance {
         request: &IssuanceRequest,
         response: &IssuanceResponse,
     ) -> Result<CreditToken, ErrorCode> {
-        const { assert!(L <= 128, "L must be <= 128") };
+        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
 
         // Validate received point is not identity (spec Section 5.2)
         if response.a == RistrettoPoint::identity() {
@@ -694,7 +723,7 @@ impl PrivateKey {
         ctx: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, ErrorCode> {
-        const { assert!(L <= 128, "L must be <= 128") };
+        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
 
         // Validate credit amount is within range (0 < c < 2^L)
         if c == Scalar::ZERO || !scalar_fits_in_bits::<L>(&c) {
@@ -798,7 +827,7 @@ pub struct SpendProof<const L: usize> {
 }
 
 impl<const L: usize> SpendProof<L> {
-    const _ASSERT: () = assert!(L <= 128, "L must be <= 128");
+    const _ASSERT: () = assert!(L > 0 && L <= 128, "L must be in 1..=128");
 
     /// Returns the nullifier associated with this spend.
     ///
@@ -919,7 +948,7 @@ impl PrivateKey {
         t: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, ErrorCode> {
-        const { assert!(L <= 128, "L must be <= 128") };
+        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
 
         // Validate A' is not identity (spec Section 3.5.2, step 3)
         if spend_proof.a_prime == RistrettoPoint::identity() {
@@ -947,6 +976,7 @@ impl PrivateKey {
             - com0 * spend_proof.gamma0[0];
         big_c_prime[0][1] = &params.h2 * &spend_proof.w01 + &params.h3 * &spend_proof.z[0][1]
             - com0_minus_h1 * gamma01_0;
+        #[allow(clippy::needless_range_loop)] // indexes big_c_prime, com, gamma0, z simultaneously
         for j in 1..L {
             let com_j = spend_proof.com[j];
             let com_j_minus_h1 = com_j - params.h1.basepoint();
@@ -1054,17 +1084,18 @@ fn powers_of_two<const L: usize>() -> [Scalar; L] {
     result
 }
 
-/// Checks whether all bits at positions >= L are zero in the scalar.
+/// Checks whether all bits at positions >= L are zero in the scalar (constant-time).
 ///
 /// This validates that a scalar value fits within L bits, i.e., is in the range [0, 2^L).
+/// The check is performed in constant time to avoid leaking information about the scalar
+/// through timing side channels.
 fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
     let bytes = s.as_bytes();
+    let mut any_high_bit = 0u8;
     for i in L..256 {
-        if (bytes[i / 8] >> (i % 8)) & 1 != 0 {
-            return false;
-        }
+        any_high_bit |= (bytes[i / 8] >> (i % 8)) & 1;
     }
-    true
+    bool::from(any_high_bit.ct_eq(&0))
 }
 
 /// Decomposes a scalar value into its binary representation.
@@ -1155,6 +1186,8 @@ impl CreditToken {
         s: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<(SpendProof<L>, PreRefund), ErrorCode> {
+        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
+
         // Validate spend amount fits in L bits
         if !scalar_fits_in_bits::<L>(&s) {
             return Err(ErrorCode::InvalidAmount);
@@ -1163,10 +1196,9 @@ impl CreditToken {
         if !scalar_fits_in_bits::<L>(&self.c) {
             return Err(ErrorCode::InvalidAmount);
         }
-        // Validate s <= c (can't spend more than the balance)
-        let s_val = scalar_to_u128(&s).ok_or(ErrorCode::InvalidAmount)?;
-        let c_val = scalar_to_u128(&self.c).ok_or(ErrorCode::InvalidAmount)?;
-        if s_val > c_val {
+        // Constant-time check: s <= c iff (c - s) fits in L bits.
+        // If s > c in the integers, c - s wraps modulo the group order to a ~252-bit value.
+        if !scalar_fits_in_bits::<L>(&(self.c - s)) {
             return Err(ErrorCode::InvalidAmount);
         }
 
@@ -1464,6 +1496,8 @@ impl PreRefund {
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, ErrorCode> {
+        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
+
         // Validate received point is not identity (spec Section 5.2)
         if refund.a == RistrettoPoint::identity() {
             return Err(ErrorCode::InvalidProof);
@@ -1547,6 +1581,7 @@ impl PreRefund {
 /// assert!(scalar_to_credit::<8>(&big).is_err()); // 1000 >= 2^8
 /// ```
 pub fn scalar_to_credit<const L: usize>(scalar: &Scalar) -> Result<u128, ErrorCode> {
+    const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
     if !scalar_fits_in_bits::<L>(scalar) {
         return Err(ErrorCode::InvalidAmount);
     }
@@ -1580,6 +1615,7 @@ pub fn scalar_to_credit<const L: usize>(scalar: &Scalar) -> Result<u128, ErrorCo
 /// let zero = credit_to_scalar::<128>(0).unwrap(); // valid for spend amounts
 /// ```
 pub fn credit_to_scalar<const L: usize>(amount: u128) -> Result<Scalar, ErrorCode> {
+    const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
     if L < 128 && amount >= (1u128 << L) {
         return Err(ErrorCode::InvalidAmount);
     }
