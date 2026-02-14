@@ -108,7 +108,7 @@
 //!     .issue::<128>(&params, &request, Scalar::from(100u64), Scalar::ZERO, OsRng)
 //!     .unwrap();
 //! let token = preissuance
-//!     .to_credit_token(&params, private_key.public(), &request, &response)
+//!     .to_credit_token::<128>(&params, private_key.public(), &request, &response)
 //!     .unwrap();
 //!
 //! // Spending: client spends 30 credits
@@ -553,23 +553,30 @@ impl PreIssuance {
     /// # let credit_amount = Scalar::from(20u128);
     /// # let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// #
-    /// let credit_token = pre_issuance.to_credit_token(
+    /// let credit_token = pre_issuance.to_credit_token::<128>(
     ///     &params,
     ///     public_key,
     ///     &request,
     ///     &response
     /// ).unwrap();
     /// ```
-    pub fn to_credit_token(
+    pub fn to_credit_token<const L: usize>(
         &self,
         params: &Params,
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
     ) -> Result<CreditToken, ErrorCode> {
+        const { assert!(L <= 128, "L must be <= 128") };
+
         // Validate received point is not identity (spec Section 5.2)
         if response.a == RistrettoPoint::identity() {
             return Err(ErrorCode::InvalidProof);
+        }
+
+        // Validate credit amount fits in L bits (defense-in-depth)
+        if !scalar_fits_in_bits::<L>(&response.c) {
+            return Err(ErrorCode::InvalidAmount);
         }
 
         // Reconstruct the signature base points for verification
@@ -687,6 +694,8 @@ impl PrivateKey {
         ctx: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, ErrorCode> {
+        const { assert!(L <= 128, "L must be <= 128") };
+
         // Validate credit amount is within range (0 < c < 2^L)
         if c == Scalar::ZERO || !scalar_fits_in_bits::<L>(&c) {
             return Err(ErrorCode::InvalidAmount);
@@ -892,7 +901,7 @@ impl PrivateKey {
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, private_key.public(), &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     /// #
@@ -910,6 +919,8 @@ impl PrivateKey {
         t: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, ErrorCode> {
+        const { assert!(L <= 128, "L must be <= 128") };
+
         // Validate A' is not identity (spec Section 3.5.2, step 3)
         if spend_proof.a_prime == RistrettoPoint::identity() {
             return Err(ErrorCode::InvalidProof);
@@ -971,6 +982,9 @@ impl PrivateKey {
 
         // Validate partial return amount
         if !scalar_fits_in_bits::<L>(&t) {
+            return Err(ErrorCode::InvalidAmount);
+        }
+        if !scalar_fits_in_bits::<L>(&spend_proof.s) {
             return Err(ErrorCode::InvalidAmount);
         }
         let t_val = scalar_to_u128(&t).ok_or(ErrorCode::InvalidAmount)?;
@@ -1127,7 +1141,7 @@ impl CreditToken {
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, private_key.public(), &request, &response).unwrap();
     /// #
     /// // Spend 10 credits (where 10 <= token balance < 2^128)
     /// let spend_amount = Scalar::from(10u128);
@@ -1430,7 +1444,7 @@ impl PreRefund {
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, public_key, &request, &response).unwrap();
     /// # let spend_amount = Scalar::from(10u128);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     /// # let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
@@ -1477,13 +1491,25 @@ impl PreRefund {
             return Err(ErrorCode::InvalidProof);
         }
 
+        // Validate partial return amount fits in L bits (defense-in-depth)
+        if !scalar_fits_in_bits::<L>(&refund.t) {
+            return Err(ErrorCode::InvalidAmount);
+        }
+
+        let new_balance = self.m + refund.t;
+
+        // Validate resulting balance fits in L bits (defense-in-depth)
+        if !scalar_fits_in_bits::<L>(&new_balance) {
+            return Err(ErrorCode::InvalidAmount);
+        }
+
         // The client now has a new credit token
         Ok(CreditToken {
             a: refund.a,
             e: refund.e,
             k: self.k,
             r: self.r,
-            c: self.m + refund.t,
+            c: new_balance,
             ctx: self.ctx,
         })
     }

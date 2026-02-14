@@ -97,7 +97,7 @@ fn generate_test_vectors() {
     let response_cbor = response.to_cbor().unwrap();
 
     let token = preissuance
-        .to_credit_token(&params, private_key.public(), &request, &response)
+        .to_credit_token::<8>(&params, private_key.public(), &request, &response)
         .unwrap();
     let token_cbor = token.to_cbor().unwrap();
 

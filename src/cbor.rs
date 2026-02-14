@@ -25,6 +25,10 @@ use crate::{
 use ciborium::value::Value;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 
+/// Maximum CBOR input size for protocol messages (64 KiB).
+/// This prevents memory amplification attacks from crafted CBOR payloads.
+const MAX_CBOR_INPUT_SIZE: usize = 65536;
+
 /// Error type for CBOR serialization/deserialization
 #[derive(Debug)]
 pub enum CborError {
@@ -34,6 +38,8 @@ pub enum CborError {
     InvalidStructure(&'static str),
     /// Invalid field value
     InvalidValue(&'static str),
+    /// Input exceeds maximum size
+    InputTooLarge,
 }
 
 impl std::fmt::Display for CborError {
@@ -42,6 +48,7 @@ impl std::fmt::Display for CborError {
             CborError::Ciborium(e) => write!(f, "CBOR error: {e}"),
             CborError::InvalidStructure(msg) => write!(f, "invalid CBOR structure: {msg}"),
             CborError::InvalidValue(msg) => write!(f, "invalid CBOR value: {msg}"),
+            CborError::InputTooLarge => write!(f, "CBOR input exceeds maximum size"),
         }
     }
 }
@@ -50,7 +57,7 @@ impl std::error::Error for CborError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CborError::Ciborium(e) => Some(e),
-            _ => None,
+            CborError::InvalidStructure(_) | CborError::InvalidValue(_) | CborError::InputTooLarge => None,
         }
     }
 }
@@ -65,6 +72,24 @@ impl From<ciborium::ser::Error<std::io::Error>> for CborError {
     fn from(_: ciborium::ser::Error<std::io::Error>) -> Self {
         CborError::InvalidStructure("serialization error")
     }
+}
+
+/// Parse a CBOR value from bytes with an input size limit.
+fn parse_cbor(bytes: &[u8]) -> Result<Value, CborError> {
+    if bytes.len() > MAX_CBOR_INPUT_SIZE {
+        return Err(CborError::InputTooLarge);
+    }
+    Ok(ciborium::from_reader(bytes)?)
+}
+
+/// Set an Option field, returning an error on duplicate keys.
+macro_rules! set_field {
+    ($field:expr, $value:expr) => {
+        if $field.is_some() {
+            return Err(CborError::InvalidStructure("duplicate map key"));
+        }
+        $field = Some($value);
+    };
 }
 
 /// Encode a RistrettoPoint as a 32-byte CBOR byte string
@@ -136,7 +161,7 @@ impl IssuanceRequest {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -147,10 +172,10 @@ impl IssuanceRequest {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => big_k = Some(decode_point(&v)?),
-                        Value::Integer(i) if i == 2.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => k_bar = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => r_bar = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(big_k, decode_point(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(gamma, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(k_bar, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(r_bar, decode_scalar(&v)?); }
                         _ => {}
                     }
                 }
@@ -197,7 +222,7 @@ impl IssuanceResponse {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -210,12 +235,12 @@ impl IssuanceResponse {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => a = Some(decode_point(&v)?),
-                        Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 5.into() => c = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 6.into() => ctx = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(a, decode_point(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(e, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(gamma, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(z, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 5.into() => { set_field!(c, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 6.into() => { set_field!(ctx, decode_scalar(&v)?); }
                         _ => {}
                     }
                 }
@@ -301,7 +326,7 @@ impl<const L: usize> SpendProof<L> {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -326,11 +351,14 @@ impl<const L: usize> SpendProof<L> {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => k = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 2.into() => s = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 3.into() => a_prime = Some(decode_point(&val)?),
-                        Value::Integer(i) if i == 4.into() => b_bar = Some(decode_point(&val)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(k, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(s, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(a_prime, decode_point(&val)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(b_bar, decode_point(&val)?); }
                         Value::Integer(i) if i == 5.into() => {
+                            if com.is_some() {
+                                return Err(CborError::InvalidStructure("duplicate map key"));
+                            }
                             if let Value::Array(arr) = val {
                                 let com_arr: Result<Vec<_>, _> =
                                     arr.into_iter().map(|v| decode_point(&v)).collect();
@@ -345,17 +373,22 @@ impl<const L: usize> SpendProof<L> {
                                         "Com array wrong size",
                                     ));
                                 }
+                            } else {
+                                return Err(CborError::InvalidStructure("expected array for Com"));
                             }
                         }
-                        Value::Integer(i) if i == 6.into() => gamma = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 7.into() => e_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 8.into() => r2_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 9.into() => r3_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 10.into() => c_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 11.into() => r_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 12.into() => w00 = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 13.into() => w01 = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 6.into() => { set_field!(gamma, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 7.into() => { set_field!(e_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 8.into() => { set_field!(r2_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 9.into() => { set_field!(r3_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 10.into() => { set_field!(c_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 11.into() => { set_field!(r_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 12.into() => { set_field!(w00, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 13.into() => { set_field!(w01, decode_scalar(&val)?); }
                         Value::Integer(i) if i == 14.into() => {
+                            if gamma0.is_some() {
+                                return Err(CborError::InvalidStructure("duplicate map key"));
+                            }
                             if let Value::Array(arr) = val {
                                 let gamma0_arr: Result<Vec<_>, _> =
                                     arr.into_iter().map(|v| decode_scalar(&v)).collect();
@@ -369,9 +402,14 @@ impl<const L: usize> SpendProof<L> {
                                         "gamma0 array wrong size",
                                     ));
                                 }
+                            } else {
+                                return Err(CborError::InvalidStructure("expected array for gamma0"));
                             }
                         }
                         Value::Integer(i) if i == 15.into() => {
+                            if z.is_some() {
+                                return Err(CborError::InvalidStructure("duplicate map key"));
+                            }
                             if let Value::Array(arr) = val {
                                 let z_arr: Result<Vec<_>, _> = arr
                                     .into_iter()
@@ -402,11 +440,13 @@ impl<const L: usize> SpendProof<L> {
                                 } else {
                                     return Err(CborError::InvalidStructure("z array wrong size"));
                                 }
+                            } else {
+                                return Err(CborError::InvalidStructure("expected array for z"));
                             }
                         }
-                        Value::Integer(i) if i == 16.into() => k_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 17.into() => s_bar = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 18.into() => ctx = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 16.into() => { set_field!(k_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 17.into() => { set_field!(s_bar, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 18.into() => { set_field!(ctx, decode_scalar(&val)?); }
                         _ => {}
                     }
                 }
@@ -465,7 +505,7 @@ impl Refund {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -477,11 +517,11 @@ impl Refund {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => a = Some(decode_point(&v)?),
-                        Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 3.into() => gamma = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 4.into() => z = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 5.into() => t = Some(decode_scalar(&v)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(a, decode_point(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(e, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(gamma, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(z, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 5.into() => { set_field!(t, decode_scalar(&v)?); }
                         _ => {}
                     }
                 }
@@ -521,7 +561,7 @@ impl PrivateKey {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -530,8 +570,8 @@ impl PrivateKey {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => x = Some(decode_scalar(&v)?),
-                        Value::Integer(i) if i == 2.into() => w = Some(decode_point(&v)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(x, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(w, decode_point(&v)?); }
                         _ => {}
                     }
                 }
@@ -572,7 +612,7 @@ impl PublicKey {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
         let w = decode_point(&value)?;
         Ok(PublicKey { w })
     }
@@ -600,7 +640,7 @@ impl PreIssuance {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -609,8 +649,8 @@ impl PreIssuance {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => r = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 2.into() => k = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(r, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(k, decode_scalar(&val)?); }
                         _ => {}
                     }
                 }
@@ -655,7 +695,7 @@ impl CreditToken {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -668,12 +708,12 @@ impl CreditToken {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => a = Some(decode_point(&val)?),
-                        Value::Integer(i) if i == 2.into() => e = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 3.into() => k = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 4.into() => r = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 5.into() => c = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 6.into() => ctx = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(a, decode_point(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(e, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(k, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(r, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 5.into() => { set_field!(c, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 6.into() => { set_field!(ctx, decode_scalar(&val)?); }
                         _ => {}
                     }
                 }
@@ -718,7 +758,7 @@ impl PreRefund {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -729,10 +769,10 @@ impl PreRefund {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => r = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 2.into() => k = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 3.into() => m = Some(decode_scalar(&val)?),
-                        Value::Integer(i) if i == 4.into() => ctx = Some(decode_scalar(&val)?),
+                        Value::Integer(i) if i == 1.into() => { set_field!(r, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(k, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(m, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(ctx, decode_scalar(&val)?); }
                         _ => {}
                     }
                 }
@@ -777,7 +817,7 @@ impl ErrorMsg {
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
-        let value: Value = ciborium::from_reader(bytes)?;
+        let value = parse_cbor(bytes)?;
 
         match value {
             Value::Map(map) => {
@@ -787,6 +827,9 @@ impl ErrorMsg {
                 for (k, v) in map {
                     match k {
                         Value::Integer(i) if i == 1.into() => {
+                            if error_code.is_some() {
+                                return Err(CborError::InvalidStructure("duplicate map key"));
+                            }
                             if let Value::Integer(code) = v {
                                 let code: i128 = code.into();
                                 let code = u32::try_from(code).map_err(|_| {
@@ -796,11 +839,18 @@ impl ErrorMsg {
                                     ErrorCode::from_u32(code)
                                         .ok_or(CborError::InvalidValue("unknown error_code"))?,
                                 );
+                            } else {
+                                return Err(CborError::InvalidStructure("expected integer for error_code"));
                             }
                         }
                         Value::Integer(i) if i == 2.into() => {
+                            if error_message.is_some() {
+                                return Err(CborError::InvalidStructure("duplicate map key"));
+                            }
                             if let Value::Text(msg) = v {
                                 error_message = Some(msg);
+                            } else {
+                                return Err(CborError::InvalidStructure("expected text for error_message"));
                             }
                         }
                         _ => {}
