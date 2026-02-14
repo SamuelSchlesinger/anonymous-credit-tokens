@@ -128,7 +128,7 @@ impl IssuanceRequest {
     }
 }
 
-// --- IssuanceResponse: A[32] || e[32] || c[32] || len(pok)[2] || pok[...] ---
+// --- IssuanceResponse: A[32] || e[32] || c[32] || ctx[32] || len(pok)[2] || pok[...] ---
 
 impl IssuanceResponse {
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -136,6 +136,7 @@ impl IssuanceResponse {
         write_point(&mut buf, &self.a);
         write_scalar(&mut buf, &self.e);
         write_scalar(&mut buf, &self.c);
+        write_scalar(&mut buf, &self.ctx);
         write_var(&mut buf, &self.pok);
         buf
     }
@@ -145,19 +146,21 @@ impl IssuanceResponse {
         let a = read_point(data, &mut off)?;
         let e = read_scalar(data, &mut off)?;
         let c = read_scalar(data, &mut off)?;
+        let ctx = read_scalar(data, &mut off)?;
         let pok = read_var(data, &mut off)?;
         check_exact(data, off)?;
-        Ok(IssuanceResponse { a, e, c, pok })
+        Ok(IssuanceResponse { a, e, c, ctx, pok })
     }
 }
 
-// --- SpendProof: k[32] || s[32] || A'[32] || B_bar[32] || Com[L*32] || len(pok)[2] || pok[...] ---
+// --- SpendProof: k[32] || s[32] || ctx[32] || A'[32] || B_bar[32] || Com[L*32] || len(pok)[2] || pok[...] ---
 
 impl<const L: usize> SpendProof<L> {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(4 * 32 + L * 32 + 2 + self.pok.len());
+        let mut buf = Vec::with_capacity(5 * 32 + L * 32 + 2 + self.pok.len());
         write_scalar(&mut buf, &self.k);
         write_scalar(&mut buf, &self.s);
+        write_scalar(&mut buf, &self.ctx);
         write_point(&mut buf, &self.a_prime);
         write_point(&mut buf, &self.b_bar);
         for com_j in &self.com {
@@ -171,6 +174,7 @@ impl<const L: usize> SpendProof<L> {
         let mut off = 0;
         let k = read_scalar(data, &mut off)?;
         let s = read_scalar(data, &mut off)?;
+        let ctx = read_scalar(data, &mut off)?;
         let a_prime = read_point(data, &mut off)?;
         let b_bar = read_point(data, &mut off)?;
         let mut com = [RistrettoPoint::identity(); L];
@@ -182,6 +186,7 @@ impl<const L: usize> SpendProof<L> {
         Ok(SpendProof {
             k,
             s,
+            ctx,
             a_prime,
             b_bar,
             com,
@@ -190,13 +195,14 @@ impl<const L: usize> SpendProof<L> {
     }
 }
 
-// --- Refund: A*[32] || e*[32] || len(pok)[2] || pok[...] ---
+// --- Refund: A*[32] || e*[32] || t[32] || len(pok)[2] || pok[...] ---
 
 impl Refund {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         write_point(&mut buf, &self.a);
         write_scalar(&mut buf, &self.e);
+        write_scalar(&mut buf, &self.t);
         write_var(&mut buf, &self.pok);
         buf
     }
@@ -205,22 +211,24 @@ impl Refund {
         let mut off = 0;
         let a = read_point(data, &mut off)?;
         let e = read_scalar(data, &mut off)?;
+        let t = read_scalar(data, &mut off)?;
         let pok = read_var(data, &mut off)?;
         check_exact(data, off)?;
-        Ok(Refund { a, e, pok })
+        Ok(Refund { a, e, t, pok })
     }
 }
 
-// --- CreditToken: a[32] || e[32] || k[32] || r[32] || c[32] = 160 bytes ---
+// --- CreditToken: a[32] || e[32] || k[32] || r[32] || c[32] || ctx[32] = 192 bytes ---
 
 impl CreditToken {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(160);
+        let mut buf = Vec::with_capacity(192);
         write_point(&mut buf, &self.a);
         write_scalar(&mut buf, &self.e);
         write_scalar(&mut buf, &self.k);
         write_scalar(&mut buf, &self.r);
         write_scalar(&mut buf, &self.c);
+        write_scalar(&mut buf, &self.ctx);
         buf
     }
 
@@ -231,8 +239,9 @@ impl CreditToken {
         let k = read_scalar(data, &mut off)?;
         let r = read_scalar(data, &mut off)?;
         let c = read_scalar(data, &mut off)?;
+        let ctx = read_scalar(data, &mut off)?;
         check_exact(data, off)?;
-        Ok(CreditToken { a, e, k, r, c })
+        Ok(CreditToken { a, e, k, r, c, ctx })
     }
 }
 
@@ -255,14 +264,15 @@ impl PreIssuance {
     }
 }
 
-// --- PreRefund: r[32] || k[32] || m[32] = 96 bytes ---
+// --- PreRefund: r[32] || k[32] || m[32] || ctx[32] = 128 bytes ---
 
 impl PreRefund {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(96);
+        let mut buf = Vec::with_capacity(128);
         write_scalar(&mut buf, &self.r);
         write_scalar(&mut buf, &self.k);
         write_scalar(&mut buf, &self.m);
+        write_scalar(&mut buf, &self.ctx);
         buf
     }
 
@@ -271,8 +281,9 @@ impl PreRefund {
         let r = read_scalar(data, &mut off)?;
         let k = read_scalar(data, &mut off)?;
         let m = read_scalar(data, &mut off)?;
+        let ctx = read_scalar(data, &mut off)?;
         check_exact(data, off)?;
-        Ok(PreRefund { r, k, m })
+        Ok(PreRefund { r, k, m, ctx })
     }
 }
 
@@ -338,16 +349,18 @@ mod tests {
         let a = RistrettoPoint::random(&mut OsRng);
         let e = Scalar::random(&mut OsRng);
         let c = Scalar::random(&mut OsRng);
+        let ctx = Scalar::random(&mut OsRng);
         let mut pok = vec![0; 64];
         OsRng.fill_bytes(&mut pok);
 
-        let response = IssuanceResponse { a, e, c, pok };
+        let response = IssuanceResponse { a, e, c, ctx, pok };
         let bytes = response.to_bytes();
         let decoded = IssuanceResponse::from_bytes(&bytes).unwrap();
 
         assert_eq!(response.a, decoded.a);
         assert_eq!(response.e, decoded.e);
         assert_eq!(response.c, decoded.c);
+        assert_eq!(response.ctx, decoded.ctx);
         assert_eq!(response.pok, decoded.pok);
     }
 
@@ -355,15 +368,17 @@ mod tests {
     fn test_refund_roundtrip() {
         let a = RistrettoPoint::random(&mut OsRng);
         let e = Scalar::random(&mut OsRng);
+        let t = Scalar::random(&mut OsRng);
         let mut pok = vec![0; 64];
         OsRng.fill_bytes(&mut pok);
 
-        let refund = Refund { a, e, pok };
+        let refund = Refund { a, e, t, pok };
         let bytes = refund.to_bytes();
         let decoded = Refund::from_bytes(&bytes).unwrap();
 
         assert_eq!(refund.a, decoded.a);
         assert_eq!(refund.e, decoded.e);
+        assert_eq!(refund.t, decoded.t);
         assert_eq!(refund.pok, decoded.pok);
     }
 
@@ -413,8 +428,9 @@ mod tests {
         let k = Scalar::random(&mut OsRng);
         let r = Scalar::random(&mut OsRng);
         let c = Scalar::random(&mut OsRng);
+        let ctx = Scalar::random(&mut OsRng);
 
-        let token = CreditToken { a, e, k, r, c };
+        let token = CreditToken { a, e, k, r, c, ctx };
         let bytes = token.to_bytes();
         let decoded = CreditToken::from_bytes(&bytes).unwrap();
 
@@ -426,14 +442,16 @@ mod tests {
         let r = Scalar::random(&mut OsRng);
         let k = Scalar::random(&mut OsRng);
         let m = Scalar::random(&mut OsRng);
+        let ctx = Scalar::random(&mut OsRng);
 
-        let pre_refund = PreRefund { r, k, m };
+        let pre_refund = PreRefund { r, k, m, ctx };
         let bytes = pre_refund.to_bytes();
         let decoded = PreRefund::from_bytes(&bytes).unwrap();
 
         assert_eq!(pre_refund.r, decoded.r);
         assert_eq!(pre_refund.k, decoded.k);
         assert_eq!(pre_refund.m, decoded.m);
+        assert_eq!(pre_refund.ctx, decoded.ctx);
     }
 
     #[test]
@@ -464,8 +482,9 @@ mod tests {
             k: Scalar::random(&mut OsRng),
             r: Scalar::random(&mut OsRng),
             c: Scalar::random(&mut OsRng),
+            ctx: Scalar::random(&mut OsRng),
         };
-        assert_eq!(token.to_bytes().len(), 160);
+        assert_eq!(token.to_bytes().len(), 192);
 
         let pre_issuance = PreIssuance {
             r: Scalar::random(&mut OsRng),
@@ -477,8 +496,9 @@ mod tests {
             r: Scalar::random(&mut OsRng),
             k: Scalar::random(&mut OsRng),
             m: Scalar::random(&mut OsRng),
+            ctx: Scalar::random(&mut OsRng),
         };
-        assert_eq!(pre_refund.to_bytes().len(), 96);
+        assert_eq!(pre_refund.to_bytes().len(), 128);
 
         let private_key = PrivateKey::random(OsRng);
         assert_eq!(private_key.to_bytes().len(), 64);

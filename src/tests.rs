@@ -63,7 +63,7 @@ fn issuance() {
         let credit_amount = Scalar::from(thread_rng().gen_range(1..1000) as u64);
 
         let issuance_response = private_key
-            .issue::<128>(&params, &issuance_request, credit_amount, OsRng)
+            .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
             .unwrap();
         let _credit_token1 = preissuance
             .to_credit_token(
@@ -90,8 +90,11 @@ fn full_cycle() {
         let total_credits = thread_rng().gen_range(100..2000) as u64;
         let credit_amount = Scalar::from(total_credits);
 
+        // Use a random context for each iteration
+        let ctx = Scalar::random(&mut OsRng);
+
         let issuance_response = private_key
-            .issue::<128>(&params, &issuance_request, credit_amount, OsRng)
+            .issue::<128>(&params, &issuance_request, credit_amount, ctx, OsRng)
             .unwrap();
         let credit_token1 = preissuance
             .to_credit_token(
@@ -106,8 +109,8 @@ fn full_cycle() {
         let first_charge = thread_rng().gen_range(1..=(total_credits / 2)) as u64;
         let charge1 = Scalar::from(first_charge);
 
-        let (spend_proof, prerefund) = credit_token1.prove_spend::<128>(&params, charge1, OsRng);
-        let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+        let (spend_proof, prerefund) = credit_token1.prove_spend::<128>(&params, charge1, OsRng).unwrap();
+        let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
         let credit_token2 = prerefund
             .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
@@ -116,8 +119,8 @@ fn full_cycle() {
         let remaining_credits = total_credits - first_charge;
         let charge2 = Scalar::from(remaining_credits);
 
-        let (spend_proof, prerefund) = credit_token2.prove_spend::<128>(&params, charge2, OsRng);
-        let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+        let (spend_proof, prerefund) = credit_token2.prove_spend::<128>(&params, charge2, OsRng).unwrap();
+        let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
         let _credit_token3 = prerefund
             .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
@@ -142,7 +145,7 @@ fn double_spend_prevention() {
     let credit_amount = Scalar::from(total_credits);
 
     let issuance_response = private_key
-        .issue::<128>(&params, &issuance_request, credit_amount, OsRng)
+        .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -157,7 +160,7 @@ fn double_spend_prevention() {
     let first_charge = thread_rng().gen_range(1..=(total_credits / 3)) as u64;
     let charge1 = Scalar::from(first_charge);
 
-    let (spend_proof1, prerefund1) = credit_token.prove_spend::<128>(&params, charge1, OsRng);
+    let (spend_proof1, prerefund1) = credit_token.prove_spend::<128>(&params, charge1, OsRng).unwrap();
 
     // Verify nullifier isn't already spent
     let nullifier = spend_proof1.nullifier();
@@ -167,7 +170,7 @@ fn double_spend_prevention() {
     );
 
     // Process refund
-    let refund1 = private_key.refund::<128>(&params, &spend_proof1, OsRng).unwrap();
+    let refund1 = private_key.refund::<128>(&params, &spend_proof1, Scalar::ZERO, OsRng).unwrap();
 
     // Record nullifier as spent
     nullifier_db.record_spent(&nullifier);
@@ -182,7 +185,7 @@ fn double_spend_prevention() {
     let second_charge = thread_rng().gen_range(1..=(total_credits / 2)) as u64;
     let charge2 = Scalar::from(second_charge);
 
-    let (spend_proof2, _) = credit_token.prove_spend::<128>(&params, charge2, OsRng);
+    let (spend_proof2, _) = credit_token.prove_spend::<128>(&params, charge2, OsRng).unwrap();
 
     // Check nullifier - should detect double spend
     let nullifier2 = spend_proof2.nullifier();
@@ -196,7 +199,7 @@ fn double_spend_prevention() {
     let third_charge = thread_rng().gen_range(1..remaining_credits) as u64;
     let charge3 = Scalar::from(third_charge);
 
-    let (spend_proof3, _) = new_token.prove_spend::<128>(&params, charge3, OsRng);
+    let (spend_proof3, _) = new_token.prove_spend::<128>(&params, charge3, OsRng).unwrap();
     let nullifier3 = spend_proof3.nullifier();
 
     // This is a different nullifier, should not be detected as spent
@@ -221,7 +224,7 @@ fn spend_exact_balance() {
     let credit_amount = Scalar::from(total_credits);
 
     let issuance_response = private_key
-        .issue::<128>(&params, &issuance_request, credit_amount, OsRng)
+        .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -233,7 +236,7 @@ fn spend_exact_balance() {
         .unwrap();
 
     // Spend the exact balance amount
-    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, credit_amount, OsRng);
+    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, credit_amount, OsRng).unwrap();
 
     // Verify the refund amount is zero
     assert_eq!(
@@ -243,7 +246,7 @@ fn spend_exact_balance() {
     );
 
     // Verify the refund still processes correctly
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -272,8 +275,9 @@ fn sequential_spends() {
     let initial_credits = thread_rng().gen_range(100..1000) as u64;
     let initial_amount = Scalar::from(initial_credits);
 
+    let ctx = Scalar::random(&mut OsRng);
     let issuance_response = private_key
-        .issue::<128>(&params, &issuance_request, initial_amount, OsRng)
+        .issue::<128>(&params, &issuance_request, initial_amount, ctx, OsRng)
         .unwrap();
     let mut current_token = preissuance
         .to_credit_token(
@@ -292,7 +296,7 @@ fn sequential_spends() {
     // Perform 5 sequential spends
     for i in 1..=5 {
         // Spend some credits
-        let (spend_proof, prerefund) = current_token.prove_spend::<128>(&params, spend_amount, OsRng);
+        let (spend_proof, prerefund) = current_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
         remaining -= per_spend_amount;
 
         // Check that the remaining amount is correct
@@ -313,7 +317,7 @@ fn sequential_spends() {
         nullifier_db.record_spent(&nullifier);
 
         // Get refund and create new token
-        let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+        let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
         current_token = prerefund
             .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
@@ -351,7 +355,7 @@ fn attempt_overspend() {
     let credit_amount = Scalar::from(credit_value);
 
     let issuance_response = private_key
-        .issue::<128>(&params, &issuance_request, credit_amount, OsRng)
+        .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -365,13 +369,8 @@ fn attempt_overspend() {
     // Try to spend more than available (random amount > credit_value)
     let overspend_value = credit_value + thread_rng().gen_range(1..100) as u64;
     let overspend_amount = Scalar::from(overspend_value);
-    let (spend_proof, _) = credit_token.prove_spend::<128>(&params, overspend_amount, OsRng);
-
-    // The refund verification should fail when the issuer checks it
-    let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
-
-    // The refund should be None since the proof is invalid
-    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
+    let result = credit_token.prove_spend::<128>(&params, overspend_amount, OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
 }
 
 #[test]
@@ -389,7 +388,7 @@ fn zero_spend_scenario() {
     let credit_amount = Scalar::from(credit_value);
 
     let issuance_response = private_key
-        .issue::<128>(&params, &issuance_request, credit_amount, OsRng)
+        .issue::<128>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let credit_token = preissuance
         .to_credit_token(
@@ -402,10 +401,10 @@ fn zero_spend_scenario() {
 
     // Spend zero credits
     let zero_spend = Scalar::from(0u64);
-    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, zero_spend, OsRng);
+    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, zero_spend, OsRng).unwrap();
 
     // The refund should process successfully
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 
     // Remaining balance should still be the original amount
     assert_eq!(
@@ -444,7 +443,7 @@ fn multiple_tokens_with_same_issuer() {
     let preissuance1 = PreIssuance::random(OsRng);
     let request1 = preissuance1.request(&params, OsRng);
     let response1 = private_key
-        .issue::<128>(&params, &request1, credit_amount1, OsRng)
+        .issue::<128>(&params, &request1, credit_amount1, Scalar::ZERO, OsRng)
         .unwrap();
     let token1 = preissuance1
         .to_credit_token(&params, private_key.public(), &request1, &response1)
@@ -457,7 +456,7 @@ fn multiple_tokens_with_same_issuer() {
     let preissuance2 = PreIssuance::random(OsRng);
     let request2 = preissuance2.request(&params, OsRng);
     let response2 = private_key
-        .issue::<128>(&params, &request2, credit_amount2, OsRng)
+        .issue::<128>(&params, &request2, credit_amount2, Scalar::ZERO, OsRng)
         .unwrap();
     let token2 = preissuance2
         .to_credit_token(&params, private_key.public(), &request2, &response2)
@@ -475,8 +474,8 @@ fn multiple_tokens_with_same_issuer() {
     let spend_amount2 = Scalar::from(spend_value2);
     let expected_remaining2 = credit_value2 - spend_value2;
 
-    let (spend_proof1, prerefund1) = token1.prove_spend::<128>(&params, spend_amount1, OsRng);
-    let (spend_proof2, prerefund2) = token2.prove_spend::<128>(&params, spend_amount2, OsRng);
+    let (spend_proof1, prerefund1) = token1.prove_spend::<128>(&params, spend_amount1, OsRng).unwrap();
+    let (spend_proof2, prerefund2) = token2.prove_spend::<128>(&params, spend_amount2, OsRng).unwrap();
 
     // Get the nullifiers
     let nullifier1 = spend_proof1.nullifier();
@@ -493,8 +492,8 @@ fn multiple_tokens_with_same_issuer() {
     nullifier_db.record_spent(&nullifier2);
 
     // Process refunds
-    let refund1 = private_key.refund::<128>(&params, &spend_proof1, OsRng).unwrap();
-    let refund2 = private_key.refund::<128>(&params, &spend_proof2, OsRng).unwrap();
+    let refund1 = private_key.refund::<128>(&params, &spend_proof1, Scalar::ZERO, OsRng).unwrap();
+    let refund2 = private_key.refund::<128>(&params, &spend_proof2, Scalar::ZERO, OsRng).unwrap();
 
     // Create new tokens
     let new_token1 = prerefund1
@@ -587,11 +586,11 @@ fn invalid_issuance_request() {
 
     // The issuer should reject the tampered request
     let issuance_response =
-        private_key.issue::<128>(&params, &tampered_request, Scalar::from(20u64), OsRng);
+        private_key.issue::<128>(&params, &tampered_request, Scalar::from(20u64), Scalar::ZERO, OsRng);
     assert_eq!(issuance_response, Err(Error::InvalidIssuanceRequestProof));
 
     // The original request should be accepted
-    let issuance_response = private_key.issue::<128>(&params, &valid_request, Scalar::from(20u64), OsRng);
+    let issuance_response = private_key.issue::<128>(&params, &valid_request, Scalar::from(20u64), Scalar::ZERO, OsRng);
     assert!(
         issuance_response.is_ok(),
         "Valid request should be accepted"
@@ -613,7 +612,7 @@ fn invalid_proof_verification() {
     let credit_amount = Scalar::from(credit_value);
 
     let response = private_key
-        .issue::<128>(&params, &request, credit_amount, OsRng)
+        .issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -622,13 +621,14 @@ fn invalid_proof_verification() {
     // Create a valid spend proof with a random amount
     let spend_value = thread_rng().gen_range(10..credit_value / 2) as u64;
     let spend_amount = Scalar::from(spend_value);
-    let (spend_proof, _) = token.prove_spend::<128>(&params, spend_amount, OsRng);
+    let (spend_proof, _) = token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
     // Tamper with the proof by modifying the amount to a different random value
     let tampered_value = spend_value + thread_rng().gen_range(1..10) as u64;
     let tampered_proof = SpendProof {
         s: Scalar::from(tampered_value), // Changed to a different amount
         k: spend_proof.k,
+        ctx: spend_proof.ctx,
         a_prime: spend_proof.a_prime,
         b_bar: spend_proof.b_bar,
         com: spend_proof.com,
@@ -636,7 +636,7 @@ fn invalid_proof_verification() {
     };
 
     // The issuer should reject the tampered proof
-    let refund_result = private_key.refund::<128>(&params, &tampered_proof, OsRng);
+    let refund_result = private_key.refund::<128>(&params, &tampered_proof, Scalar::ZERO, OsRng);
     assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
 }
 
@@ -657,7 +657,7 @@ fn large_amount_issuance() {
     let large_amount = Scalar::from(base_amount + variation);
 
     let response = private_key
-        .issue::<128>(&params, &request, large_amount, OsRng)
+        .issue::<128>(&params, &request, large_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -668,7 +668,7 @@ fn large_amount_issuance() {
     let spend_value = thread_rng().gen_range(1..max_spend) as u64;
     let spend_amount = Scalar::from(spend_value);
 
-    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, spend_amount, OsRng);
+    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
     // The remaining amount should be correct
     let expected_remaining = large_amount - spend_amount;
@@ -678,7 +678,7 @@ fn large_amount_issuance() {
     );
 
     // The refund should process correctly
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -698,7 +698,7 @@ fn invalid_token_verification() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue::<128>(&params, &request, Scalar::from(50u64), OsRng)
+        .issue::<128>(&params, &request, Scalar::from(50u64), Scalar::ZERO, OsRng)
         .unwrap();
 
     // Tamper with the response
@@ -706,6 +706,7 @@ fn invalid_token_verification() {
         a: response.a,
         e: response.e + Scalar::ONE, // Modify the e value
         c: response.c,
+        ctx: response.ctx,
         pok: response.pok.clone(),
     };
 
@@ -739,6 +740,10 @@ fn test_params_generation_deterministic() {
         params1.h3.basepoint().compress(),
         params2.h3.basepoint().compress()
     );
+    assert_eq!(
+        params1.h4.basepoint().compress(),
+        params2.h4.basepoint().compress()
+    );
 
     // Different domain separators should produce different parameters
     let params3 = Params::new("different-org", "test-service", "test", "2024-01-01");
@@ -756,7 +761,7 @@ fn tampered_refund_verification() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue::<128>(&params, &request, Scalar::from(50u64), OsRng)
+        .issue::<128>(&params, &request, Scalar::from(50u64), Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -764,15 +769,16 @@ fn tampered_refund_verification() {
 
     // Create a valid spend
     let spend_amount = Scalar::from(20u64);
-    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, spend_amount, OsRng);
+    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
     // Get a valid refund
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 
     // Tamper with the refund
     let tampered_refund = Refund {
         a: refund.a,
         e: refund.e + Scalar::ONE, // Modify the e value
+        t: refund.t,
         pok: refund.pok.clone(),
     };
 
@@ -794,7 +800,7 @@ fn zero_e_signature_attack() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue::<128>(&params, &request, Scalar::from(20u64), OsRng)
+        .issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng)
         .unwrap();
 
     // Create a tampered response with e = 0
@@ -802,6 +808,7 @@ fn zero_e_signature_attack() {
         a: response.a,
         e: Scalar::ZERO, // Set e to zero
         c: response.c,
+        ctx: response.ctx,
         pok: response.pok.clone(),
     };
 
@@ -819,20 +826,20 @@ fn spend_with_identity_a_prime() {
     let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
     let request = preissuance.request(&params, OsRng);
     let response = private_key
-        .issue::<128>(&params, &request, Scalar::from(20u64), OsRng)
+        .issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
         .unwrap();
 
     // Create a valid spend proof
-    let (mut spend_proof, _) = token.prove_spend::<128>(&params, Scalar::from(10u64), OsRng);
+    let (mut spend_proof, _) = token.prove_spend::<128>(&params, Scalar::from(10u64), OsRng).unwrap();
 
     // Tamper with the proof - set a_prime to identity
     spend_proof.a_prime = RistrettoPoint::identity();
 
     // The issuer should reject this proof
-    let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
+    let refund_result = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng);
     assert_eq!(refund_result, Err(Error::IdentityPointError));
 }
 
@@ -847,7 +854,7 @@ fn token_with_zero_credit() {
     let request = preissuance.request(&params, OsRng);
     let zero_amount = Scalar::ZERO;
     let response = private_key
-        .issue::<128>(&params, &request, zero_amount, OsRng)
+        .issue::<128>(&params, &request, zero_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -859,14 +866,13 @@ fn token_with_zero_credit() {
     // Attempting to spend from this token should fail
     // Try to spend a random positive amount
     let spend_amount = Scalar::from(thread_rng().gen_range(1..100) as u64);
-    let (spend_proof, _) = token.prove_spend::<128>(&params, spend_amount, OsRng);
-    let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
-    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
+    let result = token.prove_spend::<128>(&params, spend_amount, OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
 
     // But spending zero from it should work
     let zero_spend = Scalar::ZERO;
-    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, zero_spend, OsRng);
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, zero_spend, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -891,7 +897,7 @@ fn exhaust_token_with_one_credit_spends() {
     let credit_amount = Scalar::from(initial_credits);
 
     let response = private_key
-        .issue::<128>(&params, &request, credit_amount, OsRng)
+        .issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let mut current_token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -913,7 +919,7 @@ fn exhaust_token_with_one_credit_spends() {
         );
 
         // Spend 1 credit
-        let (spend_proof, prerefund) = current_token.prove_spend::<128>(&params, spend_amount, OsRng);
+        let (spend_proof, prerefund) = current_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
         remaining_credits -= 1;
 
         // Verify remaining balance
@@ -935,7 +941,7 @@ fn exhaust_token_with_one_credit_spends() {
         nullifier_db.record_spent(&nullifier);
 
         // Get refund and create new token
-        let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+        let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
         current_token = prerefund
             .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
@@ -949,15 +955,13 @@ fn exhaust_token_with_one_credit_spends() {
     );
 
     // Try to spend from empty token
-    let (spend_proof, _) = current_token.prove_spend::<128>(&params, spend_amount, OsRng);
-    let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
-
-    assert_eq!(refund_result, Err(Error::InvalidClientSpendProof));
+    let result = current_token.prove_spend::<128>(&params, spend_amount, OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
 
     // But spending zero from it should work
     let zero_spend = Scalar::ZERO;
-    let (spend_proof, prerefund) = current_token.prove_spend::<128>(&params, zero_spend, OsRng);
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let (spend_proof, prerefund) = current_token.prove_spend::<128>(&params, zero_spend, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -979,7 +983,7 @@ fn test_binary_decomposition_max_value() {
 
     // Issue a token with the maximum value
     let response = private_key
-        .issue::<128>(&params, &request, max_value, OsRng)
+        .issue::<128>(&params, &request, max_value, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
@@ -990,10 +994,10 @@ fn test_binary_decomposition_max_value() {
 
     // Spend a small amount from this token
     let spend_amount = Scalar::from(1u64);
-    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, spend_amount, OsRng);
+    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
     // Process the refund
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -1006,10 +1010,10 @@ fn test_binary_decomposition_max_value() {
     );
 
     // Spend the entire remaining balance
-    let (spend_proof2, prerefund2) = new_token.prove_spend::<128>(&params, expected_remaining, OsRng);
+    let (spend_proof2, prerefund2) = new_token.prove_spend::<128>(&params, expected_remaining, OsRng).unwrap();
 
     // Process the refund
-    let refund2 = private_key.refund::<128>(&params, &spend_proof2, OsRng).unwrap();
+    let refund2 = private_key.refund::<128>(&params, &spend_proof2, Scalar::ZERO, OsRng).unwrap();
     let final_token = prerefund2
         .to_credit_token(&params, &spend_proof2, &refund2, private_key.public())
         .unwrap();
@@ -1041,14 +1045,14 @@ fn test_nullifier_collisions() {
         let credit_amount = Scalar::from(100u64);
 
         let response = private_key
-            .issue::<128>(&params, &request, credit_amount, OsRng)
+            .issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
             .unwrap();
         let token = preissuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
 
         // Generate a spend proof (doesn't matter what amount)
-        let (spend_proof, _) = token.prove_spend::<128>(&params, Scalar::from(1u64), OsRng);
+        let (spend_proof, _) = token.prove_spend::<128>(&params, Scalar::from(1u64), OsRng).unwrap();
 
         // Check if we've seen this nullifier before
         let nullifier = spend_proof.nullifier();
@@ -1083,17 +1087,17 @@ fn test_key_component_malleability() {
 
     // Create a valid token
     let response = private_key
-        .issue::<128>(&params, &request, credit_amount, OsRng)
+        .issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
         .unwrap();
 
     // Create a spend proof
-    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, Scalar::from(10u64), OsRng);
+    let (spend_proof, prerefund) = token.prove_spend::<128>(&params, Scalar::from(10u64), OsRng).unwrap();
 
     // Process refund
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 
     // Test different tampering scenarios
 
@@ -1101,6 +1105,7 @@ fn test_key_component_malleability() {
     let tampered_refund1 = Refund {
         a: refund.a + RistrettoPoint::generator(), // Change the a component
         e: refund.e,
+        t: refund.t,
         pok: refund.pok.clone(),
     };
 
@@ -1113,6 +1118,7 @@ fn test_key_component_malleability() {
     let tampered_refund2 = Refund {
         a: refund.a,
         e: refund.e + Scalar::ONE, // Change the e component
+        t: refund.t,
         pok: refund.pok.clone(),
     };
 
@@ -1125,6 +1131,7 @@ fn test_key_component_malleability() {
     let tampered_refund3 = Refund {
         a: refund.a,
         e: refund.e,
+        t: refund.t,
         pok: refund.pok[1..].to_vec(), // Change the pok component
     };
 
@@ -1183,8 +1190,9 @@ fn credit_token_strategy() -> impl Strategy<Value = CreditToken> {
         scalar_strategy(),
         scalar_strategy(),
         scalar_strategy(),
+        scalar_strategy(),
     )
-        .prop_map(|(a, e, k, r, c)| CreditToken { a, e, k, r, c })
+        .prop_map(|(a, e, k, r, c, ctx)| CreditToken { a, e, k, r, c, ctx })
 }
 
 // Use a single test params instance to avoid stack issues
@@ -1204,7 +1212,7 @@ proptest! {
         let params = test_params();
         let request = pre_issuance.request(&params, OsRng);
 
-        if let Ok(response) = private_key.issue::<128>(&params, &request, credit_amount, OsRng) {
+        if let Ok(response) = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng) {
             if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
@@ -1231,7 +1239,7 @@ proptest! {
         let request = pre_issuance.request(&params, OsRng);
 
         // First issuance should succeed
-        let response1 = private_key.issue::<128>(&params, &request, credit_amount, OsRng);
+        let response1 = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng);
         prop_assert!(response1.is_ok());
 
         // Second issuance with same request should fail (simulated by checking)
@@ -1257,20 +1265,20 @@ proptest! {
         prop_assume!(spend_amount <= initial_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
 
         // Spend some credits
-        let (spend_proof, pre_refund) = token.prove_spend::<128>(&params, spend_credits, OsRng);
+        let (spend_proof, pre_refund) = token.prove_spend::<128>(&params, spend_credits, OsRng).unwrap();
 
         // Remaining balance should be correct
         let expected_remaining = initial_credits - spend_credits;
         prop_assert_eq!(pre_refund.m, expected_remaining);
 
         // Process refund
-        if let Ok(refund) = private_key.refund::<128>(&params, &spend_proof, OsRng) {
+        if let Ok(refund) = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng) {
             let new_token = pre_refund
                 .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
                 .unwrap();
@@ -1299,7 +1307,7 @@ proptest! {
         prop_assume!(spend_u128 <= credit_u128);
 
         let request = pre_issuance.request(&params, OsRng);
-        if let Ok(response) = private_key.issue::<128>(&params, &request, credit_amount, OsRng) {
+        if let Ok(response) = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng) {
             if let Ok(token) = pre_issuance.to_credit_token(
                 &params,
                 private_key.public(),
@@ -1307,8 +1315,8 @@ proptest! {
                 &response,
             ) {
                 // Generate two spend proofs from the same token
-                let (proof1, _) = token.prove_spend::<128>(&params, spend_amount, OsRng);
-                let (proof2, _) = token.prove_spend::<128>(&params, spend_amount, OsRng);
+                let (proof1, _) = token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
+                let (proof2, _) = token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
                 // Nullifiers should be identical (deterministic)
                 prop_assert_eq!(proof1.nullifier(), proof2.nullifier());
@@ -1336,20 +1344,20 @@ proptest! {
 
         // Issue two different tokens
         let request1 = pre_issuance1.request(&params, OsRng);
-        let response1 = private_key.issue::<128>(&params, &request1, credits, OsRng).unwrap();
+        let response1 = private_key.issue::<128>(&params, &request1, credits, Scalar::ZERO, OsRng).unwrap();
         let token1 = pre_issuance1
             .to_credit_token(&params, private_key.public(), &request1, &response1)
             .unwrap();
 
         let request2 = pre_issuance2.request(&params, OsRng);
-        let response2 = private_key.issue::<128>(&params, &request2, credits, OsRng).unwrap();
+        let response2 = private_key.issue::<128>(&params, &request2, credits, Scalar::ZERO, OsRng).unwrap();
         let token2 = pre_issuance2
             .to_credit_token(&params, private_key.public(), &request2, &response2)
             .unwrap();
 
         // Get nullifiers
-        let (proof1, _) = token1.prove_spend::<128>(&params, spend_amount, OsRng);
-        let (proof2, _) = token2.prove_spend::<128>(&params, spend_amount, OsRng);
+        let (proof1, _) = token1.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
+        let (proof2, _) = token2.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
         // Nullifiers should be different
         prop_assert_ne!(proof1.nullifier(), proof2.nullifier());
@@ -1385,6 +1393,7 @@ proptest! {
         prop_assert_eq!(token.k, decoded.k);
         prop_assert_eq!(token.r, decoded.r);
         prop_assert_eq!(token.c, decoded.c);
+        prop_assert_eq!(token.ctx, decoded.ctx);
     }
 }
 
@@ -1439,20 +1448,14 @@ proptest! {
         let overspend_amount = Scalar::from(initial_amount * overspend_factor);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
 
         // Try to overspend
-        let (spend_proof, _) = token.prove_spend::<128>(&params, overspend_amount, OsRng);
-
-        // Refund should fail
-        let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
-    assert_eq!(
-        refund_result,
-        Err(Error::InvalidClientSpendProof)
-    );
+        let result = token.prove_spend::<128>(&params, overspend_amount, OsRng);
+        assert!(matches!(result, Err(Error::AmountTooBigError)));
 
     }
 }
@@ -1475,7 +1478,7 @@ proptest! {
         prop_assume!(total_spend <= initial_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let mut current_token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1485,12 +1488,12 @@ proptest! {
         // Perform sequential spends
         for spend_amount in spend_amounts {
             let spend_scalar = Scalar::from(spend_amount);
-            let (spend_proof, pre_refund) = current_token.prove_spend::<128>(&params, spend_scalar, OsRng);
+            let (spend_proof, pre_refund) = current_token.prove_spend::<128>(&params, spend_scalar, OsRng).unwrap();
 
             remaining -= spend_amount;
             prop_assert_eq!(pre_refund.m, Scalar::from(remaining));
 
-            let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+            let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
             current_token = pre_refund
                 .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
                 .unwrap();
@@ -1516,18 +1519,18 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
 
         // Spend zero
-        let (spend_proof, pre_refund) = token.prove_spend::<128>(&params, Scalar::ZERO, OsRng);
+        let (spend_proof, pre_refund) = token.prove_spend::<128>(&params, Scalar::ZERO, OsRng).unwrap();
 
         // Balance should be unchanged
         prop_assert_eq!(pre_refund.m, initial_credits);
 
-        let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+        let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
         let new_token = pre_refund
             .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
@@ -1570,12 +1573,12 @@ proptest! {
         let spend_credits = Scalar::from(spend_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
 
-        let (mut spend_proof, _) = token.prove_spend::<128>(&params, spend_credits, OsRng);
+        let (mut spend_proof, _) = token.prove_spend::<128>(&params, spend_credits, OsRng).unwrap();
 
         // Tamper with the proof by modifying the pok bytes
         if !spend_proof.pok.is_empty() {
@@ -1583,7 +1586,7 @@ proptest! {
         }
 
         // Refund should fail
-        let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
+        let refund_result = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng);
     assert_eq!(
         refund_result,
         Err(Error::InvalidClientSpendProof)
@@ -1622,7 +1625,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let mut current_token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1635,9 +1638,9 @@ proptest! {
             }
 
             let spend_amount = Scalar::from(amount);
-            let (spend_proof, pre_refund) = current_token.prove_spend::<128>(&params, spend_amount, OsRng);
+            let (spend_proof, pre_refund) = current_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
 
-            if let Ok(refund) = private_key.refund::<128>(&params, &spend_proof, OsRng) {
+            if let Ok(refund) = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng) {
                 total_spent += amount;
 
                 current_token = pre_refund
@@ -1660,15 +1663,17 @@ proptest! {
         a in point_strategy(),
         e in scalar_strategy(),
         c in scalar_strategy(),
+        ctx in scalar_strategy(),
         pok in vec_strategy(),
     ) {
-        let response = IssuanceResponse { a, e, c, pok };
+        let response = IssuanceResponse { a, e, c, ctx, pok };
         let bytes = response.to_bytes();
         let decoded = IssuanceResponse::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(response.a, decoded.a);
         prop_assert_eq!(response.e, decoded.e);
         prop_assert_eq!(response.c, decoded.c);
+        prop_assert_eq!(response.ctx, decoded.ctx);
         prop_assert_eq!(&response.pok, &decoded.pok);
     }
 }
@@ -1679,14 +1684,16 @@ proptest! {
     fn prop_encoding_round_trip_refund(
         a in point_strategy(),
         e in scalar_strategy(),
+        t in scalar_strategy(),
         pok in vec_strategy(),
     ) {
-        let refund = Refund { a, e, pok };
+        let refund = Refund { a, e, t, pok };
         let bytes = refund.to_bytes();
         let decoded = Refund::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(refund.a, decoded.a);
         prop_assert_eq!(refund.e, decoded.e);
+        prop_assert_eq!(refund.t, decoded.t);
         prop_assert_eq!(&refund.pok, &decoded.pok);
     }
 }
@@ -1710,14 +1717,16 @@ proptest! {
         r in scalar_strategy(),
         k in scalar_strategy(),
         m in scalar_strategy(),
+        ctx in scalar_strategy(),
     ) {
-        let pre_refund = PreRefund { r, k, m };
+        let pre_refund = PreRefund { r, k, m, ctx };
         let bytes = pre_refund.to_bytes();
         let decoded = PreRefund::from_bytes(&bytes).unwrap();
 
         prop_assert_eq!(pre_refund.r, decoded.r);
         prop_assert_eq!(pre_refund.k, decoded.k);
         prop_assert_eq!(pre_refund.m, decoded.m);
+        prop_assert_eq!(pre_refund.ctx, decoded.ctx);
     }
 }
 
@@ -1750,12 +1759,12 @@ proptest! {
         let spend_credits = Scalar::from(spend_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
 
-        let (spend_proof, _) = token.prove_spend::<128>(&params, spend_credits, OsRng);
+        let (spend_proof, _) = token.prove_spend::<128>(&params, spend_credits, OsRng).unwrap();
 
         // Verify spend proof has valid structure
         prop_assert_ne!(spend_proof.k, Scalar::ZERO, "Nullifier should not be zero");
@@ -1783,7 +1792,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let mut token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1793,10 +1802,10 @@ proptest! {
         token.e = tampering_scalar;
 
         // Try to spend from tampered token
-        let (spend_proof, _) = token.prove_spend::<128>(&params, Scalar::from(1u64), OsRng);
+        let (spend_proof, _) = token.prove_spend::<128>(&params, Scalar::from(1u64), OsRng).unwrap();
 
         // Refund should fail
-        let refund_result = private_key.refund::<128>(&params, &spend_proof, OsRng);
+        let refund_result = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng);
     assert_eq!(
         refund_result,
         Err(Error::InvalidClientSpendProof)
@@ -1823,7 +1832,7 @@ proptest! {
         request.pok = random_vec;
 
         // Issuance should fail
-        let response = private_key.issue::<128>(&params, &request, credit_amount, OsRng);
+        let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng);
     assert_eq!(
         response,
         Err(Error::InvalidIssuanceRequestProof)
@@ -1887,21 +1896,21 @@ proptest! {
         let request = pre_issuance.request(&params, OsRng);
 
         // Issue with first issuer
-        let response1 = private_key1.issue::<128>(&params, &request, credits, OsRng).unwrap();
+        let response1 = private_key1.issue::<128>(&params, &request, credits, Scalar::ZERO, OsRng).unwrap();
         let token1 = pre_issuance
             .to_credit_token(&params, private_key1.public(), &request, &response1)
             .unwrap();
 
         // Try to spend token1 with issuer2 (should fail)
-        let (spend_proof, _) = token1.prove_spend::<128>(&params, spend, OsRng);
-        let refund2 = private_key2.refund::<128>(&params, &spend_proof, OsRng);
+        let (spend_proof, _) = token1.prove_spend::<128>(&params, spend, OsRng).unwrap();
+        let refund2 = private_key2.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng);
     assert_eq!(
         refund2,
         Err(Error::InvalidClientSpendProof)
     );
 
         // Correct issuer should accept
-        let refund1 = private_key1.refund::<128>(&params, &spend_proof, OsRng);
+        let refund1 = private_key1.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng);
         prop_assert!(refund1.is_ok(), "Correct issuer should accept spend");
     }
 }
@@ -1919,7 +1928,7 @@ proptest! {
         let initial_credits = Scalar::from(initial_amount);
 
         let request = pre_issuance.request(&params, OsRng);
-        let response = private_key.issue::<128>(&params, &request, initial_credits, OsRng).unwrap();
+        let response = private_key.issue::<128>(&params, &request, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let mut token = pre_issuance
             .to_credit_token(&params, private_key.public(), &request, &response)
             .unwrap();
@@ -1931,13 +1940,13 @@ proptest! {
             let spend_amount = std::cmp::min(remaining, 5); // Spend up to 5 at a time
             let spend_scalar = Scalar::from(spend_amount);
 
-            let (spend_proof, pre_refund) = token.prove_spend::<128>(&params, spend_scalar, OsRng);
+            let (spend_proof, pre_refund) = token.prove_spend::<128>(&params, spend_scalar, OsRng).unwrap();
             remaining -= spend_amount;
 
             prop_assert_eq!(pre_refund.m, Scalar::from(remaining));
 
             if remaining > 0 {
-                let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+                let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
                 token = pre_refund
                     .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
                     .unwrap();
@@ -1967,20 +1976,20 @@ proptest! {
 
         // Issue two tokens with same amount
         let request1 = pre_issuance1.request(&params, OsRng);
-        let response1 = private_key.issue::<128>(&params, &request1, initial_credits, OsRng).unwrap();
+        let response1 = private_key.issue::<128>(&params, &request1, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token1 = pre_issuance1
             .to_credit_token(&params, private_key.public(), &request1, &response1)
             .unwrap();
 
         let request2 = pre_issuance2.request(&params, OsRng);
-        let response2 = private_key.issue::<128>(&params, &request2, initial_credits, OsRng).unwrap();
+        let response2 = private_key.issue::<128>(&params, &request2, initial_credits, Scalar::ZERO, OsRng).unwrap();
         let token2 = pre_issuance2
             .to_credit_token(&params, private_key.public(), &request2, &response2)
             .unwrap();
 
         // Generate spend proofs
-        let (proof1, _) = token1.prove_spend::<128>(&params, spend_credits, OsRng);
-        let (proof2, _) = token2.prove_spend::<128>(&params, spend_credits, OsRng);
+        let (proof1, _) = token1.prove_spend::<128>(&params, spend_credits, OsRng).unwrap();
+        let (proof2, _) = token2.prove_spend::<128>(&params, spend_credits, OsRng).unwrap();
 
         // Proofs should be different despite same spend amount
         prop_assert_ne!(&proof1.pok, &proof2.pok);
@@ -2064,14 +2073,14 @@ proptest! {
             }
 
             let request = pre_issuance.request(&params, OsRng);
-            if let Ok(response) = private_key.issue::<128>(&params, &request, credit_amount, OsRng) {
+            if let Ok(response) = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng) {
                 if let Ok(token) = pre_issuance.to_credit_token(
                     &params,
                     private_key.public(),
                     &request,
                     &response,
                 ) {
-                    let (proof, _) = token.prove_spend::<128>(&params, Scalar::from(1u64), OsRng);
+                    let (proof, _) = token.prove_spend::<128>(&params, Scalar::from(1u64), OsRng).unwrap();
                     let nullifier = proof.nullifier();
 
                     // Check for collision
@@ -2121,15 +2130,15 @@ fn small_l_full_cycle_l8() {
     // 200 fits in 8 bits (max 255)
     let credit_amount = Scalar::from(200u64);
     let response = private_key
-        .issue::<8>(&params, &request, credit_amount, OsRng)
+        .issue::<8>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
         .unwrap();
 
     let spend_amount = Scalar::from(50u64);
-    let (spend_proof, prerefund) = token.prove_spend::<8>(&params, spend_amount, OsRng);
-    let refund = private_key.refund::<8>(&params, &spend_proof, OsRng).unwrap();
+    let (spend_proof, prerefund) = token.prove_spend::<8>(&params, spend_amount, OsRng).unwrap();
+    let refund = private_key.refund::<8>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<8>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -2146,15 +2155,15 @@ fn small_l_full_cycle_l16() {
     // 60000 fits in 16 bits (max 65535)
     let credit_amount = Scalar::from(60000u64);
     let response = private_key
-        .issue::<16>(&params, &request, credit_amount, OsRng)
+        .issue::<16>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
         .unwrap();
 
     let spend_amount = Scalar::from(10000u64);
-    let (spend_proof, prerefund) = token.prove_spend::<16>(&params, spend_amount, OsRng);
-    let refund = private_key.refund::<16>(&params, &spend_proof, OsRng).unwrap();
+    let (spend_proof, prerefund) = token.prove_spend::<16>(&params, spend_amount, OsRng).unwrap();
+    let refund = private_key.refund::<16>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     let new_token = prerefund
         .to_credit_token::<16>(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -2170,12 +2179,12 @@ fn small_l_issue_rejects_too_large() {
 
     // 256 does NOT fit in 8 bits
     let too_large = Scalar::from(256u64);
-    let result = private_key.issue::<8>(&params, &request, too_large, OsRng);
-    assert_eq!(result, Err(Error::AmountTooBigError));
+    let result = private_key.issue::<8>(&params, &request, too_large, Scalar::ZERO, OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
 
     // 255 fits in 8 bits
     let fits = Scalar::from(255u64);
-    let result = private_key.issue::<8>(&params, &request, fits, OsRng);
+    let result = private_key.issue::<8>(&params, &request, fits, Scalar::ZERO, OsRng);
     assert!(result.is_ok());
 }
 
@@ -2188,14 +2197,320 @@ fn small_l_overspend_rejected() {
 
     let credit_amount = Scalar::from(100u64);
     let response = private_key
-        .issue::<8>(&params, &request, credit_amount, OsRng)
+        .issue::<8>(&params, &request, credit_amount, Scalar::ZERO, OsRng)
         .unwrap();
     let token = preissuance
         .to_credit_token(&params, private_key.public(), &request, &response)
         .unwrap();
 
     // Overspend: 150 > 100
-    let (spend_proof, _) = token.prove_spend::<8>(&params, Scalar::from(150u64), OsRng);
-    let result = private_key.refund::<8>(&params, &spend_proof, OsRng);
-    assert_eq!(result, Err(Error::InvalidClientSpendProof));
+    let result = token.prove_spend::<8>(&params, Scalar::from(150u64), OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
+}
+
+// ===== PARTIAL REFUND TESTS =====
+
+#[test]
+fn partial_return_basic() {
+    // Spend 30 from 100 with t=10, get 80
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::random(&mut OsRng);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(100u64), ctx, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(30u64), OsRng)
+        .unwrap();
+    // prerefund.m = 100 - 30 = 70
+    assert_eq!(prerefund.m, Scalar::from(70u64));
+
+    // Partial return: t=10
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::from(10u64), OsRng)
+        .unwrap();
+    assert_eq!(refund.partial_return(), Scalar::from(10u64));
+
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    // 70 + 10 = 80
+    assert_eq!(new_token.credits(), Scalar::from(80u64));
+    assert_eq!(new_token.context(), ctx);
+}
+
+#[test]
+fn partial_return_full_return() {
+    // Spend 50 with t=50, balance stays 100
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::from(42u64);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(100u64), ctx, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(50u64), OsRng)
+        .unwrap();
+
+    // Full return: t=50 (same as s)
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::from(50u64), OsRng)
+        .unwrap();
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    // 50 + 50 = 100
+    assert_eq!(new_token.credits(), Scalar::from(100u64));
+}
+
+#[test]
+fn partial_return_zero() {
+    // Spend 30 with t=0, get 70 (standard behavior)
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::random(&mut OsRng);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(100u64), ctx, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(30u64), OsRng)
+        .unwrap();
+
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng)
+        .unwrap();
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(new_token.credits(), Scalar::from(70u64));
+}
+
+#[test]
+fn partial_return_t_exceeds_s_rejected() {
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(100u64), Scalar::ZERO, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    let (spend_proof, _) = token
+        .prove_spend::<128>(&params, Scalar::from(30u64), OsRng)
+        .unwrap();
+
+    // t=31 > s=30, should be rejected
+    let result = private_key.refund::<128>(&params, &spend_proof, Scalar::from(31u64), OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
+}
+
+#[test]
+fn partial_return_t_exceeds_l_bits_rejected() {
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+
+    let response = private_key
+        .issue::<8>(&params, &request, Scalar::from(100u64), Scalar::ZERO, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    let (spend_proof, _) = token
+        .prove_spend::<8>(&params, Scalar::from(50u64), OsRng)
+        .unwrap();
+
+    // t=256 doesn't fit in 8 bits
+    let result = private_key.refund::<8>(&params, &spend_proof, Scalar::from(256u64), OsRng);
+    assert!(matches!(result, Err(Error::AmountTooBigError)));
+}
+
+#[test]
+fn partial_return_sequential_chain() {
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::random(&mut OsRng);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(200u64), ctx, OsRng)
+        .unwrap();
+    let mut token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    // Spend 50, return 10 -> balance = 200 - 50 + 10 = 160
+    let (sp, pr) = token.prove_spend::<128>(&params, Scalar::from(50u64), OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &sp, Scalar::from(10u64), OsRng).unwrap();
+    token = pr.to_credit_token::<128>(&params, &sp, &refund, private_key.public()).unwrap();
+    assert_eq!(token.credits(), Scalar::from(160u64));
+
+    // Spend 30, return 0 -> balance = 160 - 30 = 130
+    let (sp, pr) = token.prove_spend::<128>(&params, Scalar::from(30u64), OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &sp, Scalar::ZERO, OsRng).unwrap();
+    token = pr.to_credit_token::<128>(&params, &sp, &refund, private_key.public()).unwrap();
+    assert_eq!(token.credits(), Scalar::from(130u64));
+
+    // Spend 100, return 100 -> balance = 130 - 100 + 100 = 130
+    let (sp, pr) = token.prove_spend::<128>(&params, Scalar::from(100u64), OsRng).unwrap();
+    let refund = private_key.refund::<128>(&params, &sp, Scalar::from(100u64), OsRng).unwrap();
+    token = pr.to_credit_token::<128>(&params, &sp, &refund, private_key.public()).unwrap();
+    assert_eq!(token.credits(), Scalar::from(130u64));
+    assert_eq!(token.context(), ctx);
+}
+
+#[test]
+fn partial_return_preauth_pattern() {
+    // Pre-authorization hold scenario: hold 200, charge 150, return 50
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::from(999u64); // e.g., session ID
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(500u64), ctx, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+
+    // Hold 200 (spend proof for 200)
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(200u64), OsRng)
+        .unwrap();
+
+    // Actual charge is 150, return 50
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::from(50u64), OsRng)
+        .unwrap();
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+
+    // 500 - 200 + 50 = 350
+    assert_eq!(new_token.credits(), Scalar::from(350u64));
+    assert_eq!(new_token.context(), ctx);
+}
+
+// ===== REQUEST CONTEXT TESTS =====
+
+#[test]
+fn request_context_round_trip() {
+    // ctx preserved through issuance/spend/refund
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::random(&mut OsRng);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(100u64), ctx, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+    assert_eq!(token.context(), ctx);
+
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(20u64), OsRng)
+        .unwrap();
+    assert_eq!(spend_proof.context(), ctx);
+
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng)
+        .unwrap();
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(new_token.context(), ctx);
+}
+
+#[test]
+fn request_context_zero_works() {
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(50u64), Scalar::ZERO, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+    assert_eq!(token.context(), Scalar::ZERO);
+
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(10u64), OsRng)
+        .unwrap();
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng)
+        .unwrap();
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(new_token.context(), Scalar::ZERO);
+    assert_eq!(new_token.credits(), Scalar::from(40u64));
+}
+
+#[test]
+fn request_context_nonzero() {
+    let params = Params::new("test-org", "test-service", "test-env", "2024-01-01");
+    let private_key = PrivateKey::random(OsRng);
+    let preissuance = PreIssuance::random(OsRng);
+    let request = preissuance.request(&params, OsRng);
+    let ctx = Scalar::from(12345u64);
+
+    let response = private_key
+        .issue::<128>(&params, &request, Scalar::from(100u64), ctx, OsRng)
+        .unwrap();
+    let token = preissuance
+        .to_credit_token(&params, private_key.public(), &request, &response)
+        .unwrap();
+    assert_eq!(token.context(), ctx);
+
+    // Full cycle with non-zero ctx and partial refund
+    let (spend_proof, prerefund) = token
+        .prove_spend::<128>(&params, Scalar::from(60u64), OsRng)
+        .unwrap();
+    assert_eq!(spend_proof.context(), ctx);
+
+    let refund = private_key
+        .refund::<128>(&params, &spend_proof, Scalar::from(20u64), OsRng)
+        .unwrap();
+    let new_token = prerefund
+        .to_credit_token::<128>(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(new_token.context(), ctx);
+    // 100 - 60 + 20 = 60
+    assert_eq!(new_token.credits(), Scalar::from(60u64));
 }

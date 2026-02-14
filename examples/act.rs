@@ -40,9 +40,10 @@ fn main() {
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(&params, OsRng);
 
-    // Server issues 40 credits
+    // Server issues 40 credits with a request context
+    let request_context = Scalar::from(1u64); // e.g., session or epoch identifier
     let issuance_response = private_key
-        .issue::<128>(&params, &issuance_request, Scalar::from(40u64), OsRng)
+        .issue::<128>(&params, &issuance_request, Scalar::from(40u64), request_context, OsRng)
         .unwrap();
 
     // Client receives the credit token
@@ -59,7 +60,7 @@ fn main() {
     // 3. First Purchase/Transaction
     // Client spends 20 credits
     let charge = Scalar::from(20u64);
-    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng);
+    let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, charge, OsRng).unwrap();
 
     // Server checks nullifier and processes the spending
     let nullifier = spend_proof.nullifier();
@@ -68,8 +69,8 @@ fn main() {
     }
     nullifier_store.mark_used(nullifier);
 
-    // Server issues a refund
-    let refund = private_key.refund::<128>(&params, &spend_proof, OsRng).unwrap();
+    // Server issues a refund (no partial return)
+    let refund = private_key.refund::<128>(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
 
     // Client receives a new credit token with 20 credits remaining
     credit_token = prerefund

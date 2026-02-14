@@ -66,7 +66,7 @@ fn token_creation_benchmark(c: &mut Criterion) {
                 let issuance_request = preissuance.request(&params, OsRng);
                 let credit_amount = Scalar::from(thread_rng().gen_range(10u64..1000));
                 let issuance_response = private_key
-                    .issue::<16>(&params, &issuance_request, credit_amount, OsRng)
+                    .issue::<16>(&params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
                     .unwrap();
                 (
                     preissuance,
@@ -110,7 +110,7 @@ macro_rules! bench_issuance {
                     (private_key, issuance_request, credit)
                 },
                 |(pk, req, credit)| {
-                    black_box(pk.issue::<$l>(&$params, &req, credit, OsRng).unwrap())
+                    black_box(pk.issue::<$l>(&$params, &req, credit, Scalar::ZERO, OsRng).unwrap())
                 },
                 BatchSize::SmallInput,
             )
@@ -146,7 +146,7 @@ macro_rules! bench_spending_proof {
                     let credit_val = thread_rng().gen_range(1..=max_credit($l));
                     let credit_amount = Scalar::from(credit_val);
                     let issuance_response = private_key
-                        .issue::<$l>(&$params, &issuance_request, credit_amount, OsRng)
+                        .issue::<$l>(&$params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
                         .unwrap();
                     let credit_token = preissuance
                         .to_credit_token(
@@ -160,7 +160,7 @@ macro_rules! bench_spending_proof {
                     (credit_token, charge)
                 },
                 |(credit_token, charge)| {
-                    black_box(credit_token.prove_spend::<$l>(&$params, charge, OsRng))
+                    black_box(credit_token.prove_spend::<$l>(&$params, charge, OsRng).unwrap())
                 },
                 BatchSize::SmallInput,
             )
@@ -196,7 +196,7 @@ macro_rules! bench_refund {
                     let credit_val = thread_rng().gen_range(1..=max_credit($l));
                     let credit_amount = Scalar::from(credit_val);
                     let issuance_response = private_key
-                        .issue::<$l>(&$params, &issuance_request, credit_amount, OsRng)
+                        .issue::<$l>(&$params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
                         .unwrap();
                     let credit_token = preissuance
                         .to_credit_token(
@@ -208,11 +208,11 @@ macro_rules! bench_refund {
                         .unwrap();
                     let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
                     let (spend_proof, _) =
-                        credit_token.prove_spend::<$l>(&$params, charge, OsRng);
+                        credit_token.prove_spend::<$l>(&$params, charge, OsRng).unwrap();
                     (private_key, spend_proof)
                 },
                 |(pk, spend_proof)| {
-                    black_box(pk.refund::<$l>(&$params, &spend_proof, OsRng).unwrap())
+                    black_box(pk.refund::<$l>(&$params, &spend_proof, Scalar::ZERO, OsRng).unwrap())
                 },
                 BatchSize::SmallInput,
             )
@@ -248,7 +248,7 @@ macro_rules! bench_refund_token_creation {
                     let credit_val = thread_rng().gen_range(1..=max_credit($l));
                     let credit_amount = Scalar::from(credit_val);
                     let issuance_response = private_key
-                        .issue::<$l>(&$params, &issuance_request, credit_amount, OsRng)
+                        .issue::<$l>(&$params, &issuance_request, credit_amount, Scalar::ZERO, OsRng)
                         .unwrap();
                     let credit_token = preissuance
                         .to_credit_token(
@@ -260,9 +260,9 @@ macro_rules! bench_refund_token_creation {
                         .unwrap();
                     let charge = Scalar::from(thread_rng().gen_range(1..=credit_val));
                     let (spend_proof, prerefund) =
-                        credit_token.prove_spend::<$l>(&$params, charge, OsRng);
+                        credit_token.prove_spend::<$l>(&$params, charge, OsRng).unwrap();
                     let refund = private_key
-                        .refund::<$l>(&$params, &spend_proof, OsRng)
+                        .refund::<$l>(&$params, &spend_proof, Scalar::ZERO, OsRng)
                         .unwrap();
                     (prerefund, spend_proof, refund, private_key)
                 },
