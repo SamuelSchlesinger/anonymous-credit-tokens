@@ -148,7 +148,7 @@
 
 use curve25519_dalek::{
     RistrettoPoint, constants::RISTRETTO_BASEPOINT_TABLE, ristretto::RistrettoBasepointTable,
-    traits::MultiscalarMul,
+    traits::VartimeMultiscalarMul,
 };
 use group::Group;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
@@ -620,12 +620,18 @@ impl PreIssuance {
             + request.big_k;
         let x_g = RISTRETTO_BASEPOINT_TABLE * &response.e + public.w;
 
-        // Verify the response by checking the BBS+ signature proof
-        let y_a = RistrettoPoint::multiscalar_mul(
+        // Verify the response by checking the BBS+ signature proof.
+        // All scalar operands are from the issuer's response (public), so
+        // variable-time operations are safe here.
+        let y_a = RistrettoPoint::vartime_multiscalar_mul(
             [response.z, response.gamma.neg()],
             [response.a, x_a],
         );
-        let y_g = RISTRETTO_BASEPOINT_TABLE * &response.z + x_g * response.gamma.neg();
+        let y_g = RistrettoPoint::vartime_double_scalar_mul_basepoint(
+            &response.gamma.neg(),
+            &x_g,
+            &response.z,
+        );
 
         // Generate the expected challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
@@ -960,44 +966,58 @@ impl PrivateKey {
             return Err(ErrorCode::InvalidProof);
         }
 
+        // Constant-time: scalar operand is the private key.
         let a_bar = spend_proof.a_prime * self.x;
+
+        // All remaining verification uses only public spend_proof / params
+        // values as scalar operands, so variable-time operations are safe.
         let big_h1 = RistrettoPoint::generator()
             + &params.h2 * &spend_proof.k
             + &params.h4 * &spend_proof.ctx;
-        let a1 = RistrettoPoint::multiscalar_mul(
+        let a1 = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
             [spend_proof.a_prime, spend_proof.b_bar, a_bar],
         );
-        let a2 = RistrettoPoint::multiscalar_mul(
-            [spend_proof.r3_bar, spend_proof.gamma.neg()],
-            [spend_proof.b_bar, big_h1],
-        ) + &params.h1 * &spend_proof.c_bar
-            + &params.h3 * &spend_proof.r_bar;
+        let a2 = RistrettoPoint::vartime_multiscalar_mul(
+            [spend_proof.r3_bar, spend_proof.gamma.neg(), spend_proof.c_bar, spend_proof.r_bar],
+            [spend_proof.b_bar, big_h1, params.h1.basepoint(), params.h3.basepoint()],
+        );
+        let h1_point = params.h1.basepoint();
+        let h3_point = params.h3.basepoint();
         let com0 = spend_proof.com[0];
-        let com0_minus_h1 = com0 - params.h1.basepoint();
+        let com0_minus_h1 = com0 - h1_point;
         let gamma01_0 = spend_proof.gamma - spend_proof.gamma0[0];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-        big_c_prime[0][0] = &params.h2 * &spend_proof.w00 + &params.h3 * &spend_proof.z[0][0]
-            - com0 * spend_proof.gamma0[0];
-        big_c_prime[0][1] = &params.h2 * &spend_proof.w01 + &params.h3 * &spend_proof.z[0][1]
-            - com0_minus_h1 * gamma01_0;
+        big_c_prime[0][0] = RistrettoPoint::vartime_multiscalar_mul(
+            [spend_proof.w00, spend_proof.z[0][0], spend_proof.gamma0[0].neg()],
+            [params.h2.basepoint(), h3_point, com0],
+        );
+        big_c_prime[0][1] = RistrettoPoint::vartime_multiscalar_mul(
+            [spend_proof.w01, spend_proof.z[0][1], gamma01_0.neg()],
+            [params.h2.basepoint(), h3_point, com0_minus_h1],
+        );
         #[allow(clippy::needless_range_loop)] // indexes big_c_prime, com, gamma0, z simultaneously
         for j in 1..L {
             let com_j = spend_proof.com[j];
-            let com_j_minus_h1 = com_j - params.h1.basepoint();
+            let com_j_minus_h1 = com_j - h1_point;
             let gamma01_j = spend_proof.gamma - spend_proof.gamma0[j];
-            big_c_prime[j][0] =
-                &params.h3 * &spend_proof.z[j][0] - com_j * spend_proof.gamma0[j];
-            big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - com_j_minus_h1 * gamma01_j;
+            big_c_prime[j][0] = RistrettoPoint::vartime_multiscalar_mul(
+                [spend_proof.z[j][0], spend_proof.gamma0[j].neg()],
+                [h3_point, com_j],
+            );
+            big_c_prime[j][1] = RistrettoPoint::vartime_multiscalar_mul(
+                [spend_proof.z[j][1], gamma01_j.neg()],
+                [h3_point, com_j_minus_h1],
+            );
         }
 
         let pow2_scalars = powers_of_two::<L>();
-        let k_prime = RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com);
+        let k_prime = RistrettoPoint::vartime_multiscalar_mul(&pow2_scalars, &spend_proof.com);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
-        let big_c = &params.h1 * &spend_proof.c_bar.neg()
-            + &params.h2 * &spend_proof.k_bar
-            + &params.h3 * &spend_proof.s_bar
-            - com_ * spend_proof.gamma;
+        let big_c = RistrettoPoint::vartime_multiscalar_mul(
+            [spend_proof.c_bar.neg(), spend_proof.k_bar, spend_proof.s_bar, spend_proof.gamma.neg()],
+            [h1_point, params.h2.basepoint(), h3_point, com_],
+        );
 
         let gamma = Transcript::with(params, b"spend", |transcript| {
             transcript.add_scalar(&spend_proof.k);
@@ -1234,18 +1254,19 @@ impl CreditToken {
             *s_val = Scalar::random(&mut rng);
         }
         let mut com = [RistrettoPoint::identity(); L];
+        let h1_point = params.h1.basepoint();
         // Optimization: i[j] is always 0 or 1 (from bits_of), so h1 * i[j] is
         // either identity or h1. Use conditional_select instead of a full scalar mul.
         let h1_bit_0 = RistrettoPoint::conditional_select(
             &RistrettoPoint::identity(),
-            &params.h1.basepoint(),
+            &h1_point,
             i[0].ct_eq(&Scalar::ONE),
         );
         com[0] = h1_bit_0 + &params.h2 * &k_star + &params.h3 * &s_i[0];
         for j in 1..L {
             let h1_bit = RistrettoPoint::conditional_select(
                 &RistrettoPoint::identity(),
-                &params.h1.basepoint(),
+                &h1_point,
                 i[j].ct_eq(&Scalar::ONE),
             );
             com[j] = h1_bit + &params.h3 * &s_i[j];
@@ -1254,7 +1275,7 @@ impl CreditToken {
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
 
         big_c[0][0] = com[0];
-        big_c[0][1] = com[0] - params.h1.basepoint();
+        big_c[0][1] = com[0] - h1_point;
         let k0_prime = Scalar::random(&mut rng);
         let mut s_i_prime = [Scalar::ZERO; L];
         for s_prime in s_i_prime.iter_mut() {
@@ -1292,7 +1313,7 @@ impl CreditToken {
 
         for j in 1..L {
             big_c[j][0] = com[j];
-            big_c[j][1] = com[j] - params.h1.basepoint();
+            big_c[j][1] = com[j] - h1_point;
 
             let h3_z_j = &params.h3 * &z[j];
             let h3_s_j = &params.h3 * &s_i_prime[j];
@@ -1508,18 +1529,25 @@ impl PreRefund {
             return Err(ErrorCode::InvalidProof);
         }
 
+        // All scalar operands below are public constants, issuer-provided
+        // (refund.*), or already revealed in the clear (self.ctx), so
+        // variable-time operations are safe.
         let pow2_scalars = powers_of_two::<L>();
         let x_a = RistrettoPoint::generator()
-            + RistrettoPoint::multiscalar_mul(&pow2_scalars, &spend_proof.com)
+            + RistrettoPoint::vartime_multiscalar_mul(&pow2_scalars, &spend_proof.com)
             + &params.h1 * &refund.t
             + &params.h4 * &self.ctx;
 
         let x_g = RISTRETTO_BASEPOINT_TABLE * &refund.e + public_key.w;
-        let y_a = RistrettoPoint::multiscalar_mul(
+        let y_a = RistrettoPoint::vartime_multiscalar_mul(
             [refund.z, refund.gamma.neg()],
             [refund.a, x_a],
         );
-        let y_g = RISTRETTO_BASEPOINT_TABLE * &refund.z + x_g * refund.gamma.neg();
+        let y_g = RistrettoPoint::vartime_double_scalar_mul_basepoint(
+            &refund.gamma.neg(),
+            &x_g,
+            &refund.z,
+        );
 
         let gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalars([&refund.e, &refund.t, &self.ctx].into_iter());
