@@ -110,6 +110,8 @@ fn decode_point(value: &Value) -> Result<RistrettoPoint, CborError> {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(bytes);
             use curve25519_dalek::ristretto::CompressedRistretto;
+            // unwrap is safe: from_slice only fails on length mismatch,
+            // and this match arm requires bytes.len() == 32.
             CompressedRistretto::from_slice(&arr)
                 .unwrap()
                 .decompress()

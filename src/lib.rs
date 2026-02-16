@@ -760,7 +760,9 @@ impl PrivateKey {
             return Err(ErrorCode::InvalidProof);
         }
 
-        // Create a BBS+ signature on the client's commitment and credit amount
+        // Create a BBS+ signature on the client's commitment and credit amount.
+        // invert(): e is random and self.x is secret, so e + self.x == 0 (mod ℓ)
+        // has negligible probability ~2^-252.
         let e = Scalar::random(&mut rng);
         let x_a = RistrettoPoint::generator() + &params.h1 * &c + &params.h4 * &ctx + request.big_k;
         let a = x_a * (e + self.x).invert();
@@ -1048,6 +1050,8 @@ impl PrivateKey {
             return Err(ErrorCode::InvalidAmount);
         }
 
+        // invert(): same reasoning as in issue() — e + self.x == 0 (mod ℓ)
+        // has negligible probability ~2^-252.
         let e = Scalar::random(&mut rng);
 
         let x_a = RistrettoPoint::generator() + k_prime + &params.h1 * &t + &params.h4 * &spend_proof.ctx;
@@ -1242,6 +1246,7 @@ impl CreditToken {
             + &params.h4 * &self.ctx;
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
+        // invert(): r1 is freshly random, so r1 == 0 has negligible probability ~2^-252.
         let r3 = r1.invert();
         let a1 = a_prime * e_prime + b_bar * r2_prime;
         let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
