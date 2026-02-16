@@ -11,7 +11,7 @@ sha2 = "0.10"
 curve25519-dalek = { version = "4.1.3", features = ["group", "ff", "digest", "zeroize", "precomputed-tables"] }
 group = "0.13.0"
 rand_core = "0.6.4"
-sigma-proofs = { git = "https://github.com/sigma-rs/sigma-proofs.git", rev = "e2cc26024f4c7b980370e65ba661907ac06d7c93" }
+sigma-proofs = { path = "sigma-proofs" }
 subtle = "2.6.1"
 zeroize = { version = "1.8.1", features = ["zeroize_derive"] }
 hex = "0.4"
@@ -21,6 +21,14 @@ rand = "0.8.5"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 criterion = "0.5.1"
 proptest = "1.6.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[profile.bench]
+lto = true
+codegen-units = 1
 
 [[bench]]
 name = "benchmark"

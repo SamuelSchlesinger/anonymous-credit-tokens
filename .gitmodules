@@ -2,3 +2,6 @@
 	path = draft-act
 	url = https://github.com/SamuelSchlesinger/draft-act.git
 	branch = samschles/sigma-draft-compliance
+[submodule "sigma-proofs"]
+	path = sigma-proofs
+	url = git@github.com:SamuelSchlesinger/sigma-proofs.git

@@ -91,13 +91,16 @@
 //!
 //! See the README.md file for comprehensive usage examples and integration guidance.
 
-use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTable};
+use curve25519_dalek::{
+    RistrettoPoint, Scalar, constants::RISTRETTO_BASEPOINT_TABLE,
+    ristretto::RistrettoBasepointTable,
+};
 use group::Group;
 use rand_core::CryptoRngCore;
 use sha2::{Sha512, Digest};
 use sigma_proofs::LinearRelation;
 use std::ops::Neg;
-use subtle::ConstantTimeEq;
+use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use zeroize::ZeroizeOnDrop;
 
@@ -155,11 +158,19 @@ pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
 /// through timing side channels.
 fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
     let bytes = s.as_bytes();
-    let mut any_high_bit = 0u8;
-    for i in L..256 {
-        any_high_bit |= (bytes[i / 8] >> (i % 8)) & 1;
+    let full_byte = L / 8;
+    let rem_bits = L % 8;
+    let mut any_high = 0u8;
+    // Check the partial byte at the L boundary (if L isn't byte-aligned).
+    if rem_bits != 0 {
+        any_high |= bytes[full_byte] >> rem_bits;
     }
-    bool::from(any_high_bit.ct_eq(&0))
+    // Check all remaining full bytes above the L boundary.
+    let start = full_byte + usize::from(rem_bits != 0);
+    for &b in &bytes[start..32] {
+        any_high |= b;
+    }
+    bool::from(any_high.ct_eq(&0))
 }
 
 /// Returns an array of successive powers of two as Scalars: 1, 2, 4, 8, ...
@@ -174,6 +185,33 @@ fn powers_of_two<const L: usize>() -> [Scalar; L] {
         for i in 1..L {
             result[i] = result[i - 1] * two;
         }
+    }
+    result
+}
+
+/// Computes the power-of-two weighted sum of points using Horner's method:
+///   points[0] + 2*points[1] + 4*points[2] + ... + 2^(n-1)*points[n-1]
+///
+/// Replaces a general n-point multiscalar multiplication with n-1 doublings
+/// + n-1 additions.
+fn pow2_weighted_sum(points: &[RistrettoPoint]) -> RistrettoPoint {
+    let n = points.len();
+    debug_assert!(n > 0);
+    let mut result = points[n - 1];
+    for j in (0..n - 1).rev() {
+        result = result.double() + points[j];
+    }
+    result
+}
+
+/// Computes the power-of-two weighted sum of scalars using Horner's method:
+///   scalars[0] + 2*scalars[1] + 4*scalars[2] + ... + 2^(n-1)*scalars[n-1]
+fn pow2_weighted_scalar_sum(scalars: &[Scalar]) -> Scalar {
+    let n = scalars.len();
+    debug_assert!(n > 0);
+    let mut result = scalars[n - 1];
+    for j in (0..n - 1).rev() {
+        result = result + result + scalars[j];
     }
     result
 }
@@ -214,7 +252,7 @@ impl PrivateKey {
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         let x = Scalar::random(&mut rng);
         let public = PublicKey {
-            w: RistrettoPoint::generator() * x,
+            w: RISTRETTO_BASEPOINT_TABLE * &x,
         };
         PrivateKey { x, public }
     }
@@ -639,7 +677,7 @@ impl PreIssuance {
         // Reconstruct the signature base points for verification
         let g = RistrettoPoint::generator();
         let x_a = g + &params.h1 * &response.c + &params.h4 * &response.ctx + request.big_k;
-        let x_g = g * response.e + public.w;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &response.e + public.w;
 
         // Verify that the challenge matches the expected value
         let mut statement = LinearRelation::new();
@@ -757,7 +795,7 @@ impl PrivateKey {
         let exp = e + self.x;
         let x_a = g + &params.h1 * &c + &params.h4 * &ctx + request.big_k;
         let a = x_a * exp.invert();
-        let x_g = g * exp;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &exp;
 
         // Generate a zero-knowledge proof that the signature is valid
         let mut statement = LinearRelation::new();
@@ -1030,13 +1068,7 @@ impl PrivateKey {
         // Compute image values
         let a_bar = spend_proof.a_prime * self.x;
         let h1_prime = RistrettoPoint::generator() + &params.h2 * &spend_proof.k + &params.h4 * &spend_proof.ctx;
-        let powers = powers_of_two::<L>();
-        let k_prime = spend_proof
-            .com
-            .iter()
-            .zip(powers.iter())
-            .map(|(com, power)| com * power)
-            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let k_prime = pow2_weighted_sum(&spend_proof.com);
         let com_total = &params.h1 * &spend_proof.s + k_prime;
 
         // Build the same spend relation as the prover
@@ -1066,7 +1098,7 @@ impl PrivateKey {
         let exp = e_star + self.x;
         let x_a_star = g + k_prime + &params.h1 * &t + &params.h4 * &spend_proof.ctx;
         let a_star = x_a_star * exp.invert();
-        let x_g = g * exp;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &exp;
 
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
@@ -1124,12 +1156,13 @@ fn bits_of<const L: usize>(s: Scalar) -> [Scalar; L] {
     let bytes = s.as_bytes();
     let mut result = [Scalar::ZERO; L];
 
-    // Extract each bit from the scalar's byte representation
+    // Extract each bit from the scalar's byte representation.
+    // Use conditional_select instead of Scalar::from to avoid a
+    // u128-to-Montgomery conversion per bit and be more clearly constant-time.
     result.iter_mut().enumerate().for_each(|(i, result_elem)| {
-        let b = i / 8; // Byte index
-        let j = i % 8; // Bit position within the byte
-        let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-        *result_elem = Scalar::from(bit as u64); // Convert to scalar (0 or 1)
+        let bit = (bytes[i / 8] >> (i % 8)) & 1;
+        *result_elem =
+            Scalar::conditional_select(&Scalar::ZERO, &Scalar::ONE, subtle::Choice::from(bit));
     });
 
     result
@@ -1234,31 +1267,45 @@ impl CreditToken {
         let m = self.c - s;
         let bits = bits_of::<L>(m);
 
-        // 3. Generate commitment randomizers
+        // 3. Generate commitment randomizers (stack-allocated)
         let kstar = Scalar::random(&mut rng);
-        let s_com: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
+        let mut s_com = [Scalar::ZERO; L];
+        for s in s_com.iter_mut() {
+            *s = Scalar::random(&mut rng);
+        }
 
         // 4. Compute commitments
+        // Since bits[j] is always 0 or 1, h1 * bits[j] is either identity or h1.
+        // Use conditional_select instead of a full basepoint-table scalar mul.
+        let h1_point = params.h1.basepoint();
         let mut com = [RistrettoPoint::identity(); L];
-        com[0] = &params.h1 * &bits[0] + &params.h2 * &kstar + &params.h3 * &s_com[0];
+        let h1_bit_0 = RistrettoPoint::conditional_select(
+            &RistrettoPoint::identity(),
+            &h1_point,
+            bits[0].ct_eq(&Scalar::ONE),
+        );
+        com[0] = h1_bit_0 + &params.h2 * &kstar + &params.h3 * &s_com[0];
         for j in 1..L {
-            com[j] = &params.h1 * &bits[j] + &params.h3 * &s_com[j];
+            let h1_bit = RistrettoPoint::conditional_select(
+                &RistrettoPoint::identity(),
+                &h1_point,
+                bits[j].ct_eq(&Scalar::ONE),
+            );
+            com[j] = h1_bit + &params.h3 * &s_com[j];
         }
 
         // 5. Compute derived public values (image elements)
-        let powers = powers_of_two::<L>();
         let a_bar = b_bar * r2 - a_prime * self.e; // Equivalent to a_prime * sk
         let h1_prime = RistrettoPoint::generator() + &params.h2 * &self.k + &params.h4 * &self.ctx;
-        let k_prime = com
-            .iter()
-            .zip(powers.iter())
-            .map(|(c, power)| c * power)
-            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let k_prime = pow2_weighted_sum(&com);
         let com_total = &params.h1 * &s + k_prime;
 
-        // 6. Compute derived witness values
+        // 6. Compute derived witness values (stack-allocated)
         // Binary constraint reformulation: s2[j] = (1-b[j])*s_com[j], k2 = (1-b[0])*kstar
-        let s2: Vec<Scalar> = (0..L).map(|j| (Scalar::ONE - bits[j]) * s_com[j]).collect();
+        let mut s2 = [Scalar::ZERO; L];
+        for j in 0..L {
+            s2[j] = (Scalar::ONE - bits[j]) * s_com[j];
+        }
         let k2 = (Scalar::ONE - bits[0]) * kstar;
 
         // 7. Build spend relation (all image values pre-computed)
@@ -1288,11 +1335,7 @@ impl CreditToken {
         let pok = nizk.prove_compact(&witness, &mut rng).unwrap();
 
         // 10. Compute r_star for PreRefund
-        let r_star = s_com
-            .iter()
-            .zip(powers.iter())
-            .map(|(sj, power)| sj * power)
-            .fold(Scalar::ZERO, |acc, x| acc + x);
+        let r_star = pow2_weighted_scalar_sum(&s_com);
 
         let prerefund = PreRefund {
             k: kstar,
@@ -1408,15 +1451,9 @@ impl PreRefund {
 
         // Verify the issuer's zero-knowledge proof
         let g = RistrettoPoint::generator();
-        let powers = powers_of_two::<L>();
-        let k_prime = spend_proof
-            .com
-            .iter()
-            .zip(powers.iter())
-            .map(|(com, power)| com * power)
-            .fold(RistrettoPoint::identity(), |a, b| a + b);
+        let k_prime = pow2_weighted_sum(&spend_proof.com);
         let x_a = g + k_prime + &params.h1 * &refund.t + &params.h4 * &self.ctx;
-        let x_g = g * refund.e + public_key.w;
+        let x_g = RISTRETTO_BASEPOINT_TABLE * &refund.e + public_key.w;
 
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
