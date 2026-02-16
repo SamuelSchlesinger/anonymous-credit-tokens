@@ -138,6 +138,10 @@ impl Transcript {
     ///
     /// * `elements` - An iterator over references to `RistrettoPoint`s to add to the transcript
     pub(crate) fn add_elements<'a>(&mut self, elements: impl Iterator<Item = &'a RistrettoPoint>) {
+        // TODO: batch-compress points using Montgomery's trick to amortize
+        // field inversions. See `RistrettoPoint::double_and_compress_batch`
+        // for the technique; a `compress_batch` variant upstream would
+        // allow this without changing the protocol.
         for element in elements {
             self.add_element(element);
         }
