@@ -281,13 +281,24 @@ fn generate_test_vectors() {
     writeln!(md, "remaining_balance: {remaining}").unwrap();
     writeln!(md, "~~~").unwrap();
 
-    // ── splice into spec ────────────────────────────────────────
+    // ── compare / splice into spec ─────────────────────────────
     let spec_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/draft-act/draft-schlesinger-cfrg-act.md"
     );
 
-    let spec = std::fs::read_to_string(spec_path).expect("could not read spec markdown");
+    let spec = match std::fs::read_to_string(spec_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            panic!(
+                "Could not read spec markdown at {spec_path}: file not found.\n\n\
+                 The draft-act/ directory is a git submodule. Initialize it with:\n\n\
+                 \x20   git submodule update --init\n\n\
+                 Then re-run this test."
+            );
+        }
+        Err(e) => panic!("Could not read spec markdown at {spec_path}: {e}"),
+    };
 
     const START: &str = "<!-- TEST_VECTORS_START -->";
     const END: &str = "<!-- TEST_VECTORS_END -->";
@@ -299,15 +310,30 @@ fn generate_test_vectors() {
         .find(END)
         .expect("missing TEST_VECTORS_END marker in spec");
 
-    let mut new_spec = String::with_capacity(spec.len() + md.len());
-    new_spec.push_str(&spec[..start_idx + START.len()]);
-    new_spec.push('\n');
-    new_spec.push_str(&md);
-    new_spec.push_str(&spec[end_idx..]);
+    let existing = &spec[start_idx + START.len()..end_idx];
+    let expected = format!("\n{md}");
 
-    std::fs::write(spec_path, &new_spec).expect("could not write spec markdown");
+    if existing == expected {
+        println!("Test vectors in spec are up to date.");
+    } else if std::env::var("UPDATE_TEST_VECTORS").as_deref() == Ok("1") {
+        let mut new_spec = String::with_capacity(spec.len() + md.len());
+        new_spec.push_str(&spec[..start_idx + START.len()]);
+        new_spec.push_str(&expected);
+        new_spec.push_str(&spec[end_idx..]);
 
-    // Also print to stdout for --nocapture inspection
-    println!("{md}");
-    println!("--- wrote test vectors to {spec_path}");
+        std::fs::write(spec_path, &new_spec).expect("could not write spec markdown");
+
+        println!("{md}");
+        println!("--- wrote test vectors to {spec_path}");
+    } else {
+        panic!(
+            "Test vectors in the spec are out of date!\n\n\
+             The generated test vectors do not match the content between\n\
+             {START} and {END}\n\
+             in {spec_path}.\n\n\
+             To update the spec with the new vectors, re-run with:\n\n\
+             \x20   UPDATE_TEST_VECTORS=1 cargo test --test generate_test_vectors\n\n\
+             Then review and commit the changes."
+        );
+    }
 }
