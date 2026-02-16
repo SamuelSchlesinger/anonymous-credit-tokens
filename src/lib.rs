@@ -274,6 +274,16 @@ pub struct Params {
     h3: RistrettoBasepointTable,
     /// Fourth generator point used for request_context binding
     h4: RistrettoBasepointTable,
+    /// Cached BLAKE3 hasher state containing protocol version + compressed params.
+    ///
+    /// Every transcript starts by hashing the protocol version and all four
+    /// compressed base points (h1–h4). Compressing a Ristretto point is
+    /// expensive (field inversion), so we pay this cost once at Params
+    /// construction and cache the resulting hasher state. Transcript::new
+    /// then clones this hasher and appends only the label, saving 4 point
+    /// compressions per transcript creation. Over a full issue-spend-refund
+    /// cycle (5+ transcripts) this eliminates 20+ redundant compressions.
+    transcript_base: blake3::Hasher,
 }
 
 impl std::fmt::Debug for Params {
@@ -301,12 +311,12 @@ impl Params {
     ///
     /// A new `Params` instance with randomly generated points
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        Params {
-            h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h4: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-        }
+        Self::from_points(
+            RistrettoPoint::random(&mut rng),
+            RistrettoPoint::random(&mut rng),
+            RistrettoPoint::random(&mut rng),
+            RistrettoPoint::random(&mut rng),
+        )
     }
 
     /// Creates system parameters using a structured domain separator.
@@ -366,12 +376,7 @@ impl Params {
         let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
         let h4 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 3);
 
-        Params {
-            h1: RistrettoBasepointTable::create(&h1),
-            h2: RistrettoBasepointTable::create(&h2),
-            h3: RistrettoBasepointTable::create(&h3),
-            h4: RistrettoBasepointTable::create(&h4),
-        }
+        Self::from_points(h1, h2, h3, h4)
     }
 
     /// Hash to Ristretto255 point using BLAKE3 with counter.
@@ -411,6 +416,28 @@ impl Params {
         output_reader.fill(&mut uniform_bytes);
 
         RistrettoPoint::from_uniform_bytes(&uniform_bytes)
+    }
+
+    /// Constructs Params from four generator points, building precomputed
+    /// tables and the cached transcript base state.
+    fn from_points(
+        h1: RistrettoPoint,
+        h2: RistrettoPoint,
+        h3: RistrettoPoint,
+        h4: RistrettoPoint,
+    ) -> Self {
+        let h1 = RistrettoBasepointTable::create(&h1);
+        let h2 = RistrettoBasepointTable::create(&h2);
+        let h3 = RistrettoBasepointTable::create(&h3);
+        let h4 = RistrettoBasepointTable::create(&h4);
+        let transcript_base = Transcript::base_hasher(&h1, &h2, &h3, &h4);
+        Params {
+            h1,
+            h2,
+            h3,
+            h4,
+            transcript_base,
+        }
     }
 }
 
@@ -971,50 +998,65 @@ impl PrivateKey {
         // Constant-time: scalar operand is the private key.
         let a_bar = spend_proof.a_prime * self.x;
 
+        // Spec Section 3.5.2, steps 6–10.
         // All remaining verification uses only public spend_proof / params
         // values as scalar operands, so variable-time operations are safe.
+        //
+        // Optimization: individual multiplications from the spec are batched
+        // into vartime multiscalar multiplications where possible.
         let big_h1 = RistrettoPoint::generator()
             + &params.h2 * &spend_proof.k
             + &params.h4 * &spend_proof.ctx;
+        // Spec step 9: A1 = A'*e_bar + B_bar*r2_bar - A_bar*gamma
         let a1 = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
             [spend_proof.a_prime, spend_proof.b_bar, a_bar],
         );
+        // Spec step 10: A2 = B_bar*r3_bar + H1*c_bar + H3*r_bar - H1'*gamma
         let a2 = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.r3_bar, spend_proof.gamma.neg(), spend_proof.c_bar, spend_proof.r_bar],
             [spend_proof.b_bar, big_h1, params.h1.basepoint(), params.h3.basepoint()],
         );
+
+        // Spec steps 15–27: compute C'[j][0] and C'[j][1] for the range
+        // proof. The spec uses C[j][0] = Com[j] and C[j][1] = Com[j] - H1
+        // as intermediate values. We compute the equivalent expressions
+        // directly as vartime multiscalar multiplications.
         let h1_point = params.h1.basepoint();
         let h3_point = params.h3.basepoint();
         let com0 = spend_proof.com[0];
         let com0_minus_h1 = com0 - h1_point;
         let gamma01_0 = spend_proof.gamma - spend_proof.gamma0[0];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+        // Spec step 19: C'[0][0] = H2*w00 + H3*z[0][0] - C[0][0]*gamma0[0]
         big_c_prime[0][0] = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.w00, spend_proof.z[0][0], spend_proof.gamma0[0].neg()],
             [params.h2.basepoint(), h3_point, com0],
         );
+        // Spec step 20: C'[0][1] = H2*w01 + H3*z[0][1] - C[0][1]*gamma1[0]
         big_c_prime[0][1] = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.w01, spend_proof.z[0][1], gamma01_0.neg()],
             [params.h2.basepoint(), h3_point, com0_minus_h1],
         );
+        // Spec steps 22–27: range proof for bits j = 1..L-1
         #[allow(clippy::needless_range_loop)] // indexes big_c_prime, com, gamma0, z simultaneously
         for j in 1..L {
             let com_j = spend_proof.com[j];
             let com_j_minus_h1 = com_j - h1_point;
             let gamma01_j = spend_proof.gamma - spend_proof.gamma0[j];
+            // Spec step 26: C'[j][0] = H3*z[j][0] - C[j][0]*gamma0[j]
             big_c_prime[j][0] = RistrettoPoint::vartime_multiscalar_mul(
                 [spend_proof.z[j][0], spend_proof.gamma0[j].neg()],
                 [h3_point, com_j],
             );
+            // Spec step 27: C'[j][1] = H3*z[j][1] - C[j][1]*gamma1[j]
             big_c_prime[j][1] = RistrettoPoint::vartime_multiscalar_mul(
                 [spend_proof.z[j][1], gamma01_j.neg()],
                 [h3_point, com_j_minus_h1],
             );
         }
 
-        let pow2_scalars = powers_of_two::<L>();
-        let k_prime = RistrettoPoint::vartime_multiscalar_mul(&pow2_scalars, &spend_proof.com);
+        let k_prime = pow2_weighted_sum(&spend_proof.com);
         let com_ = &params.h1 * &spend_proof.s + k_prime;
         let big_c = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.c_bar.neg(), spend_proof.k_bar, spend_proof.s_bar, spend_proof.gamma.neg()],
@@ -1097,42 +1139,80 @@ pub struct PreRefund {
     ctx: Scalar,
 }
 
-/// Returns an array of successive powers of two as Scalars: 1, 2, 4, 8, ...
+/// Computes the power-of-two weighted sum of points using Horner's method:
+///   points[0] + 2*points[1] + 4*points[2] + ... + 2^(n-1)*points[n-1]
 ///
-/// This avoids overflow issues with `2u128.pow(i)` when i >= 128 and
-/// returns a stack-allocated array instead of requiring a Vec collect.
-fn powers_of_two<const L: usize>() -> [Scalar; L] {
-    let two = Scalar::from(2u64);
-    let mut result = [Scalar::ZERO; L];
-    if L > 0 {
-        result[0] = Scalar::ONE;
-        for i in 1..L {
-            result[i] = result[i - 1] * two;
-        }
+/// Implements spec expression `Sum(Com[j] * 2^j for j in [L])` (ProveSpend
+/// step 68, VerifySpendProof step 29, etc.). Horner's method exploits the
+/// power-of-two structure to replace a general n-point multiscalar
+/// multiplication with just 2*(n-1) group operations (n-1 doublings +
+/// n-1 additions).
+fn pow2_weighted_sum(points: &[RistrettoPoint]) -> RistrettoPoint {
+    let n = points.len();
+    debug_assert!(n > 0);
+    let mut result = points[n - 1];
+    for j in (0..n - 1).rev() {
+        result = result.double() + points[j];
+    }
+    result
+}
+
+/// Computes the power-of-two weighted sum of scalars using Horner's method:
+///   scalars[0] + 2*scalars[1] + 4*scalars[2] + ... + 2^(n-1)*scalars[n-1]
+///
+/// Implements spec expression `Sum(s[j] * 2^j for j in [L])` (ProveSpend
+/// step 69). Horner's method replaces n scalar multiplications (by varying
+/// powers of two) with 2*(n-1) scalar additions.
+fn pow2_weighted_scalar_sum(scalars: &[Scalar]) -> Scalar {
+    let n = scalars.len();
+    debug_assert!(n > 0);
+    let mut result = scalars[n - 1];
+    for j in (0..n - 1).rev() {
+        result = result + result + scalars[j];
     }
     result
 }
 
 /// Checks whether all bits at positions >= L are zero in the scalar (constant-time).
 ///
-/// This validates that a scalar value fits within L bits, i.e., is in the range [0, 2^L).
-/// The check is performed in constant time to avoid leaking information about the scalar
-/// through timing side channels.
+/// Implements the `value >= 2^L` guard from the spec (e.g., ProveSpend steps
+/// 2–6, IssueResponse step 1, etc.). Equivalent to checking that the scalar
+/// fits in L bits, i.e., is in the range [0, 2^L). The check is performed in
+/// constant time to avoid leaking information about the scalar through timing
+/// side channels.
+///
+/// # Optimization: byte-level checks
+///
+/// Instead of iterating bit-by-bit from L to 256 (up to 256-L iterations with
+/// shift+mask each), we operate on whole bytes:
+///   - One partial-byte mask for the byte straddling the L boundary
+///   - Bulk OR over all fully-above-L bytes
+///
+/// For L=128 this reduces ~128 bit extractions to ~16 byte ORs.
 fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
     let bytes = s.as_bytes();
-    let mut any_high_bit = 0u8;
-    for i in L..256 {
-        any_high_bit |= (bytes[i / 8] >> (i % 8)) & 1;
+    let full_byte = L / 8;
+    let rem_bits = L % 8;
+    let mut any_high = 0u8;
+    // Check the partial byte at the L boundary (if L isn't byte-aligned).
+    // The mask keeps only bits at positions >= rem_bits within this byte.
+    if rem_bits != 0 {
+        any_high |= bytes[full_byte] >> rem_bits;
     }
-    bool::from(any_high_bit.ct_eq(&0))
+    // Check all remaining full bytes above the L boundary.
+    let start = full_byte + usize::from(rem_bits != 0);
+    for &b in &bytes[start..32] {
+        any_high |= b;
+    }
+    bool::from(any_high.ct_eq(&0))
 }
 
-/// Decomposes a scalar value into its binary representation.
+/// Decomposes a scalar value into its binary representation as `Choice` values.
 ///
-/// This helper function converts a scalar value into an array of L scalars,
-/// where each scalar is either 0 or 1, representing the binary decomposition
-/// of the input value. This is used in range proofs to demonstrate that a value
-/// falls within a certain range.
+/// Implements spec Section 3.7 (BitDecompose). The spec returns `Scalar(bit)`
+/// for each bit; we return `Choice` instead. This avoids constructing full
+/// `Scalar` values and enables constant-time `conditional_select` in the
+/// prover's range proof (spec steps 47–66) without needing `ct_eq` comparisons.
 ///
 /// # Arguments
 ///
@@ -1140,15 +1220,14 @@ fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
 ///
 /// # Returns
 ///
-/// An array of L scalars (0 or 1) representing the binary bits of the input
-fn bits_of<const L: usize>(s: Scalar) -> [Scalar; L] {
+/// An array of L `Choice` values representing the binary bits of the input
+fn bits_of<const L: usize>(s: Scalar) -> [Choice; L] {
     let bytes = s.as_bytes();
-    let mut result = [Scalar::ZERO; L];
+    let mut result = [Choice::from(0u8); L];
 
     // Extract each bit from the scalar's byte representation
     result.iter_mut().enumerate().for_each(|(i, result_elem)| {
-        let bit = (bytes[i / 8] >> (i % 8)) & 1;
-        *result_elem = Scalar::conditional_select(&Scalar::ZERO, &Scalar::ONE, Choice::from(bit));
+        *result_elem = Choice::from((bytes[i / 8] >> (i % 8)) & 1);
     });
 
     result
@@ -1258,29 +1337,30 @@ impl CreditToken {
         for s_val in s_i.iter_mut() {
             *s_val = Scalar::random(&mut rng);
         }
+        // Spec steps 26–32: create commitments Com[j] for each bit.
+        //
+        // The spec computes H1 * i[j] where i[j] is 0 or 1. Since bits_of
+        // returns Choice values (see Section 3.7 note above), we use
+        // conditional_select between identity and H1 instead of a full
+        // scalar multiplication, which is equivalent and constant-time.
         let mut com = [RistrettoPoint::identity(); L];
         let h1_point = params.h1.basepoint();
-        // Optimization: i[j] is always 0 or 1 (from bits_of), so h1 * i[j] is
-        // either identity or h1. Use conditional_select instead of a full scalar mul.
         let h1_bit_0 = RistrettoPoint::conditional_select(
             &RistrettoPoint::identity(),
             &h1_point,
-            i[0].ct_eq(&Scalar::ONE),
+            i[0],
         );
         com[0] = h1_bit_0 + &params.h2 * &k_star + &params.h3 * &s_i[0];
         for j in 1..L {
             let h1_bit = RistrettoPoint::conditional_select(
                 &RistrettoPoint::identity(),
                 &h1_point,
-                i[j].ct_eq(&Scalar::ONE),
+                i[j],
             );
             com[j] = h1_bit + &params.h3 * &s_i[j];
         }
-        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
         let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
 
-        big_c[0][0] = com[0];
-        big_c[0][1] = com[0] - h1_point;
         let k0_prime = Scalar::random(&mut rng);
         let mut s_i_prime = [Scalar::ZERO; L];
         for s_prime in s_i_prime.iter_mut() {
@@ -1296,53 +1376,96 @@ impl CreditToken {
             *z_val = Scalar::random(&mut rng);
         }
 
-        let h2_w0_h3_z0 = &params.h2 * &w0 + &params.h3 * &z[0];
-        let h2_k0_h3_s0 = &params.h2 * &k0_prime + &params.h3 * &s_i_prime[0];
+        // Spec steps 38–52: compute C'[0][0] and C'[0][1].
+        //
+        // The spec branches on i[0] and uses C[0][b] * gamma0[0] directly,
+        // where C[0][0] = Com[0] and C[0][1] = Com[0] - H1. Because the
+        // prover knows Com[0] = H1*i[0] + H2*k* + H3*s[0], we can
+        // decompose C[0][b]*gamma0 into precomputed-table multiplications
+        // on H1, H2, H3 and use constant-time conditional_select instead
+        // of branching on the secret bit i[0].
+        //
+        // Optimization: merge table muls sharing the same base (8 → 5).
+        //  (a) Compute H1*γ₀ once; derive H1*(i[0]*γ₀) via conditional_select.
+        //  (b) Merge H2*w0 and H2*(k*γ₀) into H2*(w0 - k*γ₀).
+        //  (c) Merge H3*z[0] and H3*(s[0]*γ₀) into H3*(z[0] - s[0]*γ₀).
+        //
+        // Algebraically, for the simulated branch:
+        //   diff0 = H2*w0 + H3*z[0] - Com[0]*γ₀
+        //         = H2*w0 + H3*z[0] - (H1*i[0] + H2*k* + H3*s[0])*γ₀
+        //         = H2*(w0 - k*γ₀) + H3*(z[0] - s[0]*γ₀) - H1*(i[0]*γ₀)
+        //
+        // Saves 3 table multiplications (~192 group additions).
+        let h2_k0_h3_s0 = &params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]; // 2 table muls
+        let h1_gamma0 = &params.h1 * &gamma_i[0]; // 1 table mul
+        let h1_i0_gamma = RistrettoPoint::conditional_select(
+            &RistrettoPoint::identity(),
+            &h1_gamma0,
+            i[0],
+        );
+        let h2_diff0 = &params.h2 * &(w0 - k_star * gamma_i[0]); // 1 table mul
+        let h3_diff0 = &params.h3 * &(z[0] - s_i[0] * gamma_i[0]); // 1 table mul
+        let diff0 = h2_diff0 + h3_diff0 - h1_i0_gamma;
 
-        // Optimization: big_c[0][1] = com[0] - h1, so big_c[0][1] * gamma_i[0] =
-        // com[0] * gamma_i[0] - h1 * gamma_i[0]. Compute com[0] * gamma_i[0] once
-        // and derive the second product via a cheaper basepoint-table mul.
-        let com0_gamma = com[0] * gamma_i[0];
-        let h1_gamma0 = &params.h1 * &gamma_i[0];
         big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(h2_w0_h3_z0 - com0_gamma),
+            &diff0,
             &h2_k0_h3_s0,
-            i[0].ct_eq(&Scalar::ZERO),
+            !i[0],
         );
 
         big_c_prime[0][1] = RistrettoPoint::conditional_select(
             &h2_k0_h3_s0,
-            &(h2_w0_h3_z0 - com0_gamma + h1_gamma0),
-            i[0].ct_eq(&Scalar::ZERO),
+            &(diff0 + h1_gamma0),
+            !i[0],
         );
 
+        // Spec steps 53–66: compute C'[j][0] and C'[j][1] for j = 1..L-1.
+        //
+        // The spec branches on i[j] and uses C[j][b] * gamma0[j] directly,
+        // where C[j][0] = Com[j] and C[j][1] = Com[j] - H1. Because the
+        // prover knows Com[j] = H1*i[j] + H3*s[j] (j >= 1), we decompose
+        // C[j][b]*gamma0 into precomputed-table multiplications on H1, H3
+        // and use constant-time conditional_select instead of branching on
+        // the secret bit i[j].
+        //
+        // Optimization: merge table muls sharing the same base (5 → 3).
+        //  (a) Compute H1*γ_j once; derive H1*(i[j]*γ_j) via conditional_select.
+        //  (b) Merge H3*z[j] and H3*(s[j]*γ_j) into H3*(z[j] - s[j]*γ_j).
+        //
+        // Algebraically, for the simulated branch:
+        //   diff = H3*z[j] - Com[j]*γ_j
+        //        = H3*z[j] - (H1*i[j] + H3*s[j])*γ_j
+        //        = H3*(z[j] - s[j]*γ_j) - H1*(i[j]*γ_j)
+        //
+        // For L=128, this saves 2 table muls × 127 iterations = 254 table
+        // multiplications (~16,256 group additions, ~40% of inner loop cost).
         for j in 1..L {
-            big_c[j][0] = com[j];
-            big_c[j][1] = com[j] - h1_point;
+            let h3_s_j = &params.h3 * &s_i_prime[j]; // table mul 1
+            let h1_gamma = &params.h1 * &gamma_i[j]; // table mul 2
+            let h3_diff = &params.h3 * &(z[j] - s_i[j] * gamma_i[j]); // table mul 3
 
-            let h3_z_j = &params.h3 * &z[j];
-            let h3_s_j = &params.h3 * &s_i_prime[j];
+            // Derive h1*(i[j]*γ_j) from h1*γ_j via constant-time select:
+            //   when i[j]=1: h1_i_gamma = h1*γ_j
+            //   when i[j]=0: h1_i_gamma = identity
+            let h1_i_gamma = RistrettoPoint::conditional_select(
+                &RistrettoPoint::identity(),
+                &h1_gamma,
+                i[j],
+            );
+            let diff = h3_diff - h1_i_gamma;
 
-            // Same optimization as j=0: reuse com[j] * gamma_i[j] for both branches.
-            let com_gamma = com[j] * gamma_i[j];
-            let h1_gamma = &params.h1 * &gamma_i[j];
             big_c_prime[j][0] = RistrettoPoint::conditional_select(
-                &(h3_z_j - com_gamma),
+                &diff,
                 &h3_s_j,
-                i[j].ct_eq(&Scalar::ZERO),
+                !i[j],
             );
             big_c_prime[j][1] = RistrettoPoint::conditional_select(
                 &h3_s_j,
-                &(h3_z_j - com_gamma + h1_gamma),
-                i[j].ct_eq(&Scalar::ZERO),
+                &(diff + h1_gamma),
+                !i[j],
             );
         }
-        let pow2 = powers_of_two::<L>();
-        let r_star = s_i
-            .iter()
-            .zip(pow2.iter())
-            .map(|(si, p)| si * p)
-            .fold(Scalar::ZERO, |x, y| x + y);
+        let r_star = pow2_weighted_scalar_sum(&s_i);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
         let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &s_prime;
@@ -1368,44 +1491,44 @@ impl CreditToken {
         gamma00[0] = Scalar::conditional_select(
             &gamma_i[0],
             &(gamma - gamma_i[0]),
-            i[0].ct_eq(&Scalar::ZERO),
+            !i[0],
         );
         let w00 = Scalar::conditional_select(
             &w0,
             &(gamma00[0] * k_star + k0_prime),
-            i[0].ct_eq(&Scalar::ZERO),
+            !i[0],
         );
         let w01 = Scalar::conditional_select(
             &((gamma - gamma00[0]) * k_star + k0_prime),
             &w0,
-            i[0].ct_eq(&Scalar::ZERO),
+            !i[0],
         );
         let mut z00 = [[Scalar::ZERO; 2]; L];
         z00[0][0] = Scalar::conditional_select(
             &z[0],
             &(gamma00[0] * s_i[0] + s_i_prime[0]),
-            i[0].ct_eq(&Scalar::ZERO),
+            !i[0],
         );
         z00[0][1] = Scalar::conditional_select(
             &((gamma - gamma00[0]) * s_i[0] + s_i_prime[0]),
             &z[0],
-            i[0].ct_eq(&Scalar::ZERO),
+            !i[0],
         );
         for j in 1..L {
             gamma00[j] = Scalar::conditional_select(
                 &gamma_i[j],
                 &(gamma - gamma_i[j]),
-                i[j].ct_eq(&Scalar::ZERO),
+                !i[j],
             );
             z00[j][0] = Scalar::conditional_select(
                 &z[j],
                 &(gamma00[j] * s_i[j] + s_i_prime[j]),
-                i[j].ct_eq(&Scalar::ZERO),
+                !i[j],
             );
             z00[j][1] = Scalar::conditional_select(
                 &((gamma - gamma00[j]) * s_i[j] + s_i_prime[j]),
                 &z[j],
-                i[j].ct_eq(&Scalar::ZERO),
+                !i[j],
             );
         }
         let k_bar = gamma * k_star + k_prime;
@@ -1537,9 +1660,8 @@ impl PreRefund {
         // All scalar operands below are public constants, issuer-provided
         // (refund.*), or already revealed in the clear (self.ctx), so
         // variable-time operations are safe.
-        let pow2_scalars = powers_of_two::<L>();
         let x_a = RistrettoPoint::generator()
-            + RistrettoPoint::vartime_multiscalar_mul(&pow2_scalars, &spend_proof.com)
+            + pow2_weighted_sum(&spend_proof.com)
             + &params.h1 * &refund.t
             + &params.h4 * &self.ctx;
 

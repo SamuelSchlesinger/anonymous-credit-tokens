@@ -37,3 +37,7 @@ codegen-units = 1
 [[bench]]
 name = "benchmark"
 harness = false
+
+[[bench]]
+name = "fast"
+harness = false

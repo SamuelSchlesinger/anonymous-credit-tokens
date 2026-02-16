@@ -23,6 +23,7 @@
 //! challenge values deterministically from the protocol messages.
 
 use super::Params;
+use curve25519_dalek::ristretto::RistrettoBasepointTable;
 use curve25519_dalek::RistrettoPoint;
 use curve25519_dalek::Scalar;
 
@@ -39,13 +40,47 @@ pub(crate) struct Transcript {
 }
 
 impl Transcript {
+    /// Builds the base BLAKE3 hasher state containing the protocol version
+    /// and compressed parameter points.
+    ///
+    /// Implements spec Section 3.6 (CreateTranscript) steps 1–6. The
+    /// resulting hasher is cached in `Params::transcript_base` and cloned
+    /// (cheaply) by every subsequent `Transcript::new` call, which only
+    /// needs to append step 7 (the label). This avoids 4 expensive point
+    /// compressions per transcript without changing the hash output.
+    pub(crate) fn base_hasher(
+        h1: &RistrettoBasepointTable,
+        h2: &RistrettoBasepointTable,
+        h3: &RistrettoBasepointTable,
+        h4: &RistrettoBasepointTable,
+    ) -> blake3::Hasher {
+        let mut hasher = blake3::Hasher::new();
+        // Add protocol version with length prefix
+        hasher.update(&(PROTOCOL_VERSION.len() as u64).to_be_bytes());
+        hasher.update(PROTOCOL_VERSION);
+        // Add the parameters' base points (each length-prefixed via Encode())
+        fn add_point(hasher: &mut blake3::Hasher, point: &RistrettoPoint) {
+            let compressed = point.compress();
+            let bytes = compressed.as_bytes();
+            hasher.update(&(bytes.len() as u64).to_be_bytes());
+            hasher.update(bytes);
+        }
+        add_point(&mut hasher, &h1.basepoint());
+        add_point(&mut hasher, &h2.basepoint());
+        add_point(&mut hasher, &h3.basepoint());
+        add_point(&mut hasher, &h4.basepoint());
+        hasher
+    }
+
     /// Creates a new transcript with the given label.
     ///
-    /// The label helps to domain-separate different transcript uses, ensuring
-    /// that challenges generated for one protocol cannot be reused for another.
+    /// Clones the cached base hasher state from `Params` (which already
+    /// contains the protocol version and compressed parameter points) and
+    /// appends the label. This avoids 4 point compressions per call.
     ///
     /// # Arguments
     ///
+    /// * `params` - System parameters (carries the cached hasher state)
     /// * `label` - A byte slice used to identify this transcript's purpose
     ///
     /// # Returns
@@ -53,18 +88,8 @@ impl Transcript {
     /// A new `Transcript` instance initialized with the label
     pub(crate) fn new(params: &Params, label: &[u8]) -> Self {
         let mut transcript = Transcript {
-            hasher: blake3::Hasher::new(),
+            hasher: params.transcript_base.clone(),
         };
-        // Add protocol version with length prefix
-        transcript
-            .hasher
-            .update(&(PROTOCOL_VERSION.len() as u64).to_be_bytes());
-        transcript.hasher.update(PROTOCOL_VERSION);
-        // Add the parameters' base points using Encode() which includes length prefixes
-        transcript.add_element(&params.h1.basepoint());
-        transcript.add_element(&params.h2.basepoint());
-        transcript.add_element(&params.h3.basepoint());
-        transcript.add_element(&params.h4.basepoint());
         // Add label with length prefix
         transcript
             .hasher
