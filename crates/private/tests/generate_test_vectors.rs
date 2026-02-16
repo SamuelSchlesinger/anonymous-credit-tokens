@@ -284,7 +284,7 @@ fn generate_test_vectors() {
     // ── compare / splice into spec ─────────────────────────────
     let spec_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/draft-act/draft-schlesinger-cfrg-act.md"
+        "/../../draft-act/draft-schlesinger-cfrg-act.md"
     );
 
     let spec = match std::fs::read_to_string(spec_path) {

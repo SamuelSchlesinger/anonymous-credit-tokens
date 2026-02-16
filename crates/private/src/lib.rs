@@ -1008,6 +1008,10 @@ impl PrivateKey {
             + &params.h2 * &spend_proof.k
             + &params.h4 * &spend_proof.ctx;
         // Spec step 9: A1 = A'*e_bar + B_bar*r2_bar - A_bar*gamma
+        //
+        // Security Note: This is a function of a_bar, which should raise alarms.
+        // However, it is hard to compute x from a_bar, so it is okay to use a_bar
+        // in variable timing operations.
         let a1 = RistrettoPoint::vartime_multiscalar_mul(
             [spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
             [spend_proof.a_prime, spend_proof.b_bar, a_bar],
