@@ -8,12 +8,12 @@ use rand::{Rng, thread_rng};
 use rand_core::OsRng;
 use std::time::Duration;
 
-/// Max credit value that fits in L bits: min(2^L - 1, 999).
-fn max_credit(l: u32) -> u64 {
-    if l >= 64 {
-        999
+/// Max credit value that fits in L bits: 2^L - 1.
+fn max_credit(l: u32) -> u128 {
+    if l >= 128 {
+        u128::MAX
     } else {
-        std::cmp::min((1u64 << l) - 1, 999)
+        (1u128 << l) - 1
     }
 }
 
