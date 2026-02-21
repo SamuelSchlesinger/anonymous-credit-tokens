@@ -19,14 +19,14 @@
 //! All protocol messages are encoded using deterministic CBOR (RFC 8949) for
 //! interoperability.
 
-use crate::{
+use super::{
     CreditToken, ErrorCode, ErrorMsg, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund,
     PrivateKey, PublicKey, Refund, SpendProof,
 };
 use ciborium::value::Value;
 use elliptic_curve::PrimeField;
-use p256::elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
-use p256::{AffinePoint, ProjectivePoint, Scalar};
+use p256_crate::elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
+use p256_crate::{AffinePoint, ProjectivePoint, Scalar};
 
 /// Maximum CBOR input size for protocol messages (64 KiB).
 /// This prevents memory amplification attacks from crafted CBOR payloads.
@@ -111,7 +111,7 @@ fn encode_scalar(scalar: &Scalar) -> Value {
 fn decode_point(value: &Value) -> Result<ProjectivePoint, CborError> {
     match value {
         Value::Bytes(bytes) if bytes.len() == 33 => {
-            let encoded = EncodedPoint::<p256::NistP256>::from_bytes(bytes)
+            let encoded = EncodedPoint::<p256_crate::NistP256>::from_bytes(bytes)
                 .map_err(|_| CborError::InvalidValue("invalid SEC1 encoding"))?;
             let affine = AffinePoint::from_encoded_point(&encoded);
             if affine.is_some().into() {
@@ -131,7 +131,7 @@ fn decode_scalar(value: &Value) -> Result<Scalar, CborError> {
     match value {
         Value::Bytes(bytes) if bytes.len() == 32 => {
             let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
-            let repr = p256::FieldBytes::from(arr);
+            let repr = p256_crate::FieldBytes::from(arr);
             let scalar = Scalar::from_repr(repr);
             if scalar.is_some().into() {
                 Ok(scalar.unwrap())

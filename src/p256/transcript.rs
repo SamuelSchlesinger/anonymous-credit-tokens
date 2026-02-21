@@ -25,7 +25,7 @@
 use super::Params;
 use elliptic_curve::ops::Reduce;
 use elliptic_curve::sec1::ToEncodedPoint;
-use p256::{ProjectivePoint, Scalar, U256};
+use p256_crate::{ProjectivePoint, Scalar, U256};
 
 const PROTOCOL_VERSION: &[u8] = b"p256 anonymous-credits v1.0";
 

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::*;
+use super::*;
 use elliptic_curve::ops::Reduce;
 use elliptic_curve::PrimeField;
-use p256::{ProjectivePoint, U256};
+use p256_crate::{ProjectivePoint, U256};
 use proptest::prelude::*;
 use rand_core::OsRng;
 use std::collections::HashSet;
@@ -575,37 +575,37 @@ fn multiple_tokens_with_same_issuer() {
 #[test]
 fn bits_of_() {
     let x = scalar_from_u128(u128::MAX);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().for_each(|bit| assert!(bool::from(*bit)));
     let x = Scalar::from(0u64);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().for_each(|bit| assert!(!bool::from(*bit)));
     let x = Scalar::from(0b001u64);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().enumerate().for_each(|(i, bit)| {
         let expected = i == 0;
         assert_eq!(bool::from(*bit), expected);
     });
     let x = Scalar::from(0b100000000u64);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().enumerate().for_each(|(i, bit)| {
         let expected = i == 8;
         assert_eq!(bool::from(*bit), expected);
     });
     let x = Scalar::from(7u64);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().enumerate().for_each(|(i, bit)| {
         let expected = i <= 2;
         assert_eq!(bool::from(*bit), expected);
     });
     let x = scalar_from_u128(0b10101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010u128);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().enumerate().for_each(|(i, bit)| {
         let expected = i % 2 == 1;
         assert_eq!(bool::from(*bit), expected);
     });
     let x = scalar_from_u128(0b01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101u128);
-    let bits = crate::bits_of::<128>(x);
+    let bits = super::bits_of::<128>(x);
     bits.iter().enumerate().for_each(|(i, bit)| {
         let expected = i % 2 == 0;
         assert_eq!(bool::from(*bit), expected);
