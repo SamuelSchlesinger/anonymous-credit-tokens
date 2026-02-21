@@ -116,7 +116,7 @@ impl<C: Ciphersuite> Transcript<C> {
     /// Adds a scalar value to the transcript.
     pub(crate) fn add_scalar(&mut self, scalar: &C::Scalar) {
         let bytes = C::scalar_to_bytes(scalar);
-        self.update(&bytes);
+        self.update(bytes.as_ref());
     }
 
     /// Adds multiple scalar values to the transcript.

@@ -205,6 +205,7 @@ impl Ciphersuite for Ristretto255 {
     type Scalar = Scalar;
     type ParamPoint = RistrettoBasepointTable;
     type CompressedPoint = [u8; 32];
+    type ScalarBytes = [u8; 32];
 
     const PROTOCOL_VERSION: &'static [u8] = b"curve25519-ristretto anonymous-credits v1.0";
 

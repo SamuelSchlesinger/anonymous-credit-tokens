@@ -45,7 +45,7 @@ pub(crate) trait TestCiphersuite: Ciphersuite {
 
 /// A simple in-memory nullifier database for testing double-spend prevention.
 pub(crate) struct NullifierDb {
-    used_nullifiers: HashSet<[u8; 32]>,
+    pub(crate) used_nullifiers: HashSet<Vec<u8>>,
 }
 
 impl NullifierDb {
@@ -56,11 +56,11 @@ impl NullifierDb {
     }
 
     pub(crate) fn is_spent<C: Ciphersuite>(&self, nullifier: &C::Scalar) -> bool {
-        self.used_nullifiers.contains(&C::scalar_to_bytes(nullifier))
+        self.used_nullifiers.contains(C::scalar_to_bytes(nullifier).as_ref())
     }
 
     pub(crate) fn record_spent<C: Ciphersuite>(&mut self, nullifier: &C::Scalar) {
-        self.used_nullifiers.insert(C::scalar_to_bytes(nullifier));
+        self.used_nullifiers.insert(C::scalar_to_bytes(nullifier).as_ref().to_vec());
     }
 }
 

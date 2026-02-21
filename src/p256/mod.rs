@@ -202,6 +202,7 @@ impl Ciphersuite for P256 {
     type Scalar = Scalar;
     type ParamPoint = ProjectivePoint;
     type CompressedPoint = [u8; 33];
+    type ScalarBytes = [u8; 32];
 
     const PROTOCOL_VERSION: &'static [u8] = b"p256 anonymous-credits v1.0";
 

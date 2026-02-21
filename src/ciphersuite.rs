@@ -40,6 +40,10 @@ pub trait Ciphersuite: Sized + Clone + Copy + std::fmt::Debug + Zeroize + 'stati
     /// `[u8; 33]` for P-256 (SEC1 compressed), `[u8; 32]` for Ristretto255.
     type CompressedPoint: AsRef<[u8]> + Clone;
 
+    /// Fixed-size scalar byte encoding for transcript hashing.
+    /// `[u8; 32]` for 256-bit curves, `[u8; 48]` for P-384, `[u8; 66]` for P-521.
+    type ScalarBytes: AsRef<[u8]> + Clone;
+
     /// Protocol version string included in every transcript.
     const PROTOCOL_VERSION: &'static [u8];
 
@@ -57,8 +61,8 @@ pub trait Ciphersuite: Sized + Clone + Copy + std::fmt::Debug + Zeroize + 'stati
     /// Decompose a scalar into L binary Choice values.
     fn bits_of<const L: usize>(s: Self::Scalar) -> [Choice; L];
 
-    /// Serialize a scalar to 32 bytes (for transcript hashing).
-    fn scalar_to_bytes(s: &Self::Scalar) -> [u8; 32];
+    /// Serialize a scalar to bytes (for transcript hashing).
+    fn scalar_to_bytes(s: &Self::Scalar) -> Self::ScalarBytes;
 
     /// Invert a scalar (assumes non-zero with negligible probability).
     fn scalar_invert(s: &Self::Scalar) -> Self::Scalar;
