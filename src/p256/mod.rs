@@ -96,7 +96,7 @@
 //!   and to each other, completely defeating the anonymity guarantees of the scheme. To
 //!   preserve unlinkability, assign the same `ctx` to all clients within a given context
 //!   (e.g., per-service or per-epoch), or use `Scalar::ZERO` when context binding is not
-//!   needed. See the `ctx` parameter on [`PrivateKey::issue`] for more details.
+//!   needed. See the `ctx` parameter on `PrivateKey::issue()` for more details.
 //!
 //! - **Nullifier Storage**: The issuer **must** record every nullifier from verified spend
 //!   proofs and reject any proof whose nullifier has been seen before. Failure to do so
@@ -110,7 +110,7 @@
 //! use rand_core::OsRng;
 //!
 //! // Setup: create system parameters and issuer keypair
-//! let params = Params::new("example-org", "payment-api", "production", "2024-01-15");
+//! let params = Params::new("example-org", "payment-api", "production", "2024-01-15").unwrap();
 //! let private_key = PrivateKey::random(OsRng);
 //!
 //! // Issuance: client requests 100 credits
@@ -142,25 +142,240 @@
 //!
 //! See the README.md file for comprehensive integration guidance.
 
+use crate::ciphersuite::{CborError, Ciphersuite};
+use ciborium::value::Value;
+use elliptic_curve::hash2curve::{ExpandMsgXmd, GroupDigest};
 use elliptic_curve::ops::Reduce;
-use elliptic_curve::Field;
+use elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
 use elliptic_curve::PrimeField;
-use group::Group;
-use p256_crate::{ProjectivePoint, U256};
-use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
-use zeroize::ZeroizeOnDrop;
-
-use std::ops::Neg;
-
-mod transcript;
-use transcript::Transcript;
-
-pub mod cbor;
+use p256_crate::{AffinePoint, ProjectivePoint, U256};
+use sha2::Sha256;
+use subtle::{Choice, ConstantTimeEq};
+use zeroize::Zeroize;
 
 // Re-export types used in the public API so consumers don't need to depend
 // on p256 or rand_core directly.
 pub use p256_crate::Scalar;
 pub use rand_core::{self, CryptoRngCore};
+pub use crate::ciphersuite::{ErrorCode, ErrorMsg, ParamsError};
+
+// ── Type aliases for backward compatibility ────────────────────────────
+
+/// The private key of the issuer, used to issue and refund credit tokens.
+pub type PrivateKey = crate::protocol::PrivateKey<P256>;
+
+/// The public key of the issuer, used to verify credit tokens.
+pub type PublicKey = crate::protocol::PublicKey<P256>;
+
+/// System parameters that define the cryptographic setup for the anonymous credentials scheme.
+pub type Params = crate::protocol::Params<P256>;
+
+/// Client state maintained during the issuance protocol.
+pub type PreIssuance = crate::protocol::PreIssuance<P256>;
+
+/// A request sent by the client to the issuer to obtain a credit token.
+pub type IssuanceRequest = crate::protocol::IssuanceRequest<P256>;
+
+/// The issuer's response to a client's issuance request.
+pub type IssuanceResponse = crate::protocol::IssuanceResponse<P256>;
+
+/// The credit token used to store and spend anonymous credits.
+pub type CreditToken = crate::protocol::CreditToken<P256>;
+
+/// A zero-knowledge proof that allows spending credits anonymously.
+pub type SpendProof<const L: usize> = crate::protocol::SpendProof<P256, L>;
+
+/// Client state maintained during the refund protocol.
+pub type PreRefund = crate::protocol::PreRefund<P256>;
+
+/// The issuer's response to a spending proof, used to create a new credit token.
+pub type Refund = crate::protocol::Refund<P256>;
+
+// ── P-256 ciphersuite marker type ──────────────────────────────────────
+
+/// The P-256 ciphersuite marker type.
+#[derive(Debug, Clone, Copy, Zeroize)]
+pub struct P256;
+
+impl Ciphersuite for P256 {
+    type Point = ProjectivePoint;
+    type Scalar = Scalar;
+    type ParamPoint = ProjectivePoint;
+    type CompressedPoint = [u8; 33];
+
+    const PROTOCOL_VERSION: &'static [u8] = b"p256 anonymous-credits v1.0";
+
+    // ── Scalar operations ──────────────────────────────────────────
+
+    fn scalar_to_u128(s: &Scalar) -> Option<u128> {
+        let bytes: [u8; 32] = s.to_repr().into();
+        // Big-endian: bytes[0..16] are high, bytes[16..32] are low
+        if bytes[..16].iter().any(|&b| b != 0) {
+            return None;
+        }
+        Some(u128::from_be_bytes(bytes[16..32].try_into().unwrap()))
+    }
+
+    fn scalar_from_u128(v: u128) -> Scalar {
+        let mut bytes = [0u8; 32];
+        bytes[16..32].copy_from_slice(&v.to_be_bytes());
+        Scalar::from_repr(bytes.into()).unwrap()
+    }
+
+    fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
+        let bytes: [u8; 32] = s.to_repr().into();
+        // Big-endian: bytes[0] is the MSB, bytes[31] is the LSB
+        // The lowest L bits occupy bytes[(32 - ceil(L/8))..32]
+        let full_bytes_used = L / 8;
+        let rem_bits = L % 8;
+        let boundary = 32 - full_bytes_used - usize::from(rem_bits != 0);
+        let mut any_high = 0u8;
+        for &b in &bytes[..boundary] {
+            any_high |= b;
+        }
+        if rem_bits != 0 {
+            any_high |= bytes[boundary] >> rem_bits;
+        }
+        bool::from(any_high.ct_eq(&0))
+    }
+
+    fn bits_of<const L: usize>(s: Self::Scalar) -> [Choice; L] {
+        let bytes: [u8; 32] = s.to_repr().into();
+        let mut result = [Choice::from(0u8); L];
+        // Big-endian: byte[31] contains bits 0-7, byte[30] contains bits 8-15, etc.
+        result.iter_mut().enumerate().for_each(|(i, elem)| {
+            let byte_idx = 31 - (i / 8);
+            *elem = Choice::from((bytes[byte_idx] >> (i % 8)) & 1);
+        });
+        result
+    }
+
+    fn scalar_to_bytes(s: &Scalar) -> [u8; 32] {
+        s.to_repr().into()
+    }
+
+    fn scalar_invert(s: &Scalar) -> Scalar {
+        s.invert().unwrap()
+    }
+
+    // ── Point operations ───────────────────────────────────────────
+
+    fn generator_mul(s: &Scalar) -> ProjectivePoint {
+        ProjectivePoint::GENERATOR * s
+    }
+
+    fn multiscalar_mul(scalars: &[Scalar], points: &[ProjectivePoint]) -> ProjectivePoint {
+        scalars
+            .iter()
+            .zip(points.iter())
+            .fold(ProjectivePoint::IDENTITY, |acc, (s, p)| acc + *p * s)
+    }
+
+    // ── ParamPoint operations (identity for P-256: ParamPoint = Point) ─
+
+    fn to_param_point(p: &ProjectivePoint) -> ProjectivePoint {
+        *p
+    }
+
+    fn param_to_point(pp: &ProjectivePoint) -> ProjectivePoint {
+        *pp
+    }
+
+    fn param_mul(pp: &ProjectivePoint, s: &Scalar) -> ProjectivePoint {
+        *pp * s
+    }
+
+    // ── Transcript operations ──────────────────────────────────────
+
+    fn challenge_from_hasher(hasher: blake3::Hasher) -> Scalar {
+        let mut reader = hasher.finalize_xof();
+        let mut output = [0u8; 32];
+        reader.fill(&mut output);
+        <Scalar as Reduce<U256>>::reduce(U256::from_be_slice(&output))
+    }
+
+    fn hash_to_point(domain_separator: &str, seed: &[u8], counter: u32) -> ProjectivePoint {
+        let mut hasher = blake3::Hasher::new();
+
+        // Add domain separator with length prefix
+        let ds_bytes = domain_separator.as_bytes();
+        hasher.update(&(ds_bytes.len() as u64).to_be_bytes());
+        hasher.update(ds_bytes);
+
+        // Add seed with length prefix
+        hasher.update(&(seed.len() as u64).to_be_bytes());
+        hasher.update(seed);
+
+        // Add counter with length prefix (4 bytes for u32)
+        hasher.update(&(4u64).to_be_bytes());
+        hasher.update(&counter.to_le_bytes());
+
+        // BLAKE3 hash → 32-byte msg (not XOF)
+        let msg = hasher.finalize();
+
+        // hash_to_curve using P256_XMD:SHA-256_SSWU_RO_ (RFC 9380)
+        let dst = format!("ACT-P256-BLAKE3_H2C_{}", domain_separator);
+        p256_crate::NistP256::hash_from_bytes::<ExpandMsgXmd<Sha256>>(
+            &[msg.as_bytes()],
+            &[dst.as_bytes()],
+        )
+        .unwrap()
+    }
+
+    fn encode_point_for_transcript(point: &ProjectivePoint) -> [u8; 33] {
+        let encoded = point.to_affine().to_encoded_point(true);
+        let bytes = encoded.as_bytes();
+        debug_assert_eq!(bytes.len(), 33);
+        let mut out = [0u8; 33];
+        out.copy_from_slice(bytes);
+        out
+    }
+
+    // ── CBOR operations ────────────────────────────────────────────
+
+    fn encode_point_cbor(point: &ProjectivePoint) -> Value {
+        let affine = point.to_affine();
+        let encoded = affine.to_encoded_point(true);
+        Value::Bytes(encoded.as_bytes().to_vec())
+    }
+
+    fn decode_point_cbor(value: &Value) -> Result<ProjectivePoint, CborError> {
+        match value {
+            Value::Bytes(bytes) if bytes.len() == 33 => {
+                let encoded = EncodedPoint::<p256_crate::NistP256>::from_bytes(bytes)
+                    .map_err(|_| CborError::InvalidValue("invalid SEC1 encoding"))?;
+                let affine = AffinePoint::from_encoded_point(&encoded);
+                Option::<AffinePoint>::from(affine)
+                    .map(ProjectivePoint::from)
+                    .ok_or(CborError::InvalidValue("invalid P-256 point"))
+            }
+            _ => Err(CborError::InvalidStructure(
+                "expected 33-byte array for point",
+            )),
+        }
+    }
+
+    fn encode_scalar_cbor(scalar: &Scalar) -> Value {
+        Value::Bytes(scalar.to_repr().to_vec())
+    }
+
+    fn decode_scalar_cbor(value: &Value) -> Result<Scalar, CborError> {
+        match value {
+            Value::Bytes(bytes) if bytes.len() == 32 => {
+                let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
+                let repr = p256_crate::FieldBytes::from(arr);
+                let scalar = Scalar::from_repr(repr);
+                Option::from(scalar)
+                    .ok_or(CborError::InvalidValue("non-canonical scalar encoding"))
+            }
+            _ => Err(CborError::InvalidStructure(
+                "expected 32-byte array for scalar",
+            )),
+        }
+    }
+}
+
+// ── Thin wrapper functions ─────────────────────────────────────────────
 
 /// Attempts to convert a Scalar to a u128 value.
 ///
@@ -186,1487 +401,7 @@ pub use rand_core::{self, CryptoRngCore};
 /// assert_eq!(scalar_to_u128(&scalar), Some(42));
 /// ```
 pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
-    let bytes: [u8; 32] = scalar.to_repr().into();
-    // Big-endian: bytes[0..16] are high, bytes[16..32] are low
-    if bytes[..16].iter().any(|&b| b != 0) {
-        return None;
-    }
-    let value = u128::from_be_bytes(bytes[16..32].try_into().expect("slice with incorrect length"));
-    Some(value)
-}
-
-/// The private key of the issuer, used to issue and refund credit tokens.
-///
-/// This key should be kept secure, as it allows the owner to create new tokens
-/// and process refunds. The private key includes the corresponding public key
-/// that can be shared with clients.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct PrivateKey {
-    /// The secret scalar used in cryptographic operations
-    x: Scalar,
-    /// The corresponding public key that can be shared with clients
-    #[zeroize(skip)]
-    public: PublicKey,
-}
-
-impl PrivateKey {
-    /// Creates a new random private key using the provided cryptographically secure random number generator.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// A new `PrivateKey` with a randomly generated secret scalar and the corresponding public key
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use anonymous_credit_tokens::p256::PrivateKey;
-    /// use rand_core::OsRng;
-    ///
-    /// let private_key = PrivateKey::random(OsRng);
-    /// ```
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        let x = Scalar::random(&mut rng);
-        let public = PublicKey {
-            w: ProjectivePoint::GENERATOR * x,
-        };
-        PrivateKey { x, public }
-    }
-
-    /// Returns a reference to the public key associated with this private key.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the `PublicKey`
-    pub fn public(&self) -> &PublicKey {
-        &self.public
-    }
-}
-
-/// The public key of the issuer, used to verify credit tokens.
-///
-/// This key is shared with clients so they can validate tokens and create spending proofs.
-/// It contains a P-256 point that serves as the public component of the issuer's keypair.
-#[derive(Debug, Clone)]
-pub struct PublicKey {
-    /// The public point derived from the secret scalar in the private key
-    w: ProjectivePoint,
-}
-
-/// System parameters that define the cryptographic setup for the anonymous credentials scheme.
-///
-/// These parameters are used in various cryptographic operations throughout the protocol.
-/// They must be generated deterministically from a domain separator that uniquely identifies
-/// your deployment.
-#[derive(Clone)]
-pub struct Params {
-    /// First generator point used in commitment schemes
-    h1: ProjectivePoint,
-    /// Second generator point used in commitment schemes
-    h2: ProjectivePoint,
-    /// Third generator point used in commitment schemes
-    h3: ProjectivePoint,
-    /// Fourth generator point used for request_context binding
-    h4: ProjectivePoint,
-    /// Cached BLAKE3 hasher state containing protocol version + compressed params.
-    ///
-    /// Every transcript starts by hashing the protocol version and all four
-    /// compressed base points (h1–h4). Compressing a P-256 point is
-    /// expensive (field inversion), so we pay this cost once at Params
-    /// construction and cache the resulting hasher state. Transcript::new
-    /// then clones this hasher and appends only the label, saving 4 point
-    /// compressions per transcript creation. Over a full issue-spend-refund
-    /// cycle (5+ transcripts) this eliminates 20+ redundant compressions.
-    transcript_base: blake3::Hasher,
-}
-
-impl std::fmt::Debug for Params {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Params")
-            .field("h1", &"ProjectivePoint")
-            .field("h2", &"ProjectivePoint")
-            .field("h3", &"ProjectivePoint")
-            .field("h4", &"ProjectivePoint")
-            .finish()
-    }
-}
-
-impl Params {
-    /// Generates random system parameters using the provided random number generator.
-    ///
-    /// This is primarily intended for testing purposes. In production, use [`Params::new`]
-    /// to create deterministic parameters from a domain separator.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// A new `Params` instance with randomly generated points
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        Self::from_points(
-            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
-            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
-            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
-            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
-        )
-    }
-
-    /// Creates system parameters using a structured domain separator.
-    ///
-    /// This method creates deterministic parameters based on deployment-specific
-    /// information, ensuring cryptographic isolation between different services.
-    ///
-    /// # Arguments
-    ///
-    /// * `organization` - Unique identifier for the organization (e.g., "example-corp")
-    /// * `service` - The specific service or application name (e.g., "payment-api")
-    /// * `deployment_id` - The deployment environment (e.g., "production", "staging")
-    /// * `version` - Version date in YYYY-MM-DD format (e.g., "2024-01-15")
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use anonymous_credit_tokens::p256::Params;
-    ///
-    /// let params = Params::new(
-    ///     "example-corp",
-    ///     "payment-api",
-    ///     "production",
-    ///     "2024-01-15"
-    /// );
-    /// ```
-    pub fn new(organization: &str, service: &str, deployment_id: &str, version: &str) -> Self {
-        // Validate that no component contains a colon, which would create ambiguous
-        // domain separators and could cause different deployments to share parameters.
-        assert!(
-            !organization.contains(':'),
-            "organization must not contain ':'"
-        );
-        assert!(!service.contains(':'), "service must not contain ':'");
-        assert!(
-            !deployment_id.contains(':'),
-            "deployment_id must not contain ':'"
-        );
-        assert!(!version.contains(':'), "version must not contain ':'");
-
-        // Construct the structured domain separator
-        let domain_separator = format!(
-            "ACT-v1:{}:{}:{}:{}",
-            organization, service, deployment_id, version
-        );
-
-        // Hash the domain separator with length prefix to create a seed
-        let mut hasher = blake3::Hasher::new();
-        let domain_separator_bytes = domain_separator.as_bytes();
-        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
-        hasher.update(domain_separator_bytes);
-        let seed = hasher.finalize();
-
-        // Generate H1, H2, H3, H4 using counter-based approach
-        let h1 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 0);
-        let h2 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 1);
-        let h3 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 2);
-        let h4 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 3);
-
-        Self::from_points(h1, h2, h3, h4)
-    }
-
-    /// Hash to P-256 point using BLAKE3 with counter.
-    ///
-    /// This implements a deterministic hash-to-curve function that maps
-    /// the domain separator, seed, and counter to a P-256 point.
-    /// All inputs are length-prefixed to ensure domain separation.
-    ///
-    /// # Arguments
-    ///
-    /// * `domain_separator` - The domain separator string
-    /// * `seed` - The seed bytes (typically from hashing the domain separator)
-    /// * `counter` - A counter to generate different points from the same seed
-    ///
-    /// # Returns
-    ///
-    /// A deterministically generated P-256 point
-    fn hash_to_p256(domain_separator: &str, seed: &[u8], counter: u32) -> ProjectivePoint {
-        let mut hasher = blake3::Hasher::new();
-
-        // Add domain separator with length prefix
-        let domain_separator_bytes = domain_separator.as_bytes();
-        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
-        hasher.update(domain_separator_bytes);
-
-        // Add seed with length prefix
-        hasher.update(&(seed.len() as u64).to_be_bytes());
-        hasher.update(seed);
-
-        // Add counter with length prefix (4 bytes for u32)
-        hasher.update(&(4u64).to_be_bytes());
-        hasher.update(&counter.to_le_bytes());
-
-        // Generate 32 bytes and reduce mod q, then multiply by generator
-        let mut uniform_bytes = [0u8; 32];
-        let mut output_reader = hasher.finalize_xof();
-        output_reader.fill(&mut uniform_bytes);
-
-        let s = <Scalar as Reduce<U256>>::reduce(U256::from_be_slice(&uniform_bytes));
-        ProjectivePoint::GENERATOR * s
-    }
-
-    /// Constructs Params from four generator points, building the cached
-    /// transcript base state.
-    fn from_points(
-        h1: ProjectivePoint,
-        h2: ProjectivePoint,
-        h3: ProjectivePoint,
-        h4: ProjectivePoint,
-    ) -> Self {
-        let transcript_base = Transcript::base_hasher(&h1, &h2, &h3, &h4);
-        Params {
-            h1,
-            h2,
-            h3,
-            h4,
-            transcript_base,
-        }
-    }
-}
-
-/// Client state maintained during the issuance protocol.
-///
-/// This structure holds the client's secret values that are needed to complete
-/// the issuance protocol and eventually construct a valid credit token. The client
-/// must keep this information private during the issuance process.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct PreIssuance {
-    /// A random scalar used as a blinding factor
-    r: Scalar,
-    /// A random scalar representing the credit token's identifier
-    k: Scalar,
-}
-
-/// A request sent by the client to the issuer to obtain a credit token.
-///
-/// This contains the cryptographic commitments and proof values required for the issuer
-/// to create a valid credit token while maintaining the client's privacy. The client
-/// generates this request using their `PreIssuance` state.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct IssuanceRequest {
-    /// A commitment to the client's identifier and blinding factor
-    big_k: ProjectivePoint,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the identifier commitment
-    k_bar: Scalar,
-    /// A response value for the blinding factor
-    r_bar: Scalar,
-}
-
-/// The credit token used to store and spend anonymous credits.
-///
-/// This token represents the client's anonymous credits. It contains the cryptographic
-/// elements needed to prove ownership and spend credits without revealing the client's
-/// identity. The token includes a credit value `c` that represents the total amount
-/// of credits available to spend.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct CreditToken {
-    /// A P-256 point representing the BBS+ signature component
-    a: ProjectivePoint,
-    /// A random scalar used in the BBS+ signature
-    e: Scalar,
-    /// The token's unique identifier (used to prevent double-spending)
-    k: Scalar,
-    /// A blinding factor used to protect the token's privacy
-    r: Scalar,
-    /// The amount of credits available in this token
-    c: Scalar,
-    /// The request context binding this token to an application-specific context.
-    ///
-    /// WARNING: This value is revealed in the clear during spending and persists across
-    /// refunds. If distinct ctx values are assigned per issuance, the entire token chain
-    /// becomes linkable. Use a shared ctx across clients within the same context (e.g.,
-    /// per-service or per-epoch) to preserve unlinkability.
-    ctx: Scalar,
-}
-
-impl PreIssuance {
-    /// Creates a new random `PreIssuance` state to initiate the credit issuance protocol.
-    ///
-    /// # Security Warning
-    ///
-    /// It is critical to use high-quality randomness for this operation. If the `k` value
-    /// collides with a previously used one, the resulting credit token could become unspendable
-    /// due to double-spending prevention mechanisms.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// A new `PreIssuance` instance with randomly generated values
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use anonymous_credit_tokens::p256::PreIssuance;
-    /// use rand_core::OsRng;
-    ///
-    /// let pre_issuance = PreIssuance::random(OsRng);
-    /// ```
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        PreIssuance {
-            r: Scalar::random(&mut rng),
-            k: Scalar::random(&mut rng),
-        }
-    }
-
-    /// Creates an issuance request to obtain credits from the issuer.
-    ///
-    /// This method generates a zero-knowledge proof that allows the issuer to verify the
-    /// integrity of the request without learning the client's secret values. The resulting
-    /// request can be sent to the issuer for processing.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - The system parameters for this deployment
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// An `IssuanceRequest` that can be sent to the issuer
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use anonymous_credit_tokens::p256::{PreIssuance, Params};
-    /// use rand_core::OsRng;
-    ///
-    /// let pre_issuance = PreIssuance::random(OsRng);
-    /// let params = Params::new("test-org", "test-service", "test", "2024-01-01");
-    /// let request = pre_issuance.request(&params, OsRng);
-    /// ```
-    pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
-        // Create a commitment to the client's identifier and blinding factor
-        let big_k = params.h2 * self.k + params.h3 * self.r;
-
-        // Generate random values for the zero-knowledge proof
-        let k_prime = Scalar::random(&mut rng);
-        let r_prime = Scalar::random(&mut rng);
-        let k1 = params.h2 * k_prime + params.h3 * r_prime;
-
-        // Generate the challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"request", |transcript| {
-            transcript.add_elements([&big_k, &k1].into_iter());
-        });
-
-        // Calculate the response values for the zero-knowledge proof
-        let k_bar = k_prime + self.k * gamma;
-        let r_bar = r_prime + self.r * gamma;
-
-        IssuanceRequest {
-            big_k,
-            gamma,
-            k_bar,
-            r_bar,
-        }
-    }
-
-    /// Constructs a credit token from the issuer's response to an issuance request.
-    ///
-    /// This method verifies the issuer's response and, if valid, creates a credit token
-    /// that the client can use to spend credits. The method validates the cryptographic
-    /// proof from the issuer to ensure the response is legitimate.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - The system parameters for this deployment
-    /// * `public` - The issuer's public key
-    /// * `request` - The original issuance request sent to the issuer
-    /// * `response` - The issuer's response containing the signature components
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(CreditToken)` - A valid credit token if the issuer's response is verified
-    /// * `Err(ErrorCode::InvalidProof)` - If the verification fails
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use anonymous_credit_tokens::p256::{PrivateKey, PreIssuance, Params, Scalar};
-    /// # use rand_core::OsRng;
-    /// #
-    /// # let private_key = PrivateKey::random(OsRng);
-    /// # let public_key = private_key.public();
-    /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
-    /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let credit_amount = Scalar::from(20u64);
-    /// # let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
-    /// #
-    /// let credit_token = pre_issuance.to_credit_token::<128>(
-    ///     &params,
-    ///     public_key,
-    ///     &request,
-    ///     &response
-    /// ).unwrap();
-    /// ```
-    pub fn to_credit_token<const L: usize>(
-        &self,
-        params: &Params,
-        public: &PublicKey,
-        request: &IssuanceRequest,
-        response: &IssuanceResponse,
-    ) -> Result<CreditToken, ErrorCode> {
-        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-
-        // Validate received point is not identity (spec Section 5.2)
-        if response.a == ProjectivePoint::IDENTITY {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Validate credit amount fits in L bits (defense-in-depth)
-        if !scalar_fits_in_bits::<L>(&response.c) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-
-        // Reconstruct the signature base points for verification
-        let x_a = ProjectivePoint::GENERATOR
-            + params.h1 * response.c
-            + params.h4 * response.ctx
-            + request.big_k;
-        let x_g = ProjectivePoint::GENERATOR * response.e + public.w;
-
-        // Verify the response by checking the BBS+ signature proof.
-        // All scalar operands are from the issuer's response (public), so
-        // variable-time operations are safe here.
-        let y_a = multiscalar_mul(
-            &[response.z, response.gamma.neg()],
-            &[response.a, x_a],
-        );
-        let y_g = x_g * response.gamma.neg() + ProjectivePoint::GENERATOR * response.z;
-
-        // Generate the expected challenge value using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&response.c, &response.ctx, &response.e].into_iter());
-            transcript.add_elements([&response.a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        // Verify that the challenge matches the expected value
-        if gamma != response.gamma {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Construct the credit token with the verified signature
-        Ok(CreditToken {
-            a: response.a,
-            e: response.e,
-            r: self.r,
-            k: self.k,
-            c: response.c,
-            ctx: response.ctx,
-        })
-    }
-}
-
-/// The issuer's response to a client's issuance request.
-///
-/// This response contains the cryptographic signature components and proof
-/// values that allow the client to construct a valid credit token. It includes
-/// the credit amount (`c`) assigned by the issuer and the BBS+ signature
-/// elements that authenticate this amount.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct IssuanceResponse {
-    /// The BBS+ signature's main component
-    a: ProjectivePoint,
-    /// A random scalar used in the BBS+ signature
-    e: Scalar,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the proof of knowledge of the signature
-    z: Scalar,
-    /// The amount of credits being issued
-    c: Scalar,
-    /// The request context binding this credential to an application-specific context
-    ctx: Scalar,
-}
-
-impl PrivateKey {
-    /// Issues credits to a client in response to their issuance request.
-    ///
-    /// This method verifies the client's request for legitimacy and, if valid, creates
-    /// a cryptographic signature binding the specified credit amount to the client's
-    /// commitment. The response contains a BBS+ signature and a zero-knowledge proof
-    /// that allows the client to verify the signature's authenticity without revealing
-    /// the issuer's private key.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `L` - The bit-length for credit amount range proofs. Credit values must be
-    ///   in the range `[1, 2^L)`. Typical value: `128` for u128-compatible amounts.
-    ///   Must be `<= 128`.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - The system parameters for this deployment
-    /// * `request` - The client's issuance request
-    /// * `c` - The amount of credits to issue (must be in range `(0, 2^L)`)
-    /// * `ctx` - The request context binding this credential to an application-specific
-    ///   context. This value is revealed in the clear during spending and persists across
-    ///   refunds. To preserve unlinkability, use a shared ctx across clients within the
-    ///   same context (e.g., per-service or per-epoch), not per-client values.
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(IssuanceResponse)` - The response containing the signature if the request is valid
-    /// * `Err(ErrorCode::InvalidProof)` - If the request verification fails
-    /// * `Err(ErrorCode::InvalidAmount)` - If `c` is zero or `>= 2^L`
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use anonymous_credit_tokens::p256::{PrivateKey, PreIssuance, Params, Scalar};
-    /// # use rand_core::OsRng;
-    /// #
-    /// # let private_key = PrivateKey::random(OsRng);
-    /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
-    /// # let request = pre_issuance.request(&params, OsRng);
-    /// #
-    /// // Issue 20 credits to the client
-    /// let credit_amount = Scalar::from(20u64);
-    /// let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
-    /// ```
-    pub fn issue<const L: usize>(
-        &self,
-        params: &Params,
-        request: &IssuanceRequest,
-        c: Scalar,
-        ctx: Scalar,
-        mut rng: impl CryptoRngCore,
-    ) -> Result<IssuanceResponse, ErrorCode> {
-        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-
-        // Validate credit amount is within range (0 < c < 2^L)
-        if c == Scalar::ZERO || !scalar_fits_in_bits::<L>(&c) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-
-        // Validate received point is not identity (spec Section 5.2)
-        if request.big_k == ProjectivePoint::IDENTITY {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Verify the client's zero-knowledge proof
-        let k1 = (params.h2 * request.k_bar + params.h3 * request.r_bar)
-            - request.big_k * request.gamma;
-
-        // Generate the expected challenge value
-        let gamma = Transcript::with(params, b"request", |transcript| {
-            transcript.add_elements([&request.big_k, &k1].into_iter());
-        });
-
-        // Verify that the client's proof is valid
-        if gamma != request.gamma {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Create a BBS+ signature on the client's commitment and credit amount.
-        // invert(): e is random and self.x is secret, so e + self.x == 0 (mod q)
-        // has negligible probability ~2^-256.
-        let e = Scalar::random(&mut rng);
-        let x_a = ProjectivePoint::GENERATOR + params.h1 * c + params.h4 * ctx + request.big_k;
-        let a = x_a * (e + self.x).invert().unwrap();
-        let x_g = ProjectivePoint::GENERATOR * e + self.public.w;
-
-        // Generate a zero-knowledge proof that the signature is valid
-        let alpha = Scalar::random(&mut rng);
-        let y_a = a * alpha;
-        let y_g = ProjectivePoint::GENERATOR * alpha;
-
-        // Generate the challenge for the proof using the Fiat-Shamir transform
-        let gamma = Transcript::with(params, b"respond", |transcript| {
-            transcript.add_scalars([&c, &ctx, &e].into_iter());
-            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        // Calculate the response value for the proof
-        let z = gamma * (self.x + e) + alpha;
-
-        Ok(IssuanceResponse {
-            a,
-            e,
-            gamma,
-            z,
-            c,
-            ctx,
-        })
-    }
-}
-
-/// A zero-knowledge proof that allows spending credits anonymously.
-///
-/// This proof demonstrates that the client possesses a valid credit token with
-/// sufficient balance to spend the requested amount, without revealing the token itself.
-/// The proof includes a nullifier that prevents double-spending, and a range proof
-/// that ensures the remaining balance is non-negative.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct SpendProof<const L: usize> {
-    /// The nullifier, uniquely identifying this spend to prevent double-spending
-    k: Scalar,
-    /// The request context for this spend
-    ctx: Scalar,
-    /// The amount being spent in this transaction
-    s: Scalar,
-    /// The blinded signature component
-    a_prime: ProjectivePoint,
-    /// A blinded token component
-    b_bar: ProjectivePoint,
-    /// Commitments for the binary decomposition of the remaining balance
-    com: [ProjectivePoint; L],
-    /// The challenge value for the zero-knowledge proof
-    gamma: Scalar,
-    /// Response value for the signature proof
-    e_bar: Scalar,
-    /// Response value for signature transformations
-    r2_bar: Scalar,
-    /// Response value for signature transformations
-    r3_bar: Scalar,
-    /// Response value for the credit amount
-    c_bar: Scalar,
-    /// Response value for the blinding factor
-    r_bar: Scalar,
-    /// Response value for the range proof (bit 0, value 0)
-    w00: Scalar,
-    /// Response value for the range proof (bit 0, value 1)
-    w01: Scalar,
-    /// Challenge values for each bit in the range proof
-    gamma0: [Scalar; L],
-    /// Response values for the range proof bit commitments
-    z: [[Scalar; 2]; L],
-    /// Response value for the credit identifier
-    k_bar: Scalar,
-    /// Response value for the range proof sum commitment
-    s_bar: Scalar,
-}
-
-impl<const L: usize> SpendProof<L> {
-    const _ASSERT: () = assert!(L > 0 && L <= 128, "L must be in 1..=128");
-
-    /// Returns the nullifier associated with this spend.
-    ///
-    /// The nullifier is a unique identifier for this spend that should be recorded
-    /// by the issuer to prevent double-spending. If the same nullifier is seen twice,
-    /// the second spend attempt should be rejected.
-    ///
-    /// # Returns
-    ///
-    /// The nullifier as a `Scalar` value
-    #[allow(clippy::let_unit_value)]
-    pub fn nullifier(&self) -> Scalar {
-        let _ = Self::_ASSERT;
-        self.k
-    }
-
-    /// Returns the request context associated with this spend.
-    ///
-    /// # Returns
-    ///
-    /// The request context as a `Scalar` value
-    pub fn context(&self) -> Scalar {
-        self.ctx
-    }
-
-    /// Returns the amount of credits being spent in this transaction.
-    ///
-    /// # Returns
-    ///
-    /// The credit amount as a `Scalar` value
-    pub fn charge(&self) -> Scalar {
-        self.s
-    }
-}
-
-impl PrivateKey {
-    /// Processes a spend proof and issues a refund token for the remaining credits.
-    ///
-    /// This method verifies the validity of a spend proof and, if valid, issues a refund
-    /// token for the remaining balance. The refund token can be used by the client to
-    /// construct a new credit token with the remaining balance.
-    ///
-    /// The issuer may choose to return `t` credits (where `0 <= t <= s`) back to the
-    /// client via the partial credit return mechanism. The resulting token will have
-    /// `c - s + t` credits. Use `Scalar::ZERO` for `t` to consume the full spend amount.
-    ///
-    /// # Security Warning
-    ///
-    /// This method implements only the proof verification and refund issuance portions
-    /// of the spec's `VerifyAndRefund` function. The caller MUST also:
-    ///
-    /// 1. Check that `spend_proof.nullifier()` has not been previously recorded
-    /// 2. Atomically record the nullifier before returning the refund to the client
-    /// 3. Ensure the refund remains retrievable if the client's connection drops
-    ///
-    /// ```rust,no_run
-    /// # use anonymous_credit_tokens::p256::*;
-    /// # fn example(private_key: &PrivateKey, params: &Params,
-    /// #     spend_proof: &SpendProof<128>, nullifier_db: &mut std::collections::HashSet<[u8; 32]>)
-    /// #     -> Result<Refund, ErrorCode> {
-    /// use elliptic_curve::PrimeField;
-    /// // Step 1: Check nullifier
-    /// let nullifier = spend_proof.nullifier();
-    /// let nullifier_bytes: [u8; 32] = nullifier.to_repr().into();
-    /// if nullifier_db.contains(&nullifier_bytes) {
-    ///     return Err(ErrorCode::NullifierReuse);
-    /// }
-    ///
-    /// // Step 2: Verify proof and create refund (returning 0 credits)
-    /// let refund = private_key.refund(params, spend_proof, Scalar::ZERO, rand_core::OsRng)?;
-    ///
-    /// // Step 3: Record nullifier (atomically in production)
-    /// nullifier_db.insert(nullifier_bytes);
-    ///
-    /// Ok(refund)
-    /// # }
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - The system parameters for this deployment
-    /// * `spend_proof` - The client's proof of valid spending
-    /// * `t` - Credits to return to the client (`0 <= t <= s`, must fit in `L` bits)
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Refund)` - The refund token if the spend proof is valid
-    /// * `Err(ErrorCode::InvalidProof)` - If the spend proof verification fails
-    /// * `Err(ErrorCode::InvalidAmount)` - If `t > s` or `t` does not fit in `L` bits
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use anonymous_credit_tokens::p256::{PrivateKey, PreIssuance, Params, Scalar};
-    /// # use rand_core::OsRng;
-    /// #
-    /// # // Setup (normally these would come from previous steps)
-    /// # let private_key = PrivateKey::random(OsRng);
-    /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
-    /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, private_key.public(), &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u64);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
-    /// #
-    /// // First check if we've seen this nullifier before
-    /// let nullifier = spend_proof.nullifier();
-    /// // ... check nullifier database
-    ///
-    /// // Then process the refund, returning 0 credits
-    /// let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
-    /// ```
-    pub fn refund<const L: usize>(
-        &self,
-        params: &Params,
-        spend_proof: &SpendProof<L>,
-        t: Scalar,
-        mut rng: impl CryptoRngCore,
-    ) -> Result<Refund, ErrorCode> {
-        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-
-        // Validate A' is not identity (spec Section 3.5.2, step 3)
-        if spend_proof.a_prime == ProjectivePoint::IDENTITY {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Constant-time: scalar operand is the private key.
-        let a_bar = spend_proof.a_prime * self.x;
-
-        // Spec Section 3.5.2, steps 6–10.
-        // All remaining verification uses only public spend_proof / params
-        // values as scalar operands, so variable-time operations are safe.
-        //
-        // Optimization: individual multiplications from the spec are batched
-        // into multiscalar multiplications where possible.
-        let big_h1 = ProjectivePoint::GENERATOR
-            + params.h2 * spend_proof.k
-            + params.h4 * spend_proof.ctx;
-        // Spec step 9: A1 = A'*e_bar + B_bar*r2_bar - A_bar*gamma
-        let a1 = multiscalar_mul(
-            &[spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
-            &[spend_proof.a_prime, spend_proof.b_bar, a_bar],
-        );
-        // Spec step 10: A2 = B_bar*r3_bar + H1*c_bar + H3*r_bar - H1'*gamma
-        let a2 = multiscalar_mul(
-            &[spend_proof.r3_bar, spend_proof.gamma.neg(), spend_proof.c_bar, spend_proof.r_bar],
-            &[spend_proof.b_bar, big_h1, params.h1, params.h3],
-        );
-
-        // Spec steps 15–27: compute C'[j][0] and C'[j][1] for the range
-        // proof. The spec uses C[j][0] = Com[j] and C[j][1] = Com[j] - H1
-        // as intermediate values. We compute the equivalent expressions
-        // directly as multiscalar multiplications.
-        let h1_point = params.h1;
-        let h3_point = params.h3;
-        let com0 = spend_proof.com[0];
-        let com0_minus_h1 = com0 - h1_point;
-        let gamma01_0 = spend_proof.gamma - spend_proof.gamma0[0];
-        let mut big_c_prime = [[ProjectivePoint::IDENTITY; 2]; L];
-        // Spec step 19: C'[0][0] = H2*w00 + H3*z[0][0] - C[0][0]*gamma0[0]
-        big_c_prime[0][0] = multiscalar_mul(
-            &[spend_proof.w00, spend_proof.z[0][0], spend_proof.gamma0[0].neg()],
-            &[params.h2, h3_point, com0],
-        );
-        // Spec step 20: C'[0][1] = H2*w01 + H3*z[0][1] - C[0][1]*gamma1[0]
-        big_c_prime[0][1] = multiscalar_mul(
-            &[spend_proof.w01, spend_proof.z[0][1], gamma01_0.neg()],
-            &[params.h2, h3_point, com0_minus_h1],
-        );
-        // Spec steps 22–27: range proof for bits j = 1..L-1
-        #[allow(clippy::needless_range_loop)] // indexes big_c_prime, com, gamma0, z simultaneously
-        for j in 1..L {
-            let com_j = spend_proof.com[j];
-            let com_j_minus_h1 = com_j - h1_point;
-            let gamma01_j = spend_proof.gamma - spend_proof.gamma0[j];
-            // Spec step 26: C'[j][0] = H3*z[j][0] - C[j][0]*gamma0[j]
-            big_c_prime[j][0] = multiscalar_mul(
-                &[spend_proof.z[j][0], spend_proof.gamma0[j].neg()],
-                &[h3_point, com_j],
-            );
-            // Spec step 27: C'[j][1] = H3*z[j][1] - C[j][1]*gamma1[j]
-            big_c_prime[j][1] = multiscalar_mul(
-                &[spend_proof.z[j][1], gamma01_j.neg()],
-                &[h3_point, com_j_minus_h1],
-            );
-        }
-
-        let k_prime = pow2_weighted_sum(&spend_proof.com);
-        let com_ = params.h1 * spend_proof.s + k_prime;
-        let big_c = multiscalar_mul(
-            &[spend_proof.c_bar.neg(), spend_proof.k_bar, spend_proof.s_bar, spend_proof.gamma.neg()],
-            &[h1_point, params.h2, h3_point, com_],
-        );
-
-        let gamma = Transcript::with(params, b"spend", |transcript| {
-            transcript.add_scalar(&spend_proof.k);
-            transcript.add_scalar(&spend_proof.ctx);
-            transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
-            transcript.add_elements([&a1, &a2].into_iter());
-            transcript.add_elements(spend_proof.com.iter());
-            for c_prime in big_c_prime.iter() {
-                transcript.add_elements(c_prime.iter());
-            }
-            transcript.add_element(&big_c);
-        });
-
-        if gamma != spend_proof.gamma {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Validate partial return amount
-        if !scalar_fits_in_bits::<L>(&t) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-        if !scalar_fits_in_bits::<L>(&spend_proof.s) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-        let t_val = scalar_to_u128(&t).ok_or(ErrorCode::InvalidAmount)?;
-        let s_val = scalar_to_u128(&spend_proof.s).ok_or(ErrorCode::InvalidAmount)?;
-        if t_val > s_val {
-            return Err(ErrorCode::InvalidAmount);
-        }
-
-        // invert(): same reasoning as in issue() — e + self.x == 0 (mod q)
-        // has negligible probability ~2^-256.
-        let e = Scalar::random(&mut rng);
-
-        let x_a = ProjectivePoint::GENERATOR + k_prime + params.h1 * t + params.h4 * spend_proof.ctx;
-        let a = x_a * (e + self.x).invert().unwrap();
-
-        let x_g = ProjectivePoint::GENERATOR * e + self.public.w;
-        let alpha = Scalar::random(&mut rng);
-        let y_a = a * alpha;
-        let y_g = ProjectivePoint::GENERATOR * alpha;
-
-        let refund_gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalars([&e, &t, &spend_proof.ctx].into_iter());
-            transcript.add_elements([&a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        let z = refund_gamma * (self.x + e) + alpha;
-
-        Ok(Refund {
-            a,
-            e,
-            gamma: refund_gamma,
-            z,
-            t,
-        })
-    }
-}
-
-/// Client state maintained during the refund protocol.
-///
-/// This structure holds the client's secret values that are needed to complete
-/// the refund protocol and construct a new credit token with the remaining balance.
-/// The client must keep this information private after spending credits and while
-/// awaiting a refund.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct PreRefund {
-    /// A random blinding factor for the new credit token
-    r: Scalar,
-    /// A random identifier for the new credit token
-    k: Scalar,
-    /// The remaining balance after spending
-    m: Scalar,
-    /// The request context carried over from the original token
-    ctx: Scalar,
-}
-
-/// Naive multi-scalar multiplication: computes sum of s_i * P_i.
-fn multiscalar_mul(scalars: &[Scalar], points: &[ProjectivePoint]) -> ProjectivePoint {
-    scalars.iter().zip(points.iter())
-        .fold(ProjectivePoint::IDENTITY, |acc, (s, p)| acc + *p * s)
-}
-
-/// Computes the power-of-two weighted sum of points using Horner's method:
-///   points[0] + 2*points[1] + 4*points[2] + ... + 2^(n-1)*points[n-1]
-///
-/// Implements spec expression `Sum(Com[j] * 2^j for j in [L])` (ProveSpend
-/// step 68, VerifySpendProof step 29, etc.). Horner's method exploits the
-/// power-of-two structure to replace a general n-point multiscalar
-/// multiplication with just 2*(n-1) group operations (n-1 doublings +
-/// n-1 additions).
-fn pow2_weighted_sum(points: &[ProjectivePoint]) -> ProjectivePoint {
-    let n = points.len();
-    debug_assert!(n > 0);
-    let mut result = points[n - 1];
-    for j in (0..n - 1).rev() {
-        result = result.double() + points[j];
-    }
-    result
-}
-
-/// Computes the power-of-two weighted sum of scalars using Horner's method:
-///   scalars[0] + 2*scalars[1] + 4*scalars[2] + ... + 2^(n-1)*scalars[n-1]
-///
-/// Implements spec expression `Sum(s[j] * 2^j for j in [L])` (ProveSpend
-/// step 69). Horner's method replaces n scalar multiplications (by varying
-/// powers of two) with 2*(n-1) scalar additions.
-fn pow2_weighted_scalar_sum(scalars: &[Scalar]) -> Scalar {
-    let n = scalars.len();
-    debug_assert!(n > 0);
-    let mut result = scalars[n - 1];
-    for j in (0..n - 1).rev() {
-        result = result + result + scalars[j];
-    }
-    result
-}
-
-/// Checks whether all bits at positions >= L are zero in the scalar (constant-time).
-///
-/// Implements the `value >= 2^L` guard from the spec (e.g., ProveSpend steps
-/// 2–6, IssueResponse step 1, etc.). Equivalent to checking that the scalar
-/// fits in L bits, i.e., is in the range [0, 2^L). The check is performed in
-/// constant time to avoid leaking information about the scalar through timing
-/// side channels.
-///
-/// # Optimization: byte-level checks
-///
-/// Instead of iterating bit-by-bit from L to 256 (up to 256-L iterations with
-/// shift+mask each), we operate on whole bytes:
-///   - One partial-byte mask for the byte straddling the L boundary
-///   - Bulk OR over all fully-above-L bytes
-///
-/// For L=128 this reduces ~128 bit extractions to ~16 byte ORs.
-fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
-    let bytes: [u8; 32] = s.to_repr().into();
-    // Big-endian: bytes[0] is the MSB, bytes[31] is the LSB
-    // The lowest L bits occupy bytes[(32 - ceil(L/8))..32]
-    let full_bytes_used = L / 8;
-    let rem_bits = L % 8;
-    let boundary = 32 - full_bytes_used - usize::from(rem_bits != 0);
-    let mut any_high = 0u8;
-    for &b in &bytes[..boundary] {
-        any_high |= b;
-    }
-    if rem_bits != 0 {
-        any_high |= bytes[boundary] >> rem_bits;
-    }
-    bool::from(any_high.ct_eq(&0))
-}
-
-/// Decomposes a scalar value into its binary representation as `Choice` values.
-///
-/// Implements spec Section 3.7 (BitDecompose). The spec returns `Scalar(bit)`
-/// for each bit; we return `Choice` instead. This avoids constructing full
-/// `Scalar` values and enables constant-time `conditional_select` in the
-/// prover's range proof (spec steps 47–66) without needing `ct_eq` comparisons.
-///
-/// # Arguments
-///
-/// * `s` - The scalar value to decompose
-///
-/// # Returns
-///
-/// An array of L `Choice` values representing the binary bits of the input
-fn bits_of<const L: usize>(s: Scalar) -> [Choice; L] {
-    let bytes: [u8; 32] = s.to_repr().into();
-    let mut result = [Choice::from(0u8); L];
-
-    // Big-endian: byte[31] contains bits 0-7, byte[30] contains bits 8-15, etc.
-    result.iter_mut().enumerate().for_each(|(i, result_elem)| {
-        let byte_idx = 31 - (i / 8);
-        *result_elem = Choice::from((bytes[byte_idx] >> (i % 8)) & 1);
-    });
-
-    result
-}
-
-impl CreditToken {
-    /// Returns the nullifier contained within this token.
-    pub fn nullifier(&self) -> Scalar {
-        self.k
-    }
-
-    /// Returns the number of credits contained within this token.
-    pub fn credits(&self) -> Scalar {
-        self.c
-    }
-
-    /// Creates a zero-knowledge proof for spending credits from this token.
-    ///
-    /// This method generates a proof that the client possesses a valid credit token with
-    /// sufficient balance to spend the requested amount, without revealing the token itself.
-    /// The proof includes a range proof to demonstrate that the remaining balance is
-    /// non-negative, and a nullifier to prevent double-spending.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `L` - The bit-length for the range proof. Must match the `L` used during issuance.
-    ///   Must be `<= 128`.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - The system parameters for this deployment
-    /// * `s` - The amount of credits to spend (zero is allowed for re-anonymization)
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// * `Ok((SpendProof, PreRefund))` - The proof and client state if inputs are valid
-    /// * `Err(ErrorCode::InvalidAmount)` - If `s` does not fit in `L` bits or `s > c`
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use anonymous_credit_tokens::p256::{CreditToken, PrivateKey, PreIssuance, Params, Scalar};
-    /// # use rand_core::OsRng;
-    /// #
-    /// # // Create a valid credit token with 20 credits
-    /// # let private_key = PrivateKey::random(OsRng);
-    /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
-    /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, private_key.public(), &request, &response).unwrap();
-    /// #
-    /// // Spend 10 credits (where 10 <= token balance < 2^128)
-    /// let spend_amount = Scalar::from(10u64);
-    /// let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
-    ///
-    /// // Send spend_proof to the issuer and keep prerefund for later
-    /// ```
-    pub fn prove_spend<const L: usize>(
-        &self,
-        params: &Params,
-        s: Scalar,
-        mut rng: impl CryptoRngCore,
-    ) -> Result<(SpendProof<L>, PreRefund), ErrorCode> {
-        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-
-        // Validate spend amount fits in L bits
-        if !scalar_fits_in_bits::<L>(&s) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-        // Validate token balance fits in L bits (defense-in-depth)
-        if !scalar_fits_in_bits::<L>(&self.c) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-        // Constant-time check: s <= c iff (c - s) fits in L bits.
-        // If s > c in the integers, c - s wraps modulo the group order to a ~252-bit value.
-        if !scalar_fits_in_bits::<L>(&(self.c - s)) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-
-        let r1 = Scalar::random(&mut rng);
-        let r2 = Scalar::random(&mut rng);
-        let c_prime = Scalar::random(&mut rng);
-        let r_prime = Scalar::random(&mut rng);
-        let e_prime = Scalar::random(&mut rng);
-        let r2_prime = Scalar::random(&mut rng);
-        let r3_prime = Scalar::random(&mut rng);
-
-        let b = ProjectivePoint::GENERATOR
-            + params.h1 * self.c
-            + params.h2 * self.k
-            + params.h3 * self.r
-            + params.h4 * self.ctx;
-        let a_prime = self.a * (r1 * r2);
-        let b_bar = b * r1;
-        // invert(): r1 is freshly random, so r1 == 0 has negligible probability ~2^-256.
-        let r3 = r1.invert().unwrap();
-        let a1 = a_prime * e_prime + b_bar * r2_prime;
-        let a2 = b_bar * r3_prime + params.h1 * c_prime + params.h3 * r_prime;
-
-        let i = bits_of::<L>(self.c - s);
-
-        let k_star = Scalar::random(&mut rng);
-        let mut s_i = [Scalar::ZERO; L];
-        for s_val in s_i.iter_mut() {
-            *s_val = Scalar::random(&mut rng);
-        }
-        // Spec steps 26–32: create commitments Com[j] for each bit.
-        //
-        // The spec computes H1 * i[j] where i[j] is 0 or 1. Since bits_of
-        // returns Choice values (see Section 3.7 note above), we use
-        // conditional_select between identity and H1 instead of a full
-        // scalar multiplication, which is equivalent and constant-time.
-        let mut com = [ProjectivePoint::IDENTITY; L];
-        let h1_point = params.h1;
-        let h1_bit_0 = ProjectivePoint::conditional_select(
-            &ProjectivePoint::IDENTITY,
-            &h1_point,
-            i[0],
-        );
-        com[0] = h1_bit_0 + params.h2 * k_star + params.h3 * s_i[0];
-        for j in 1..L {
-            let h1_bit = ProjectivePoint::conditional_select(
-                &ProjectivePoint::IDENTITY,
-                &h1_point,
-                i[j],
-            );
-            com[j] = h1_bit + params.h3 * s_i[j];
-        }
-        let mut big_c_prime = [[ProjectivePoint::IDENTITY; 2]; L];
-
-        let k0_prime = Scalar::random(&mut rng);
-        let mut s_i_prime = [Scalar::ZERO; L];
-        for s_prime in s_i_prime.iter_mut() {
-            *s_prime = Scalar::random(&mut rng);
-        }
-        let mut gamma_i = [Scalar::ZERO; L];
-        for gamma in gamma_i.iter_mut() {
-            *gamma = Scalar::random(&mut rng);
-        }
-        let w0 = Scalar::random(&mut rng);
-        let mut z = [Scalar::ZERO; L];
-        for z_val in z.iter_mut() {
-            *z_val = Scalar::random(&mut rng);
-        }
-
-        // Spec steps 38–52: compute C'[0][0] and C'[0][1].
-        //
-        // The spec branches on i[0] and uses C[0][b] * gamma0[0] directly,
-        // where C[0][0] = Com[0] and C[0][1] = Com[0] - H1. Because the
-        // prover knows Com[0] = H1*i[0] + H2*k* + H3*s[0], we can
-        // decompose C[0][b]*gamma0 into multiplications on H1, H2, H3
-        // and use constant-time conditional_select instead of branching
-        // on the secret bit i[0].
-        //
-        // Optimization: merge muls sharing the same base (8 → 5).
-        //  (a) Compute H1*γ₀ once; derive H1*(i[0]*γ₀) via conditional_select.
-        //  (b) Merge H2*w0 and H2*(k*γ₀) into H2*(w0 - k*γ₀).
-        //  (c) Merge H3*z[0] and H3*(s[0]*γ₀) into H3*(z[0] - s[0]*γ₀).
-        let h2_k0_h3_s0 = params.h2 * k0_prime + params.h3 * s_i_prime[0];
-        let h1_gamma0 = params.h1 * gamma_i[0];
-        let h1_i0_gamma = ProjectivePoint::conditional_select(
-            &ProjectivePoint::IDENTITY,
-            &h1_gamma0,
-            i[0],
-        );
-        let h2_diff0 = params.h2 * (w0 - k_star * gamma_i[0]);
-        let h3_diff0 = params.h3 * (z[0] - s_i[0] * gamma_i[0]);
-        let diff0 = h2_diff0 + h3_diff0 - h1_i0_gamma;
-
-        big_c_prime[0][0] = ProjectivePoint::conditional_select(
-            &diff0,
-            &h2_k0_h3_s0,
-            !i[0],
-        );
-
-        big_c_prime[0][1] = ProjectivePoint::conditional_select(
-            &h2_k0_h3_s0,
-            &(diff0 + h1_gamma0),
-            !i[0],
-        );
-
-        // Spec steps 53–66: compute C'[j][0] and C'[j][1] for j = 1..L-1.
-        for j in 1..L {
-            let h3_s_j = params.h3 * s_i_prime[j];
-            let h1_gamma = params.h1 * gamma_i[j];
-            let h3_diff = params.h3 * (z[j] - s_i[j] * gamma_i[j]);
-
-            let h1_i_gamma = ProjectivePoint::conditional_select(
-                &ProjectivePoint::IDENTITY,
-                &h1_gamma,
-                i[j],
-            );
-            let diff = h3_diff - h1_i_gamma;
-
-            big_c_prime[j][0] = ProjectivePoint::conditional_select(
-                &diff,
-                &h3_s_j,
-                !i[j],
-            );
-            big_c_prime[j][1] = ProjectivePoint::conditional_select(
-                &h3_s_j,
-                &(diff + h1_gamma),
-                !i[j],
-            );
-        }
-        let r_star = pow2_weighted_scalar_sum(&s_i);
-        let k_prime = Scalar::random(&mut rng);
-        let s_prime = Scalar::random(&mut rng);
-        let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
-
-        let gamma = Transcript::with(params, b"spend", |transcript| {
-            transcript.add_scalar(&self.k);
-            transcript.add_scalar(&self.ctx);
-            transcript.add_elements([&a_prime, &b_bar].into_iter());
-            transcript.add_elements([&a1, &a2].into_iter());
-            transcript.add_elements(com.iter());
-            for c_prime in big_c_prime.iter() {
-                transcript.add_elements(c_prime.iter());
-            }
-            transcript.add_element(&c_);
-        });
-
-        let e_bar = gamma.neg() * self.e + e_prime;
-        let r2_bar = gamma * r2 + r2_prime;
-        let r3_bar = gamma * r3 + r3_prime;
-        let c_bar = gamma.neg() * self.c + c_prime;
-        let r_bar = gamma.neg() * self.r + r_prime;
-        let mut gamma00 = [Scalar::ZERO; L];
-        gamma00[0] = Scalar::conditional_select(
-            &gamma_i[0],
-            &(gamma - gamma_i[0]),
-            !i[0],
-        );
-        let w00 = Scalar::conditional_select(
-            &w0,
-            &(gamma00[0] * k_star + k0_prime),
-            !i[0],
-        );
-        let w01 = Scalar::conditional_select(
-            &((gamma - gamma00[0]) * k_star + k0_prime),
-            &w0,
-            !i[0],
-        );
-        let mut z00 = [[Scalar::ZERO; 2]; L];
-        z00[0][0] = Scalar::conditional_select(
-            &z[0],
-            &(gamma00[0] * s_i[0] + s_i_prime[0]),
-            !i[0],
-        );
-        z00[0][1] = Scalar::conditional_select(
-            &((gamma - gamma00[0]) * s_i[0] + s_i_prime[0]),
-            &z[0],
-            !i[0],
-        );
-        for j in 1..L {
-            gamma00[j] = Scalar::conditional_select(
-                &gamma_i[j],
-                &(gamma - gamma_i[j]),
-                !i[j],
-            );
-            z00[j][0] = Scalar::conditional_select(
-                &z[j],
-                &(gamma00[j] * s_i[j] + s_i_prime[j]),
-                !i[j],
-            );
-            z00[j][1] = Scalar::conditional_select(
-                &((gamma - gamma00[j]) * s_i[j] + s_i_prime[j]),
-                &z[j],
-                !i[j],
-            );
-        }
-        let k_bar = gamma * k_star + k_prime;
-        let s_bar = gamma * r_star + s_prime;
-
-        let prerefund = PreRefund {
-            k: k_star,
-            r: r_star,
-            m: self.c - s,
-            ctx: self.ctx,
-        };
-
-        Ok((
-            SpendProof {
-                k: self.k,
-                ctx: self.ctx,
-                s,
-                a_prime,
-                b_bar,
-                com,
-                gamma,
-                e_bar,
-                r2_bar,
-                r3_bar,
-                c_bar,
-                r_bar,
-                w00,
-                w01,
-                gamma0: gamma00,
-                z: z00,
-                k_bar,
-                s_bar,
-            },
-            prerefund,
-        ))
-    }
-}
-
-/// The issuer's response to a spending proof, used to create a new credit token.
-///
-/// This response contains the cryptographic signature components needed for the client
-/// to construct a new credit token with the remaining balance. It includes a BBS+
-/// signature on the remaining balance and proof values that authenticate the response.
-#[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct Refund {
-    /// The BBS+ signature's main component for the new credit token
-    a: ProjectivePoint,
-    /// A random scalar used in the BBS+ signature
-    e: Scalar,
-    /// A challenge value generated as part of the proof protocol
-    gamma: Scalar,
-    /// A response value for the proof of knowledge of the signature
-    z: Scalar,
-    /// Credits returned to the client (`0 <= t <= s`).
-    t: Scalar,
-}
-
-impl Refund {
-    /// Returns the partial credit return amount chosen by the issuer.
-    ///
-    /// When the issuer processes a spend of `s` credits, it may choose to
-    /// return `t` credits (where `0 <= t <= s`) back to the client. The
-    /// resulting token will have `c - s + t` credits instead of `c - s`.
-    pub fn partial_return(&self) -> Scalar {
-        self.t
-    }
-}
-
-impl PreRefund {
-    /// Constructs a new credit token from the refund response.
-    ///
-    /// This method verifies the issuer's refund response and, if valid, creates a new
-    /// credit token with the remaining balance. This completes the spending protocol
-    /// by providing the client with a new token for their unspent credits.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - The system parameters for this deployment
-    /// * `spend_proof` - The original spending proof sent to the issuer
-    /// * `refund` - The issuer's refund response
-    /// * `public_key` - The issuer's public key
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(CreditToken)` - A new credit token with the remaining balance if the refund is valid
-    /// * `Err(ErrorCode::InvalidProof)` - If the verification fails
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use anonymous_credit_tokens::p256::{PrivateKey, PreIssuance, Params, Scalar};
-    /// # use rand_core::OsRng;
-    /// #
-    /// # // Setup (normally these would come from previous steps)
-    /// # let private_key = PrivateKey::random(OsRng);
-    /// # let public_key = private_key.public();
-    /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
-    /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, public_key, &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u64);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
-    /// # let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
-    /// #
-    /// // Construct the new credit token with the remaining balance
-    /// let new_credit_token = prerefund.to_credit_token(
-    ///     &params,
-    ///     &spend_proof,
-    ///     &refund,
-    ///     public_key
-    /// ).unwrap();
-    /// ```
-    pub fn to_credit_token<const L: usize>(
-        &self,
-        params: &Params,
-        spend_proof: &SpendProof<L>,
-        refund: &Refund,
-        public_key: &PublicKey,
-    ) -> Result<CreditToken, ErrorCode> {
-        const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-
-        // Validate received point is not identity (spec Section 5.2)
-        if refund.a == ProjectivePoint::IDENTITY {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // All scalar operands below are public constants, issuer-provided
-        // (refund.*), or already revealed in the clear (self.ctx), so
-        // variable-time operations are safe.
-        let x_a = ProjectivePoint::GENERATOR
-            + pow2_weighted_sum(&spend_proof.com)
-            + params.h1 * refund.t
-            + params.h4 * self.ctx;
-
-        let x_g = ProjectivePoint::GENERATOR * refund.e + public_key.w;
-        let y_a = multiscalar_mul(
-            &[refund.z, refund.gamma.neg()],
-            &[refund.a, x_a],
-        );
-        let y_g = x_g * refund.gamma.neg() + ProjectivePoint::GENERATOR * refund.z;
-
-        let gamma = Transcript::with(params, b"refund", |transcript| {
-            transcript.add_scalars([&refund.e, &refund.t, &self.ctx].into_iter());
-            transcript.add_elements([&refund.a, &x_a, &x_g, &y_a, &y_g].into_iter());
-        });
-
-        if gamma != refund.gamma {
-            return Err(ErrorCode::InvalidProof);
-        }
-
-        // Validate partial return amount fits in L bits (defense-in-depth)
-        if !scalar_fits_in_bits::<L>(&refund.t) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-
-        let new_balance = self.m + refund.t;
-
-        // Validate resulting balance fits in L bits (defense-in-depth)
-        if !scalar_fits_in_bits::<L>(&new_balance) {
-            return Err(ErrorCode::InvalidAmount);
-        }
-
-        // The client now has a new credit token
-        Ok(CreditToken {
-            a: refund.a,
-            e: refund.e,
-            k: self.k,
-            r: self.r,
-            c: new_balance,
-            ctx: self.ctx,
-        })
-    }
+    P256::scalar_to_u128(scalar)
 }
 
 /// Converts a Scalar back to a credit amount, validating that it fits within L bits.
@@ -1701,11 +436,7 @@ impl PreRefund {
 /// assert!(scalar_to_credit::<8>(&big).is_err()); // 1000 >= 2^8
 /// ```
 pub fn scalar_to_credit<const L: usize>(scalar: &Scalar) -> Result<u128, ErrorCode> {
-    const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-    if !scalar_fits_in_bits::<L>(scalar) {
-        return Err(ErrorCode::InvalidAmount);
-    }
-    scalar_to_u128(scalar).ok_or(ErrorCode::InvalidAmount)
+    crate::protocol::scalar_to_credit::<P256, L>(scalar)
 }
 
 /// Converts a credit amount to a Scalar, validating that it is within the valid range.
@@ -1735,83 +466,8 @@ pub fn scalar_to_credit<const L: usize>(scalar: &Scalar) -> Result<u128, ErrorCo
 /// let zero = credit_to_scalar::<128>(0).unwrap(); // valid for spend amounts
 /// ```
 pub fn credit_to_scalar<const L: usize>(amount: u128) -> Result<Scalar, ErrorCode> {
-    const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
-    if L < 128 && amount >= (1u128 << L) {
-        return Err(ErrorCode::InvalidAmount);
-    }
-    Ok(scalar_from_u128(amount))
+    crate::protocol::credit_to_scalar::<P256, L>(amount)
 }
-
-/// Constructs a Scalar from a u128 value (big-endian representation).
-fn scalar_from_u128(v: u128) -> Scalar {
-    let mut bytes = [0u8; 32];
-    bytes[16..32].copy_from_slice(&v.to_be_bytes());
-    Scalar::from_repr(bytes.into()).unwrap()
-}
-
-/// Error codes for the protocol as defined in Section 5.3 of the spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ErrorCode {
-    /// Proof verification failed
-    InvalidProof = 1,
-    /// Double-spend attempt detected
-    NullifierReuse = 2,
-    /// Request format is invalid
-    MalformedRequest = 3,
-    /// Credit amount exceeds maximum (2^L - 1)
-    InvalidAmount = 4,
-}
-
-impl ErrorCode {
-    /// Convert from a u32 value.
-    pub fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            1 => Some(ErrorCode::InvalidProof),
-            2 => Some(ErrorCode::NullifierReuse),
-            3 => Some(ErrorCode::MalformedRequest),
-            4 => Some(ErrorCode::InvalidAmount),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for ErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ErrorCode::InvalidProof => write!(f, "proof verification failed"),
-            ErrorCode::NullifierReuse => write!(f, "double-spend attempt detected"),
-            ErrorCode::MalformedRequest => write!(f, "request format is invalid"),
-            ErrorCode::InvalidAmount => write!(f, "credit amount exceeds maximum"),
-        }
-    }
-}
-
-impl std::error::Error for ErrorCode {}
-
-/// An error message as defined in Section 4.2 of the spec.
-///
-/// ```text
-/// ErrorMsg = {
-///     1: uint,   ; error_code
-///     2: tstr    ; error_message (for debugging only)
-/// }
-/// ```
-#[derive(Debug, Clone)]
-pub struct ErrorMsg {
-    /// The error code identifying the type of error.
-    pub error_code: ErrorCode,
-    /// A human-readable error message for debugging.
-    pub error_message: String,
-}
-
-impl std::fmt::Display for ErrorMsg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.error_code, self.error_message)
-    }
-}
-
-impl std::error::Error for ErrorMsg {}
 
 #[cfg(test)]
 mod tests;

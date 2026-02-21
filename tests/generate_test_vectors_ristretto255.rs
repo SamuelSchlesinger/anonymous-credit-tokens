@@ -73,7 +73,7 @@ fn generate_test_vectors() {
     let mut rng = ChaCha20Rng::from_seed(seed);
 
     let domain_separator = "ACT-v1:test:vectors:v0:2025-01-01";
-    let params = Params::new("test", "vectors", "v0", "2025-01-01");
+    let params = Params::new("test", "vectors", "v0", "2025-01-01").unwrap();
 
     let c: u128 = 100;
     let s: u128 = 30;

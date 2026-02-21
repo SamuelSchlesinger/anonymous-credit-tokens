@@ -13,7 +13,7 @@ fn create_params() -> Arc<Params> {
         "bench-service",
         "bench-env",
         "2024-01-01",
-    ))
+    ).unwrap())
 }
 
 /// Max credit value that fits in L bits: 2^L - 1.

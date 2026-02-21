@@ -12,70 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! CBOR serialization for Anonymous Credit Token protocol messages.
+//! Generic CBOR serialization for Anonymous Credit Token protocol messages.
 //!
 //! This module implements the CBOR wire format as specified in the
 //! [IETF draft](https://datatracker.ietf.org/doc/draft-schlesinger-cfrg-act/).
 //! All protocol messages are encoded using deterministic CBOR (RFC 8949) for
 //! interoperability.
+//!
+//! Serialization and deserialization are implemented as inherent methods on
+//! each protocol type, parameterized by the [`Ciphersuite`] trait which
+//! provides the point/scalar encoding primitives for each concrete
+//! ciphersuite (P-256 or Ristretto255).
 
-use super::{
-    CreditToken, ErrorCode, ErrorMsg, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund,
-    PrivateKey, PublicKey, Refund, SpendProof,
+use crate::ciphersuite::{CborError, Ciphersuite, ErrorCode, ErrorMsg};
+use crate::protocol::{
+    CreditToken, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund, PrivateKey, PublicKey,
+    Refund, SpendProof,
 };
 use ciborium::value::Value;
-use elliptic_curve::PrimeField;
-use p256_crate::elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
-use p256_crate::{AffinePoint, ProjectivePoint, Scalar};
+use group::ff::Field;
+use group::Group;
 
 /// Maximum CBOR input size for protocol messages (64 KiB).
 /// This prevents memory amplification attacks from crafted CBOR payloads.
 const MAX_CBOR_INPUT_SIZE: usize = 65536;
-
-/// Error type for CBOR serialization/deserialization
-#[derive(Debug)]
-pub enum CborError {
-    /// Error from ciborium library
-    Ciborium(ciborium::de::Error<std::io::Error>),
-    /// Invalid CBOR structure
-    InvalidStructure(&'static str),
-    /// Invalid field value
-    InvalidValue(&'static str),
-    /// Input exceeds maximum size
-    InputTooLarge,
-}
-
-impl std::fmt::Display for CborError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CborError::Ciborium(e) => write!(f, "CBOR error: {e}"),
-            CborError::InvalidStructure(msg) => write!(f, "invalid CBOR structure: {msg}"),
-            CborError::InvalidValue(msg) => write!(f, "invalid CBOR value: {msg}"),
-            CborError::InputTooLarge => write!(f, "CBOR input exceeds maximum size"),
-        }
-    }
-}
-
-impl std::error::Error for CborError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CborError::Ciborium(e) => Some(e),
-            CborError::InvalidStructure(_) | CborError::InvalidValue(_) | CborError::InputTooLarge => None,
-        }
-    }
-}
-
-impl From<ciborium::de::Error<std::io::Error>> for CborError {
-    fn from(e: ciborium::de::Error<std::io::Error>) -> Self {
-        CborError::Ciborium(e)
-    }
-}
-
-impl From<ciborium::ser::Error<std::io::Error>> for CborError {
-    fn from(_: ciborium::ser::Error<std::io::Error>) -> Self {
-        CborError::InvalidStructure("serialization error")
-    }
-}
 
 /// Parse a CBOR value from bytes with an input size limit.
 fn parse_cbor(bytes: &[u8]) -> Result<Value, CborError> {
@@ -95,73 +55,24 @@ macro_rules! set_field {
     };
 }
 
-/// Encode a ProjectivePoint as a 33-byte SEC1 compressed CBOR byte string
-fn encode_point(point: &ProjectivePoint) -> Value {
-    let affine = point.to_affine();
-    let encoded = affine.to_encoded_point(true);
-    Value::Bytes(encoded.as_bytes().to_vec())
-}
+// ── IssuanceRequest ────────────────────────────────────────────────────
 
-/// Encode a Scalar as a 32-byte CBOR byte string (big-endian)
-fn encode_scalar(scalar: &Scalar) -> Value {
-    Value::Bytes(scalar.to_repr().to_vec())
-}
-
-/// Decode a ProjectivePoint from a CBOR byte string (33-byte SEC1 compressed)
-fn decode_point(value: &Value) -> Result<ProjectivePoint, CborError> {
-    match value {
-        Value::Bytes(bytes) if bytes.len() == 33 => {
-            let encoded = EncodedPoint::<p256_crate::NistP256>::from_bytes(bytes)
-                .map_err(|_| CborError::InvalidValue("invalid SEC1 encoding"))?;
-            let affine = AffinePoint::from_encoded_point(&encoded);
-            if affine.is_some().into() {
-                Ok(ProjectivePoint::from(affine.unwrap()))
-            } else {
-                Err(CborError::InvalidValue("invalid P-256 point"))
-            }
-        }
-        _ => Err(CborError::InvalidStructure(
-            "expected 33-byte array for point",
-        )),
-    }
-}
-
-/// Decode a Scalar from a CBOR byte string (big-endian, canonical)
-fn decode_scalar(value: &Value) -> Result<Scalar, CborError> {
-    match value {
-        Value::Bytes(bytes) if bytes.len() == 32 => {
-            let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
-            let repr = p256_crate::FieldBytes::from(arr);
-            let scalar = Scalar::from_repr(repr);
-            if scalar.is_some().into() {
-                Ok(scalar.unwrap())
-            } else {
-                Err(CborError::InvalidValue("non-canonical scalar encoding"))
-            }
-        }
-        _ => Err(CborError::InvalidStructure(
-            "expected 32-byte array for scalar",
-        )),
-    }
-}
-
-/// CBOR encoding for IssuanceRequest
-impl IssuanceRequest {
+impl<C: Ciphersuite> IssuanceRequest<C> {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// IssuanceRequestMsg = {
-    ///     1: bstr,  ; K (compressed P-256 point, 33 bytes)
-    ///     2: bstr,  ; gamma (scalar, 32 bytes)
-    ///     3: bstr,  ; k_bar (scalar, 32 bytes)
-    ///     4: bstr   ; r_bar (scalar, 32 bytes)
+    ///     1: bstr,  ; K (compressed point)
+    ///     2: bstr,  ; gamma (scalar)
+    ///     3: bstr,  ; k_bar (scalar)
+    ///     4: bstr   ; r_bar (scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_point(&self.big_k)),
-            (Value::Integer(2.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(3.into()), encode_scalar(&self.k_bar)),
-            (Value::Integer(4.into()), encode_scalar(&self.r_bar)),
+            (Value::Integer(1.into()), C::encode_point_cbor(&self.big_k)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.gamma)),
+            (Value::Integer(3.into()), C::encode_scalar_cbor(&self.k_bar)),
+            (Value::Integer(4.into()), C::encode_scalar_cbor(&self.r_bar)),
         ];
 
         let mut bytes = Vec::new();
@@ -182,10 +93,10 @@ impl IssuanceRequest {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => { set_field!(big_k, decode_point(&v)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(gamma, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 3.into() => { set_field!(k_bar, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 4.into() => { set_field!(r_bar, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(big_k, C::decode_point_cbor(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(gamma, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(k_bar, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(r_bar, C::decode_scalar_cbor(&v)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -202,27 +113,28 @@ impl IssuanceRequest {
     }
 }
 
-/// CBOR encoding for IssuanceResponse
-impl IssuanceResponse {
+// ── IssuanceResponse ───────────────────────────────────────────────────
+
+impl<C: Ciphersuite> IssuanceResponse<C> {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// IssuanceResponseMsg = {
-    ///     1: bstr,  ; A (compressed P-256 point, 33 bytes)
-    ///     2: bstr,  ; e (scalar, 32 bytes)
-    ///     3: bstr,  ; gamma_resp (scalar, 32 bytes)
-    ///     4: bstr,  ; z (scalar, 32 bytes)
-    ///     5: bstr,  ; c (scalar, 32 bytes)
-    ///     6: bstr   ; ctx (scalar, 32 bytes)
+    ///     1: bstr,  ; A (compressed point)
+    ///     2: bstr,  ; e (scalar)
+    ///     3: bstr,  ; gamma_resp (scalar)
+    ///     4: bstr,  ; z (scalar)
+    ///     5: bstr,  ; c (scalar)
+    ///     6: bstr   ; ctx (scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_point(&self.a)),
-            (Value::Integer(2.into()), encode_scalar(&self.e)),
-            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(4.into()), encode_scalar(&self.z)),
-            (Value::Integer(5.into()), encode_scalar(&self.c)),
-            (Value::Integer(6.into()), encode_scalar(&self.ctx)),
+            (Value::Integer(1.into()), C::encode_point_cbor(&self.a)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.e)),
+            (Value::Integer(3.into()), C::encode_scalar_cbor(&self.gamma)),
+            (Value::Integer(4.into()), C::encode_scalar_cbor(&self.z)),
+            (Value::Integer(5.into()), C::encode_scalar_cbor(&self.c)),
+            (Value::Integer(6.into()), C::encode_scalar_cbor(&self.ctx)),
         ];
 
         let mut bytes = Vec::new();
@@ -245,12 +157,12 @@ impl IssuanceResponse {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => { set_field!(a, decode_point(&v)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(e, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 3.into() => { set_field!(gamma, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 4.into() => { set_field!(z, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 5.into() => { set_field!(c, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 6.into() => { set_field!(ctx, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(a, C::decode_point_cbor(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(e, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(gamma, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(z, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 5.into() => { set_field!(c, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 6.into() => { set_field!(ctx, C::decode_scalar_cbor(&v)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -269,64 +181,74 @@ impl IssuanceResponse {
     }
 }
 
-/// CBOR encoding for SpendProof
-impl<const L: usize> SpendProof<L> {
+// ── SpendProof ─────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite, const L: usize> SpendProof<C, L> {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// SpendProofMsg = {
-    ///     1: bstr,           ; k (nullifier, 32 bytes)
-    ///     2: bstr,           ; s (spend amount, 32 bytes)
-    ///     3: bstr,           ; A' (compressed point, 33 bytes)
-    ///     4: bstr,           ; B_bar (compressed point, 33 bytes)
-    ///     5: [* bstr],       ; Com array (L compressed points)
-    ///     6: bstr,           ; gamma (scalar, 32 bytes)
-    ///     7: bstr,           ; e_bar (scalar, 32 bytes)
-    ///     8: bstr,           ; r2_bar (scalar, 32 bytes)
-    ///     9: bstr,           ; r3_bar (scalar, 32 bytes)
-    ///     10: bstr,          ; c_bar (scalar, 32 bytes)
-    ///     11: bstr,          ; r_bar (scalar, 32 bytes)
-    ///     12: bstr,          ; w00 (scalar, 32 bytes)
-    ///     13: bstr,          ; w01 (scalar, 32 bytes)
-    ///     14: [* bstr],      ; gamma0 array (L scalars)
+    ///     1: bstr,              ; k (nullifier)
+    ///     2: bstr,              ; s (spend amount)
+    ///     3: bstr,              ; A' (compressed point)
+    ///     4: bstr,              ; B_bar (compressed point)
+    ///     5: [* bstr],          ; Com array (L compressed points)
+    ///     6: bstr,              ; gamma (scalar)
+    ///     7: bstr,              ; e_bar (scalar)
+    ///     8: bstr,              ; r2_bar (scalar)
+    ///     9: bstr,              ; r3_bar (scalar)
+    ///     10: bstr,             ; c_bar (scalar)
+    ///     11: bstr,             ; r_bar (scalar)
+    ///     12: bstr,             ; w00 (scalar)
+    ///     13: bstr,             ; w01 (scalar)
+    ///     14: [* bstr],         ; gamma0 array (L scalars)
     ///     15: [* [bstr, bstr]], ; z array (L pairs of scalars)
-    ///     16: bstr,          ; k_bar (scalar, 32 bytes)
-    ///     17: bstr,          ; s_bar (scalar, 32 bytes)
-    ///     18: bstr           ; ctx (request_context scalar, 32 bytes)
+    ///     16: bstr,             ; k_bar (scalar)
+    ///     17: bstr,             ; s_bar (scalar)
+    ///     18: bstr              ; ctx (request_context scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         // Com array
-        let com_array: Vec<Value> = self.com.iter().map(encode_point).collect();
+        let com_array: Vec<Value> = self.com.iter().map(|p| C::encode_point_cbor(p)).collect();
 
         // gamma0 array
-        let gamma0_array: Vec<Value> = self.gamma0.iter().map(encode_scalar).collect();
+        let gamma0_array: Vec<Value> = self
+            .gamma0
+            .iter()
+            .map(|s| C::encode_scalar_cbor(s))
+            .collect();
 
         // z array (pairs)
         let z_array: Vec<Value> = self
             .z
             .iter()
-            .map(|pair| Value::Array(vec![encode_scalar(&pair[0]), encode_scalar(&pair[1])]))
+            .map(|pair| {
+                Value::Array(vec![
+                    C::encode_scalar_cbor(&pair[0]),
+                    C::encode_scalar_cbor(&pair[1]),
+                ])
+            })
             .collect();
 
         let map = vec![
-            (Value::Integer(1.into()), encode_scalar(&self.k)),
-            (Value::Integer(2.into()), encode_scalar(&self.s)),
-            (Value::Integer(3.into()), encode_point(&self.a_prime)),
-            (Value::Integer(4.into()), encode_point(&self.b_bar)),
+            (Value::Integer(1.into()), C::encode_scalar_cbor(&self.k)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.s)),
+            (Value::Integer(3.into()), C::encode_point_cbor(&self.a_prime)),
+            (Value::Integer(4.into()), C::encode_point_cbor(&self.b_bar)),
             (Value::Integer(5.into()), Value::Array(com_array)),
-            (Value::Integer(6.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(7.into()), encode_scalar(&self.e_bar)),
-            (Value::Integer(8.into()), encode_scalar(&self.r2_bar)),
-            (Value::Integer(9.into()), encode_scalar(&self.r3_bar)),
-            (Value::Integer(10.into()), encode_scalar(&self.c_bar)),
-            (Value::Integer(11.into()), encode_scalar(&self.r_bar)),
-            (Value::Integer(12.into()), encode_scalar(&self.w00)),
-            (Value::Integer(13.into()), encode_scalar(&self.w01)),
+            (Value::Integer(6.into()), C::encode_scalar_cbor(&self.gamma)),
+            (Value::Integer(7.into()), C::encode_scalar_cbor(&self.e_bar)),
+            (Value::Integer(8.into()), C::encode_scalar_cbor(&self.r2_bar)),
+            (Value::Integer(9.into()), C::encode_scalar_cbor(&self.r3_bar)),
+            (Value::Integer(10.into()), C::encode_scalar_cbor(&self.c_bar)),
+            (Value::Integer(11.into()), C::encode_scalar_cbor(&self.r_bar)),
+            (Value::Integer(12.into()), C::encode_scalar_cbor(&self.w00)),
+            (Value::Integer(13.into()), C::encode_scalar_cbor(&self.w01)),
             (Value::Integer(14.into()), Value::Array(gamma0_array)),
             (Value::Integer(15.into()), Value::Array(z_array)),
-            (Value::Integer(16.into()), encode_scalar(&self.k_bar)),
-            (Value::Integer(17.into()), encode_scalar(&self.s_bar)),
-            (Value::Integer(18.into()), encode_scalar(&self.ctx)),
+            (Value::Integer(16.into()), C::encode_scalar_cbor(&self.k_bar)),
+            (Value::Integer(17.into()), C::encode_scalar_cbor(&self.s_bar)),
+            (Value::Integer(18.into()), C::encode_scalar_cbor(&self.ctx)),
         ];
 
         let mut bytes = Vec::new();
@@ -361,20 +283,20 @@ impl<const L: usize> SpendProof<L> {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => { set_field!(k, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(s, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 3.into() => { set_field!(a_prime, decode_point(&val)?); }
-                        Value::Integer(i) if i == 4.into() => { set_field!(b_bar, decode_point(&val)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(k, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(s, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(a_prime, C::decode_point_cbor(&val)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(b_bar, C::decode_point_cbor(&val)?); }
                         Value::Integer(i) if i == 5.into() => {
                             if com.is_some() {
                                 return Err(CborError::InvalidStructure("duplicate map key"));
                             }
                             if let Value::Array(arr) = val {
                                 let com_arr: Result<Vec<_>, _> =
-                                    arr.into_iter().map(|v| decode_point(&v)).collect();
+                                    arr.iter().map(|v| C::decode_point_cbor(v)).collect();
                                 let com_arr = com_arr?;
                                 if com_arr.len() == L {
-                                    let mut com_fixed = [ProjectivePoint::IDENTITY; L];
+                                    let mut com_fixed = [C::Point::identity(); L];
                                     com_fixed.copy_from_slice(&com_arr);
                                     com = Some(com_fixed);
                                 } else {
@@ -386,24 +308,24 @@ impl<const L: usize> SpendProof<L> {
                                 return Err(CborError::InvalidStructure("expected array for Com"));
                             }
                         }
-                        Value::Integer(i) if i == 6.into() => { set_field!(gamma, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 7.into() => { set_field!(e_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 8.into() => { set_field!(r2_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 9.into() => { set_field!(r3_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 10.into() => { set_field!(c_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 11.into() => { set_field!(r_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 12.into() => { set_field!(w00, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 13.into() => { set_field!(w01, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 6.into() => { set_field!(gamma, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 7.into() => { set_field!(e_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 8.into() => { set_field!(r2_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 9.into() => { set_field!(r3_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 10.into() => { set_field!(c_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 11.into() => { set_field!(r_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 12.into() => { set_field!(w00, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 13.into() => { set_field!(w01, C::decode_scalar_cbor(&val)?); }
                         Value::Integer(i) if i == 14.into() => {
                             if gamma0.is_some() {
                                 return Err(CborError::InvalidStructure("duplicate map key"));
                             }
                             if let Value::Array(arr) = val {
                                 let gamma0_arr: Result<Vec<_>, _> =
-                                    arr.into_iter().map(|v| decode_scalar(&v)).collect();
+                                    arr.iter().map(|v| C::decode_scalar_cbor(v)).collect();
                                 let gamma0_arr = gamma0_arr?;
                                 if gamma0_arr.len() == L {
-                                    let mut gamma0_fixed = [Scalar::ZERO; L];
+                                    let mut gamma0_fixed = [<C::Scalar as Field>::ZERO; L];
                                     gamma0_fixed.copy_from_slice(&gamma0_arr);
                                     gamma0 = Some(gamma0_fixed);
                                 } else {
@@ -421,13 +343,13 @@ impl<const L: usize> SpendProof<L> {
                             }
                             if let Value::Array(arr) = val {
                                 let z_arr: Result<Vec<_>, _> = arr
-                                    .into_iter()
+                                    .iter()
                                     .map(|v| {
                                         if let Value::Array(pair) = v {
                                             if pair.len() == 2 {
                                                 Ok([
-                                                    decode_scalar(&pair[0])?,
-                                                    decode_scalar(&pair[1])?,
+                                                    C::decode_scalar_cbor(&pair[0])?,
+                                                    C::decode_scalar_cbor(&pair[1])?,
                                                 ])
                                             } else {
                                                 Err(CborError::InvalidStructure(
@@ -443,7 +365,8 @@ impl<const L: usize> SpendProof<L> {
                                     .collect();
                                 let z_arr = z_arr?;
                                 if z_arr.len() == L {
-                                    let mut z_fixed = [[Scalar::ZERO; 2]; L];
+                                    let mut z_fixed =
+                                        [[<C::Scalar as Field>::ZERO; 2]; L];
                                     z_fixed.copy_from_slice(&z_arr);
                                     z = Some(z_fixed);
                                 } else {
@@ -453,9 +376,9 @@ impl<const L: usize> SpendProof<L> {
                                 return Err(CborError::InvalidStructure("expected array for z"));
                             }
                         }
-                        Value::Integer(i) if i == 16.into() => { set_field!(k_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 17.into() => { set_field!(s_bar, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 18.into() => { set_field!(ctx, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 16.into() => { set_field!(k_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 17.into() => { set_field!(s_bar, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 18.into() => { set_field!(ctx, C::decode_scalar_cbor(&val)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -486,25 +409,26 @@ impl<const L: usize> SpendProof<L> {
     }
 }
 
-/// CBOR encoding for Refund
-impl Refund {
+// ── Refund ─────────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite> Refund<C> {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// RefundMsg = {
-    ///     1: bstr,  ; A* (compressed P-256 point, 33 bytes)
-    ///     2: bstr,  ; e* (scalar, 32 bytes)
-    ///     3: bstr,  ; gamma (scalar, 32 bytes)
-    ///     4: bstr,  ; z (scalar, 32 bytes)
-    ///     5: bstr   ; t (scalar, 32 bytes)
+    ///     1: bstr,  ; A* (compressed point)
+    ///     2: bstr,  ; e* (scalar)
+    ///     3: bstr,  ; gamma (scalar)
+    ///     4: bstr,  ; z (scalar)
+    ///     5: bstr   ; t (scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_point(&self.a)),
-            (Value::Integer(2.into()), encode_scalar(&self.e)),
-            (Value::Integer(3.into()), encode_scalar(&self.gamma)),
-            (Value::Integer(4.into()), encode_scalar(&self.z)),
-            (Value::Integer(5.into()), encode_scalar(&self.t)),
+            (Value::Integer(1.into()), C::encode_point_cbor(&self.a)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.e)),
+            (Value::Integer(3.into()), C::encode_scalar_cbor(&self.gamma)),
+            (Value::Integer(4.into()), C::encode_scalar_cbor(&self.z)),
+            (Value::Integer(5.into()), C::encode_scalar_cbor(&self.t)),
         ];
 
         let mut bytes = Vec::new();
@@ -526,11 +450,11 @@ impl Refund {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => { set_field!(a, decode_point(&v)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(e, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 3.into() => { set_field!(gamma, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 4.into() => { set_field!(z, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 5.into() => { set_field!(t, decode_scalar(&v)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(a, C::decode_point_cbor(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(e, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(gamma, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(z, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 5.into() => { set_field!(t, C::decode_scalar_cbor(&v)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -548,19 +472,20 @@ impl Refund {
     }
 }
 
-/// CBOR encoding for PrivateKey
-impl PrivateKey {
+// ── PrivateKey ─────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite> PrivateKey<C> {
     /// Encode to CBOR according to format:
     /// ```text
     /// PrivateKey = {
-    ///     1: bstr,  ; x (scalar, 32 bytes)
-    ///     2: bstr   ; w (public key point, 33 bytes)
+    ///     1: bstr,  ; x (scalar)
+    ///     2: bstr   ; w (public key point)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_scalar(&self.x)),
-            (Value::Integer(2.into()), encode_point(&self.public.w)),
+            (Value::Integer(1.into()), C::encode_scalar_cbor(&self.x)),
+            (Value::Integer(2.into()), C::encode_point_cbor(&self.public.w)),
         ];
 
         let mut bytes = Vec::new();
@@ -569,6 +494,9 @@ impl PrivateKey {
     }
 
     /// Decode from CBOR
+    ///
+    /// Validates that the public key `w` matches the secret scalar `x`
+    /// (i.e. `w == g * x`) to prevent use of inconsistent key material.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
         let value = parse_cbor(bytes)?;
 
@@ -579,8 +507,8 @@ impl PrivateKey {
 
                 for (k, v) in map {
                     match k {
-                        Value::Integer(i) if i == 1.into() => { set_field!(x, decode_scalar(&v)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(w, decode_point(&v)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(x, C::decode_scalar_cbor(&v)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(w, C::decode_point_cbor(&v)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -589,7 +517,7 @@ impl PrivateKey {
                 let w = w.ok_or(CborError::InvalidStructure("missing field 2 (w)"))?;
 
                 // Validate w == g^x to prevent use of inconsistent key material
-                let expected_w = ProjectivePoint::GENERATOR * x;
+                let expected_w = C::generator_mul(&x);
                 if w != expected_w {
                     return Err(CborError::InvalidValue(
                         "public key w does not match secret scalar x",
@@ -606,39 +534,41 @@ impl PrivateKey {
     }
 }
 
-/// CBOR encoding for PublicKey
-impl PublicKey {
+// ── PublicKey ───────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite> PublicKey<C> {
     /// Encode to CBOR according to format:
     /// ```text
-    /// PublicKey = bstr  ; w (compressed P-256 point, 33 bytes)
+    /// PublicKey = bstr  ; w (compressed point)
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&encode_point(&self.w), &mut bytes)?;
+        ciborium::into_writer(&C::encode_point_cbor(&self.w), &mut bytes)?;
         Ok(bytes)
     }
 
     /// Decode from CBOR
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, CborError> {
         let value = parse_cbor(bytes)?;
-        let w = decode_point(&value)?;
+        let w = C::decode_point_cbor(&value)?;
         Ok(PublicKey { w })
     }
 }
 
-/// CBOR encoding for PreIssuance
-impl PreIssuance {
+// ── PreIssuance ────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite> PreIssuance<C> {
     /// Encode to CBOR according to format:
     /// ```text
     /// PreIssuance = {
-    ///     1: bstr,  ; r (scalar, 32 bytes)
-    ///     2: bstr   ; k (scalar, 32 bytes)
+    ///     1: bstr,  ; r (scalar)
+    ///     2: bstr   ; k (scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_scalar(&self.r)),
-            (Value::Integer(2.into()), encode_scalar(&self.k)),
+            (Value::Integer(1.into()), C::encode_scalar_cbor(&self.r)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.k)),
         ];
 
         let mut bytes = Vec::new();
@@ -657,8 +587,8 @@ impl PreIssuance {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => { set_field!(r, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(k, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(r, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(k, C::decode_scalar_cbor(&val)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -673,27 +603,28 @@ impl PreIssuance {
     }
 }
 
-/// CBOR encoding for CreditToken
-impl CreditToken {
+// ── CreditToken ────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite> CreditToken<C> {
     /// Encode to CBOR according to format:
     /// ```text
     /// CreditToken = {
-    ///     1: bstr,  ; a (compressed P-256 point, 33 bytes)
-    ///     2: bstr,  ; e (scalar, 32 bytes)
-    ///     3: bstr,  ; k (scalar, 32 bytes)
-    ///     4: bstr,  ; r (scalar, 32 bytes)
-    ///     5: bstr,  ; c (scalar, 32 bytes)
-    ///     6: bstr   ; ctx (scalar, 32 bytes)
+    ///     1: bstr,  ; a (compressed point)
+    ///     2: bstr,  ; e (scalar)
+    ///     3: bstr,  ; k (scalar)
+    ///     4: bstr,  ; r (scalar)
+    ///     5: bstr,  ; c (scalar)
+    ///     6: bstr   ; ctx (scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_point(&self.a)),
-            (Value::Integer(2.into()), encode_scalar(&self.e)),
-            (Value::Integer(3.into()), encode_scalar(&self.k)),
-            (Value::Integer(4.into()), encode_scalar(&self.r)),
-            (Value::Integer(5.into()), encode_scalar(&self.c)),
-            (Value::Integer(6.into()), encode_scalar(&self.ctx)),
+            (Value::Integer(1.into()), C::encode_point_cbor(&self.a)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.e)),
+            (Value::Integer(3.into()), C::encode_scalar_cbor(&self.k)),
+            (Value::Integer(4.into()), C::encode_scalar_cbor(&self.r)),
+            (Value::Integer(5.into()), C::encode_scalar_cbor(&self.c)),
+            (Value::Integer(6.into()), C::encode_scalar_cbor(&self.ctx)),
         ];
 
         let mut bytes = Vec::new();
@@ -716,12 +647,12 @@ impl CreditToken {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => { set_field!(a, decode_point(&val)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(e, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 3.into() => { set_field!(k, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 4.into() => { set_field!(r, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 5.into() => { set_field!(c, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 6.into() => { set_field!(ctx, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(a, C::decode_point_cbor(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(e, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(k, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(r, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 5.into() => { set_field!(c, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 6.into() => { set_field!(ctx, C::decode_scalar_cbor(&val)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -740,23 +671,24 @@ impl CreditToken {
     }
 }
 
-/// CBOR encoding for PreRefund
-impl PreRefund {
+// ── PreRefund ──────────────────────────────────────────────────────────
+
+impl<C: Ciphersuite> PreRefund<C> {
     /// Encode to CBOR according to format:
     /// ```text
     /// PreRefund = {
-    ///     1: bstr,  ; r (scalar, 32 bytes)
-    ///     2: bstr,  ; k (scalar, 32 bytes)
-    ///     3: bstr,  ; m (scalar, 32 bytes)
-    ///     4: bstr   ; ctx (scalar, 32 bytes)
+    ///     1: bstr,  ; r (scalar)
+    ///     2: bstr,  ; k (scalar)
+    ///     3: bstr,  ; m (scalar)
+    ///     4: bstr   ; ctx (scalar)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let map = vec![
-            (Value::Integer(1.into()), encode_scalar(&self.r)),
-            (Value::Integer(2.into()), encode_scalar(&self.k)),
-            (Value::Integer(3.into()), encode_scalar(&self.m)),
-            (Value::Integer(4.into()), encode_scalar(&self.ctx)),
+            (Value::Integer(1.into()), C::encode_scalar_cbor(&self.r)),
+            (Value::Integer(2.into()), C::encode_scalar_cbor(&self.k)),
+            (Value::Integer(3.into()), C::encode_scalar_cbor(&self.m)),
+            (Value::Integer(4.into()), C::encode_scalar_cbor(&self.ctx)),
         ];
 
         let mut bytes = Vec::new();
@@ -777,10 +709,10 @@ impl PreRefund {
 
                 for (key, val) in map {
                     match key {
-                        Value::Integer(i) if i == 1.into() => { set_field!(r, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 2.into() => { set_field!(k, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 3.into() => { set_field!(m, decode_scalar(&val)?); }
-                        Value::Integer(i) if i == 4.into() => { set_field!(ctx, decode_scalar(&val)?); }
+                        Value::Integer(i) if i == 1.into() => { set_field!(r, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 2.into() => { set_field!(k, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 3.into() => { set_field!(m, C::decode_scalar_cbor(&val)?); }
+                        Value::Integer(i) if i == 4.into() => { set_field!(ctx, C::decode_scalar_cbor(&val)?); }
                         _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
                     }
                 }
@@ -797,7 +729,8 @@ impl PreRefund {
     }
 }
 
-/// CBOR encoding for ErrorMsg
+// ── ErrorMsg ───────────────────────────────────────────────────────────
+
 impl ErrorMsg {
     /// Encode to CBOR according to spec format:
     /// ```text
@@ -848,7 +781,9 @@ impl ErrorMsg {
                                         .ok_or(CborError::InvalidValue("unknown error_code"))?,
                                 );
                             } else {
-                                return Err(CborError::InvalidStructure("expected integer for error_code"));
+                                return Err(CborError::InvalidStructure(
+                                    "expected integer for error_code",
+                                ));
                             }
                         }
                         Value::Integer(i) if i == 2.into() => {
@@ -858,10 +793,14 @@ impl ErrorMsg {
                             if let Value::Text(msg) = v {
                                 error_message = Some(msg);
                             } else {
-                                return Err(CborError::InvalidStructure("expected text for error_message"));
+                                return Err(CborError::InvalidStructure(
+                                    "expected text for error_message",
+                                ));
                             }
                         }
-                        _ => { return Err(CborError::InvalidStructure("unexpected map key")); }
+                        _ => {
+                            return Err(CborError::InvalidStructure("unexpected map key"));
+                        }
                     }
                 }
 
@@ -874,226 +813,6 @@ impl ErrorMsg {
                 })
             }
             _ => Err(CborError::InvalidStructure("expected CBOR map")),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use group::Group;
-    use rand_core::OsRng;
-
-    fn random_scalar() -> Scalar {
-        use elliptic_curve::Field;
-        Scalar::random(&mut OsRng)
-    }
-
-    fn random_point() -> ProjectivePoint {
-        ProjectivePoint::random(&mut OsRng)
-    }
-
-    #[test]
-    fn test_issuance_request_cbor_roundtrip() {
-        let big_k = random_point();
-        let gamma = random_scalar();
-        let k_bar = random_scalar();
-        let r_bar = random_scalar();
-
-        let request = IssuanceRequest {
-            big_k,
-            gamma,
-            k_bar,
-            r_bar,
-        };
-
-        let bytes = request.to_cbor().unwrap();
-        let decoded = IssuanceRequest::from_cbor(&bytes).unwrap();
-
-        assert_eq!(request.big_k, decoded.big_k);
-        assert_eq!(request.gamma, decoded.gamma);
-        assert_eq!(request.k_bar, decoded.k_bar);
-        assert_eq!(request.r_bar, decoded.r_bar);
-    }
-
-    #[test]
-    fn test_issuance_response_cbor_roundtrip() {
-        let a = random_point();
-        let e = random_scalar();
-        let gamma = random_scalar();
-        let z = random_scalar();
-        let c = random_scalar();
-        let ctx = random_scalar();
-
-        let response = IssuanceResponse {
-            a,
-            e,
-            gamma,
-            z,
-            c,
-            ctx,
-        };
-
-        let bytes = response.to_cbor().unwrap();
-        let decoded = IssuanceResponse::from_cbor(&bytes).unwrap();
-
-        assert_eq!(response.a, decoded.a);
-        assert_eq!(response.e, decoded.e);
-        assert_eq!(response.gamma, decoded.gamma);
-        assert_eq!(response.z, decoded.z);
-        assert_eq!(response.c, decoded.c);
-        assert_eq!(response.ctx, decoded.ctx);
-    }
-
-    #[test]
-    fn test_refund_cbor_roundtrip() {
-        let a = random_point();
-        let e = random_scalar();
-        let gamma = random_scalar();
-        let z = random_scalar();
-        let t = random_scalar();
-
-        let refund = Refund { a, e, gamma, z, t };
-
-        let bytes = refund.to_cbor().unwrap();
-        let decoded = Refund::from_cbor(&bytes).unwrap();
-
-        assert_eq!(refund.a, decoded.a);
-        assert_eq!(refund.e, decoded.e);
-        assert_eq!(refund.gamma, decoded.gamma);
-        assert_eq!(refund.z, decoded.z);
-        assert_eq!(refund.t, decoded.t);
-    }
-
-    #[test]
-    fn test_private_key_cbor_roundtrip() {
-        let x = random_scalar();
-        let public = PublicKey {
-            w: ProjectivePoint::GENERATOR * x,
-        };
-
-        let private_key = PrivateKey { x, public };
-
-        let bytes = private_key.to_cbor().unwrap();
-        let decoded = PrivateKey::from_cbor(&bytes).unwrap();
-
-        assert_eq!(private_key.x, decoded.x);
-        assert_eq!(private_key.public.w, decoded.public.w);
-    }
-
-    #[test]
-    fn test_private_key_cbor_rejects_inconsistent_w() {
-        let x = random_scalar();
-        // Deliberately use a wrong public key
-        let wrong_w = random_point();
-        let private_key = PrivateKey {
-            x,
-            public: PublicKey { w: wrong_w },
-        };
-
-        let bytes = private_key.to_cbor().unwrap();
-        let result = PrivateKey::from_cbor(&bytes);
-        assert!(
-            result.is_err(),
-            "Inconsistent w should be rejected during deserialization"
-        );
-    }
-
-    #[test]
-    fn test_public_key_cbor_roundtrip() {
-        let w = random_point();
-        let public_key = PublicKey { w };
-
-        let bytes = public_key.to_cbor().unwrap();
-        let decoded = PublicKey::from_cbor(&bytes).unwrap();
-
-        assert_eq!(public_key.w, decoded.w);
-    }
-
-    #[test]
-    fn test_pre_issuance_cbor_roundtrip() {
-        let r = random_scalar();
-        let k = random_scalar();
-
-        let pre_issuance = PreIssuance { r, k };
-
-        let bytes = pre_issuance.to_cbor().unwrap();
-        let decoded = PreIssuance::from_cbor(&bytes).unwrap();
-
-        assert_eq!(pre_issuance.r, decoded.r);
-        assert_eq!(pre_issuance.k, decoded.k);
-    }
-
-    #[test]
-    fn test_credit_token_cbor_roundtrip() {
-        let a = random_point();
-        let e = random_scalar();
-        let k = random_scalar();
-        let r = random_scalar();
-        let c = random_scalar();
-        let ctx = random_scalar();
-
-        let token = CreditToken { a, e, k, r, c, ctx };
-
-        let bytes = token.to_cbor().unwrap();
-        let decoded = CreditToken::from_cbor(&bytes).unwrap();
-
-        assert_eq!(token.a, decoded.a);
-        assert_eq!(token.e, decoded.e);
-        assert_eq!(token.k, decoded.k);
-        assert_eq!(token.r, decoded.r);
-        assert_eq!(token.c, decoded.c);
-        assert_eq!(token.ctx, decoded.ctx);
-    }
-
-    #[test]
-    fn test_pre_refund_cbor_roundtrip() {
-        let r = random_scalar();
-        let k = random_scalar();
-        let m = random_scalar();
-        let ctx = random_scalar();
-
-        let pre_refund = PreRefund { r, k, m, ctx };
-
-        let bytes = pre_refund.to_cbor().unwrap();
-        let decoded = PreRefund::from_cbor(&bytes).unwrap();
-
-        assert_eq!(pre_refund.r, decoded.r);
-        assert_eq!(pre_refund.k, decoded.k);
-        assert_eq!(pre_refund.m, decoded.m);
-        assert_eq!(pre_refund.ctx, decoded.ctx);
-    }
-
-    #[test]
-    fn test_error_msg_cbor_roundtrip() {
-        let error = ErrorMsg {
-            error_code: ErrorCode::InvalidProof,
-            error_message: "proof verification failed".to_string(),
-        };
-
-        let bytes = error.to_cbor().unwrap();
-        let decoded = ErrorMsg::from_cbor(&bytes).unwrap();
-
-        assert_eq!(error.error_code, decoded.error_code);
-        assert_eq!(error.error_message, decoded.error_message);
-    }
-
-    #[test]
-    fn test_error_msg_all_codes() {
-        for (code, name) in [
-            (ErrorCode::InvalidProof, "invalid proof"),
-            (ErrorCode::NullifierReuse, "double spend"),
-            (ErrorCode::MalformedRequest, "bad request"),
-            (ErrorCode::InvalidAmount, "amount too large"),
-        ] {
-            let error = ErrorMsg {
-                error_code: code,
-                error_message: name.to_string(),
-            };
-            let bytes = error.to_cbor().unwrap();
-            let decoded = ErrorMsg::from_cbor(&bytes).unwrap();
-            assert_eq!(error.error_code, decoded.error_code);
-            assert_eq!(error.error_message, decoded.error_message);
         }
     }
 }

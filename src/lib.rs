@@ -19,6 +19,14 @@
 //!
 //! Enable the `p256` or `ristretto255` feature to use the corresponding ciphersuite.
 
+pub(crate) mod ciphersuite;
+pub(crate) mod transcript;
+pub(crate) mod protocol;
+mod cbor;
+
+#[cfg(test)]
+pub(crate) mod tests_common;
+
 #[cfg(feature = "p256")]
 pub mod p256;
 

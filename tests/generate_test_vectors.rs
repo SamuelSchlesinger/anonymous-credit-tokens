@@ -34,7 +34,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Hex of a scalar's big-endian bytes.
 fn scalar_hex(s: &Scalar) -> String {
-    hex(s.to_repr().as_slice())
+    hex(s.to_repr().as_ref())
 }
 
 /// Format a long hex string with 2-space indented continuation lines,
@@ -74,7 +74,7 @@ fn generate_test_vectors() {
     let mut rng = ChaCha20Rng::from_seed(seed);
 
     let domain_separator = "ACT-v1:test:vectors:v0:2025-01-01";
-    let params = Params::new("test", "vectors", "v0", "2025-01-01");
+    let params = Params::new("test", "vectors", "v0", "2025-01-01").unwrap();
 
     let c: u128 = 100;
     let s: u128 = 30;

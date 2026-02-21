@@ -56,7 +56,7 @@ macro_rules! bench_spend_and_refund {
 }
 
 fn spend_and_refund(c: &mut Criterion) {
-    let params = Params::new("bench-org", "bench-service", "bench-env", "2024-01-01");
+    let params = Params::new("bench-org", "bench-service", "bench-env", "2024-01-01").unwrap();
 
     let mut group = c.benchmark_group("spend_and_refund");
     group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
