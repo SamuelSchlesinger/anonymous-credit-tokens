@@ -10,11 +10,17 @@ keywords = ["cryptography", "e-cash", "anonymous-creds", "privacy", "zero-knowle
 categories = ["cryptography"]
 exclude = ["draft-act/", ".github/", "docs/", "proptest.toml"]
 
+[features]
+default = ["p256"]
+p256 = ["dep:p256-crate", "dep:elliptic-curve"]
+ristretto255 = ["dep:curve25519-dalek"]
+
 [dependencies]
 ciborium = "0.2"
 blake3 = "1.8.1"
-p256 = { version = "0.13", features = ["arithmetic", "hash2curve"] }
-elliptic-curve = { version = "0.13", features = ["hash2curve"] }
+p256-crate = { package = "p256", version = "0.13", features = ["arithmetic", "hash2curve"], optional = true }
+elliptic-curve = { version = "0.13", features = ["hash2curve"], optional = true }
+curve25519-dalek = { version = "4.1.3", features = ["group", "ff", "digest", "zeroize", "precomputed-tables"], optional = true }
 group = "0.13.0"
 rand_core = "0.6.4"
 subtle = "2.6.1"
@@ -36,9 +42,29 @@ lto = true
 codegen-units = 1
 
 [[bench]]
-name = "benchmark"
+name = "benchmark_p256"
 harness = false
+required-features = ["p256"]
 
 [[bench]]
-name = "fast"
+name = "fast_p256"
 harness = false
+required-features = ["p256"]
+
+[[bench]]
+name = "benchmark_ristretto255"
+harness = false
+required-features = ["ristretto255"]
+
+[[bench]]
+name = "fast_ristretto255"
+harness = false
+required-features = ["ristretto255"]
+
+[[test]]
+name = "generate_test_vectors"
+required-features = ["p256"]
+
+[[test]]
+name = "generate_test_vectors_ristretto255"
+required-features = ["ristretto255"]
