@@ -32,3 +32,6 @@ pub mod p256;
 
 #[cfg(feature = "ristretto255")]
 pub mod ristretto255;
+
+#[cfg(feature = "secp256k1")]
+pub mod secp256k1;
