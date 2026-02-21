@@ -38,3 +38,6 @@ pub mod secp256k1;
 
 #[cfg(feature = "p384")]
 pub mod p384;
+
+#[cfg(feature = "p521")]
+pub mod p521;
