@@ -22,7 +22,7 @@
 //! Use `-- --nocapture` to also see the output on stdout.
 
 use anonymous_credit_tokens::*;
-use curve25519_dalek::Scalar;
+use elliptic_curve::PrimeField;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::fmt::Write as FmtWrite;
@@ -32,9 +32,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Hex of a scalar's little-endian bytes.
+/// Hex of a scalar's big-endian bytes.
 fn scalar_hex(s: &Scalar) -> String {
-    hex(s.as_bytes())
+    hex(s.to_repr().as_slice())
 }
 
 /// Format a long hex string with 2-space indented continuation lines,
@@ -300,15 +300,15 @@ fn generate_test_vectors() {
         Err(e) => panic!("Could not read spec markdown at {spec_path}: {e}"),
     };
 
-    const START: &str = "<!-- TEST_VECTORS_START -->";
-    const END: &str = "<!-- TEST_VECTORS_END -->";
+    const START: &str = "<!-- P256_TEST_VECTORS_START -->";
+    const END: &str = "<!-- P256_TEST_VECTORS_END -->";
 
     let start_idx = spec
         .find(START)
-        .expect("missing TEST_VECTORS_START marker in spec");
+        .expect("missing P256_TEST_VECTORS_START marker in spec");
     let end_idx = spec
         .find(END)
-        .expect("missing TEST_VECTORS_END marker in spec");
+        .expect("missing P256_TEST_VECTORS_END marker in spec");
 
     let existing = &spec[start_idx + START.len()..end_idx];
     let expected = format!("\n{md}");

@@ -109,8 +109,7 @@
 //! ## Quick Start
 //!
 //! ```
-//! use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
-//! use curve25519_dalek::Scalar;
+//! use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey, Scalar};
 //! use rand_core::OsRng;
 //!
 //! // Setup: create system parameters and issuer keypair
@@ -146,11 +145,11 @@
 //!
 //! See the README.md file for comprehensive integration guidance.
 
-use curve25519_dalek::{
-    RistrettoPoint, constants::RISTRETTO_BASEPOINT_TABLE, ristretto::RistrettoBasepointTable,
-    traits::VartimeMultiscalarMul,
-};
+use elliptic_curve::ops::Reduce;
+use elliptic_curve::Field;
+use elliptic_curve::PrimeField;
 use group::Group;
+use p256::{ProjectivePoint, U256};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
@@ -162,8 +161,8 @@ use transcript::Transcript;
 pub mod cbor;
 
 // Re-export types used in the public API so consumers don't need to depend
-// on curve25519-dalek or rand_core directly.
-pub use curve25519_dalek::Scalar;
+// on p256 or rand_core directly.
+pub use p256::Scalar;
 pub use rand_core::{self, CryptoRngCore};
 
 /// Attempts to convert a Scalar to a u128 value.
@@ -184,18 +183,19 @@ pub use rand_core::{self, CryptoRngCore};
 /// # Example
 ///
 /// ```
-/// use anonymous_credit_tokens::scalar_to_u128;
+/// use anonymous_credit_tokens::{scalar_to_u128, Scalar};
 ///
-/// let scalar = 42u128.into();
+/// let scalar = Scalar::from(42u64);
 /// assert_eq!(scalar_to_u128(&scalar), Some(42));
 /// ```
 pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
-    // Get the low 128 bits of the scalar
-    let bytes = scalar.as_bytes();
-    let value = u128::from_le_bytes(bytes[..16].try_into().expect("slice with incorrect length"));
-
-    // Check if the scalar is within u128 range and the high bits are zero
-    bytes[16..].iter().all(|&b| b == 0).then_some(value)
+    let bytes: [u8; 32] = scalar.to_repr().into();
+    // Big-endian: bytes[0..16] are high, bytes[16..32] are low
+    if bytes[..16].iter().any(|&b| b != 0) {
+        return None;
+    }
+    let value = u128::from_be_bytes(bytes[16..32].try_into().expect("slice with incorrect length"));
+    Some(value)
 }
 
 /// The private key of the issuer, used to issue and refund credit tokens.
@@ -234,7 +234,7 @@ impl PrivateKey {
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         let x = Scalar::random(&mut rng);
         let public = PublicKey {
-            w: RISTRETTO_BASEPOINT_TABLE * &x,
+            w: ProjectivePoint::GENERATOR * x,
         };
         PrivateKey { x, public }
     }
@@ -252,11 +252,11 @@ impl PrivateKey {
 /// The public key of the issuer, used to verify credit tokens.
 ///
 /// This key is shared with clients so they can validate tokens and create spending proofs.
-/// It contains a Ristretto point that serves as the public component of the issuer's keypair.
+/// It contains a P-256 point that serves as the public component of the issuer's keypair.
 #[derive(Debug, Clone)]
 pub struct PublicKey {
     /// The public point derived from the secret scalar in the private key
-    w: RistrettoPoint,
+    w: ProjectivePoint,
 }
 
 /// System parameters that define the cryptographic setup for the anonymous credentials scheme.
@@ -267,17 +267,17 @@ pub struct PublicKey {
 #[derive(Clone)]
 pub struct Params {
     /// First generator point used in commitment schemes
-    h1: RistrettoBasepointTable,
+    h1: ProjectivePoint,
     /// Second generator point used in commitment schemes
-    h2: RistrettoBasepointTable,
+    h2: ProjectivePoint,
     /// Third generator point used in commitment schemes
-    h3: RistrettoBasepointTable,
+    h3: ProjectivePoint,
     /// Fourth generator point used for request_context binding
-    h4: RistrettoBasepointTable,
+    h4: ProjectivePoint,
     /// Cached BLAKE3 hasher state containing protocol version + compressed params.
     ///
     /// Every transcript starts by hashing the protocol version and all four
-    /// compressed base points (h1–h4). Compressing a Ristretto point is
+    /// compressed base points (h1–h4). Compressing a P-256 point is
     /// expensive (field inversion), so we pay this cost once at Params
     /// construction and cache the resulting hasher state. Transcript::new
     /// then clones this hasher and appends only the label, saving 4 point
@@ -289,10 +289,10 @@ pub struct Params {
 impl std::fmt::Debug for Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Params")
-            .field("h1", &"RistrettoBasepointTable")
-            .field("h2", &"RistrettoBasepointTable")
-            .field("h3", &"RistrettoBasepointTable")
-            .field("h4", &"RistrettoBasepointTable")
+            .field("h1", &"ProjectivePoint")
+            .field("h2", &"ProjectivePoint")
+            .field("h3", &"ProjectivePoint")
+            .field("h4", &"ProjectivePoint")
             .finish()
     }
 }
@@ -312,10 +312,10 @@ impl Params {
     /// A new `Params` instance with randomly generated points
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         Self::from_points(
-            RistrettoPoint::random(&mut rng),
-            RistrettoPoint::random(&mut rng),
-            RistrettoPoint::random(&mut rng),
-            RistrettoPoint::random(&mut rng),
+            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
+            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
+            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
+            ProjectivePoint::GENERATOR * Scalar::random(&mut rng),
         )
     }
 
@@ -371,18 +371,18 @@ impl Params {
         let seed = hasher.finalize();
 
         // Generate H1, H2, H3, H4 using counter-based approach
-        let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
-        let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
-        let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
-        let h4 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 3);
+        let h1 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 0);
+        let h2 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 1);
+        let h3 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 2);
+        let h4 = Self::hash_to_p256(&domain_separator, seed.as_bytes(), 3);
 
         Self::from_points(h1, h2, h3, h4)
     }
 
-    /// Hash to Ristretto255 point using BLAKE3 with counter.
+    /// Hash to P-256 point using BLAKE3 with counter.
     ///
     /// This implements a deterministic hash-to-curve function that maps
-    /// the domain separator, seed, and counter to a Ristretto255 point.
+    /// the domain separator, seed, and counter to a P-256 point.
     /// All inputs are length-prefixed to ensure domain separation.
     ///
     /// # Arguments
@@ -393,8 +393,8 @@ impl Params {
     ///
     /// # Returns
     ///
-    /// A deterministically generated Ristretto255 point
-    fn hash_to_ristretto(domain_separator: &str, seed: &[u8], counter: u32) -> RistrettoPoint {
+    /// A deterministically generated P-256 point
+    fn hash_to_p256(domain_separator: &str, seed: &[u8], counter: u32) -> ProjectivePoint {
         let mut hasher = blake3::Hasher::new();
 
         // Add domain separator with length prefix
@@ -410,26 +410,23 @@ impl Params {
         hasher.update(&(4u64).to_be_bytes());
         hasher.update(&counter.to_le_bytes());
 
-        // Generate 64 bytes for from_uniform_bytes
-        let mut uniform_bytes = [0u8; 64];
+        // Generate 32 bytes and reduce mod q, then multiply by generator
+        let mut uniform_bytes = [0u8; 32];
         let mut output_reader = hasher.finalize_xof();
         output_reader.fill(&mut uniform_bytes);
 
-        RistrettoPoint::from_uniform_bytes(&uniform_bytes)
+        let s = <Scalar as Reduce<U256>>::reduce(U256::from_be_slice(&uniform_bytes));
+        ProjectivePoint::GENERATOR * s
     }
 
-    /// Constructs Params from four generator points, building precomputed
-    /// tables and the cached transcript base state.
+    /// Constructs Params from four generator points, building the cached
+    /// transcript base state.
     fn from_points(
-        h1: RistrettoPoint,
-        h2: RistrettoPoint,
-        h3: RistrettoPoint,
-        h4: RistrettoPoint,
+        h1: ProjectivePoint,
+        h2: ProjectivePoint,
+        h3: ProjectivePoint,
+        h4: ProjectivePoint,
     ) -> Self {
-        let h1 = RistrettoBasepointTable::create(&h1);
-        let h2 = RistrettoBasepointTable::create(&h2);
-        let h3 = RistrettoBasepointTable::create(&h3);
-        let h4 = RistrettoBasepointTable::create(&h4);
         let transcript_base = Transcript::base_hasher(&h1, &h2, &h3, &h4);
         Params {
             h1,
@@ -462,7 +459,7 @@ pub struct PreIssuance {
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct IssuanceRequest {
     /// A commitment to the client's identifier and blinding factor
-    big_k: RistrettoPoint,
+    big_k: ProjectivePoint,
     /// A challenge value generated as part of the proof protocol
     gamma: Scalar,
     /// A response value for the identifier commitment
@@ -479,8 +476,8 @@ pub struct IssuanceRequest {
 /// of credits available to spend.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct CreditToken {
-    /// A Ristretto point representing the BBS+ signature component
-    a: RistrettoPoint,
+    /// A P-256 point representing the BBS+ signature component
+    a: ProjectivePoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
     /// The token's unique identifier (used to prevent double-spending)
@@ -557,12 +554,12 @@ impl PreIssuance {
     /// ```
     pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
         // Create a commitment to the client's identifier and blinding factor
-        let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
+        let big_k = params.h2 * self.k + params.h3 * self.r;
 
         // Generate random values for the zero-knowledge proof
         let k_prime = Scalar::random(&mut rng);
         let r_prime = Scalar::random(&mut rng);
-        let k1 = &params.h2 * &k_prime + &params.h3 * &r_prime;
+        let k1 = params.h2 * k_prime + params.h3 * r_prime;
 
         // Generate the challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"request", |transcript| {
@@ -602,8 +599,7 @@ impl PreIssuance {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
-    /// # use curve25519_dalek::Scalar;
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params, Scalar};
     /// # use rand_core::OsRng;
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
@@ -611,7 +607,7 @@ impl PreIssuance {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let credit_amount = Scalar::from(20u128);
+    /// # let credit_amount = Scalar::from(20u64);
     /// # let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// #
     /// let credit_token = pre_issuance.to_credit_token::<128>(
@@ -631,7 +627,7 @@ impl PreIssuance {
         const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
 
         // Validate received point is not identity (spec Section 5.2)
-        if response.a == RistrettoPoint::identity() {
+        if response.a == ProjectivePoint::IDENTITY {
             return Err(ErrorCode::InvalidProof);
         }
 
@@ -641,24 +637,20 @@ impl PreIssuance {
         }
 
         // Reconstruct the signature base points for verification
-        let x_a = RistrettoPoint::generator()
-            + &params.h1 * &response.c
-            + &params.h4 * &response.ctx
+        let x_a = ProjectivePoint::GENERATOR
+            + params.h1 * response.c
+            + params.h4 * response.ctx
             + request.big_k;
-        let x_g = RISTRETTO_BASEPOINT_TABLE * &response.e + public.w;
+        let x_g = ProjectivePoint::GENERATOR * response.e + public.w;
 
         // Verify the response by checking the BBS+ signature proof.
         // All scalar operands are from the issuer's response (public), so
         // variable-time operations are safe here.
-        let y_a = RistrettoPoint::vartime_multiscalar_mul(
-            [response.z, response.gamma.neg()],
-            [response.a, x_a],
+        let y_a = multiscalar_mul(
+            &[response.z, response.gamma.neg()],
+            &[response.a, x_a],
         );
-        let y_g = RistrettoPoint::vartime_double_scalar_mul_basepoint(
-            &response.gamma.neg(),
-            &x_g,
-            &response.z,
-        );
+        let y_g = x_g * response.gamma.neg() + ProjectivePoint::GENERATOR * response.z;
 
         // Generate the expected challenge value using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
@@ -692,7 +684,7 @@ impl PreIssuance {
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct IssuanceResponse {
     /// The BBS+ signature's main component
-    a: RistrettoPoint,
+    a: ProjectivePoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
     /// A challenge value generated as part of the proof protocol
@@ -740,8 +732,7 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
-    /// # use curve25519_dalek::Scalar;
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params, Scalar};
     /// # use rand_core::OsRng;
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
@@ -750,7 +741,7 @@ impl PrivateKey {
     /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
-    /// let credit_amount = Scalar::from(20u128);
+    /// let credit_amount = Scalar::from(20u64);
     /// let response = private_key.issue::<128>(&params, &request, credit_amount, Scalar::ZERO, OsRng).unwrap();
     /// ```
     pub fn issue<const L: usize>(
@@ -769,12 +760,12 @@ impl PrivateKey {
         }
 
         // Validate received point is not identity (spec Section 5.2)
-        if request.big_k == RistrettoPoint::identity() {
+        if request.big_k == ProjectivePoint::IDENTITY {
             return Err(ErrorCode::InvalidProof);
         }
 
         // Verify the client's zero-knowledge proof
-        let k1 = (&params.h2 * &request.k_bar + &params.h3 * &request.r_bar)
+        let k1 = (params.h2 * request.k_bar + params.h3 * request.r_bar)
             - request.big_k * request.gamma;
 
         // Generate the expected challenge value
@@ -788,17 +779,17 @@ impl PrivateKey {
         }
 
         // Create a BBS+ signature on the client's commitment and credit amount.
-        // invert(): e is random and self.x is secret, so e + self.x == 0 (mod ℓ)
-        // has negligible probability ~2^-252.
+        // invert(): e is random and self.x is secret, so e + self.x == 0 (mod q)
+        // has negligible probability ~2^-256.
         let e = Scalar::random(&mut rng);
-        let x_a = RistrettoPoint::generator() + &params.h1 * &c + &params.h4 * &ctx + request.big_k;
-        let a = x_a * (e + self.x).invert();
-        let x_g = RISTRETTO_BASEPOINT_TABLE * &e + self.public.w;
+        let x_a = ProjectivePoint::GENERATOR + params.h1 * c + params.h4 * ctx + request.big_k;
+        let a = x_a * (e + self.x).invert().unwrap();
+        let x_g = ProjectivePoint::GENERATOR * e + self.public.w;
 
         // Generate a zero-knowledge proof that the signature is valid
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
-        let y_g = RISTRETTO_BASEPOINT_TABLE * &alpha;
+        let y_g = ProjectivePoint::GENERATOR * alpha;
 
         // Generate the challenge for the proof using the Fiat-Shamir transform
         let gamma = Transcript::with(params, b"respond", |transcript| {
@@ -835,11 +826,11 @@ pub struct SpendProof<const L: usize> {
     /// The amount being spent in this transaction
     s: Scalar,
     /// The blinded signature component
-    a_prime: RistrettoPoint,
+    a_prime: ProjectivePoint,
     /// A blinded token component
-    b_bar: RistrettoPoint,
+    b_bar: ProjectivePoint,
     /// Commitments for the binary decomposition of the remaining balance
-    com: [RistrettoPoint; L],
+    com: [ProjectivePoint; L],
     /// The challenge value for the zero-knowledge proof
     gamma: Scalar,
     /// Response value for the signature proof
@@ -926,11 +917,13 @@ impl PrivateKey {
     /// ```rust,no_run
     /// # use anonymous_credit_tokens::*;
     /// # fn example(private_key: &PrivateKey, params: &Params,
-    /// #     spend_proof: &SpendProof<128>, nullifier_db: &mut std::collections::HashSet<Scalar>)
+    /// #     spend_proof: &SpendProof<128>, nullifier_db: &mut std::collections::HashSet<[u8; 32]>)
     /// #     -> Result<Refund, ErrorCode> {
+    /// use elliptic_curve::PrimeField;
     /// // Step 1: Check nullifier
     /// let nullifier = spend_proof.nullifier();
-    /// if nullifier_db.contains(&nullifier) {
+    /// let nullifier_bytes: [u8; 32] = nullifier.to_repr().into();
+    /// if nullifier_db.contains(&nullifier_bytes) {
     ///     return Err(ErrorCode::NullifierReuse);
     /// }
     ///
@@ -938,7 +931,7 @@ impl PrivateKey {
     /// let refund = private_key.refund(params, spend_proof, Scalar::ZERO, rand_core::OsRng)?;
     ///
     /// // Step 3: Record nullifier (atomically in production)
-    /// nullifier_db.insert(nullifier);
+    /// nullifier_db.insert(nullifier_bytes);
     ///
     /// Ok(refund)
     /// # }
@@ -960,8 +953,7 @@ impl PrivateKey {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
-    /// # use curve25519_dalek::Scalar;
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params, Scalar};
     /// # use rand_core::OsRng;
     /// #
     /// # // Setup (normally these would come from previous steps)
@@ -969,9 +961,9 @@ impl PrivateKey {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, private_key.public(), &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u128);
+    /// # let spend_amount = Scalar::from(10u64);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     /// #
     /// // First check if we've seen this nullifier before
@@ -991,7 +983,7 @@ impl PrivateKey {
         const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
 
         // Validate A' is not identity (spec Section 3.5.2, step 3)
-        if spend_proof.a_prime == RistrettoPoint::identity() {
+        if spend_proof.a_prime == ProjectivePoint::IDENTITY {
             return Err(ErrorCode::InvalidProof);
         }
 
@@ -1003,40 +995,40 @@ impl PrivateKey {
         // values as scalar operands, so variable-time operations are safe.
         //
         // Optimization: individual multiplications from the spec are batched
-        // into vartime multiscalar multiplications where possible.
-        let big_h1 = RistrettoPoint::generator()
-            + &params.h2 * &spend_proof.k
-            + &params.h4 * &spend_proof.ctx;
+        // into multiscalar multiplications where possible.
+        let big_h1 = ProjectivePoint::GENERATOR
+            + params.h2 * spend_proof.k
+            + params.h4 * spend_proof.ctx;
         // Spec step 9: A1 = A'*e_bar + B_bar*r2_bar - A_bar*gamma
-        let a1 = RistrettoPoint::vartime_multiscalar_mul(
-            [spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
-            [spend_proof.a_prime, spend_proof.b_bar, a_bar],
+        let a1 = multiscalar_mul(
+            &[spend_proof.e_bar, spend_proof.r2_bar, spend_proof.gamma.neg()],
+            &[spend_proof.a_prime, spend_proof.b_bar, a_bar],
         );
         // Spec step 10: A2 = B_bar*r3_bar + H1*c_bar + H3*r_bar - H1'*gamma
-        let a2 = RistrettoPoint::vartime_multiscalar_mul(
-            [spend_proof.r3_bar, spend_proof.gamma.neg(), spend_proof.c_bar, spend_proof.r_bar],
-            [spend_proof.b_bar, big_h1, params.h1.basepoint(), params.h3.basepoint()],
+        let a2 = multiscalar_mul(
+            &[spend_proof.r3_bar, spend_proof.gamma.neg(), spend_proof.c_bar, spend_proof.r_bar],
+            &[spend_proof.b_bar, big_h1, params.h1, params.h3],
         );
 
         // Spec steps 15–27: compute C'[j][0] and C'[j][1] for the range
         // proof. The spec uses C[j][0] = Com[j] and C[j][1] = Com[j] - H1
         // as intermediate values. We compute the equivalent expressions
-        // directly as vartime multiscalar multiplications.
-        let h1_point = params.h1.basepoint();
-        let h3_point = params.h3.basepoint();
+        // directly as multiscalar multiplications.
+        let h1_point = params.h1;
+        let h3_point = params.h3;
         let com0 = spend_proof.com[0];
         let com0_minus_h1 = com0 - h1_point;
         let gamma01_0 = spend_proof.gamma - spend_proof.gamma0[0];
-        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+        let mut big_c_prime = [[ProjectivePoint::IDENTITY; 2]; L];
         // Spec step 19: C'[0][0] = H2*w00 + H3*z[0][0] - C[0][0]*gamma0[0]
-        big_c_prime[0][0] = RistrettoPoint::vartime_multiscalar_mul(
-            [spend_proof.w00, spend_proof.z[0][0], spend_proof.gamma0[0].neg()],
-            [params.h2.basepoint(), h3_point, com0],
+        big_c_prime[0][0] = multiscalar_mul(
+            &[spend_proof.w00, spend_proof.z[0][0], spend_proof.gamma0[0].neg()],
+            &[params.h2, h3_point, com0],
         );
         // Spec step 20: C'[0][1] = H2*w01 + H3*z[0][1] - C[0][1]*gamma1[0]
-        big_c_prime[0][1] = RistrettoPoint::vartime_multiscalar_mul(
-            [spend_proof.w01, spend_proof.z[0][1], gamma01_0.neg()],
-            [params.h2.basepoint(), h3_point, com0_minus_h1],
+        big_c_prime[0][1] = multiscalar_mul(
+            &[spend_proof.w01, spend_proof.z[0][1], gamma01_0.neg()],
+            &[params.h2, h3_point, com0_minus_h1],
         );
         // Spec steps 22–27: range proof for bits j = 1..L-1
         #[allow(clippy::needless_range_loop)] // indexes big_c_prime, com, gamma0, z simultaneously
@@ -1045,22 +1037,22 @@ impl PrivateKey {
             let com_j_minus_h1 = com_j - h1_point;
             let gamma01_j = spend_proof.gamma - spend_proof.gamma0[j];
             // Spec step 26: C'[j][0] = H3*z[j][0] - C[j][0]*gamma0[j]
-            big_c_prime[j][0] = RistrettoPoint::vartime_multiscalar_mul(
-                [spend_proof.z[j][0], spend_proof.gamma0[j].neg()],
-                [h3_point, com_j],
+            big_c_prime[j][0] = multiscalar_mul(
+                &[spend_proof.z[j][0], spend_proof.gamma0[j].neg()],
+                &[h3_point, com_j],
             );
             // Spec step 27: C'[j][1] = H3*z[j][1] - C[j][1]*gamma1[j]
-            big_c_prime[j][1] = RistrettoPoint::vartime_multiscalar_mul(
-                [spend_proof.z[j][1], gamma01_j.neg()],
-                [h3_point, com_j_minus_h1],
+            big_c_prime[j][1] = multiscalar_mul(
+                &[spend_proof.z[j][1], gamma01_j.neg()],
+                &[h3_point, com_j_minus_h1],
             );
         }
 
         let k_prime = pow2_weighted_sum(&spend_proof.com);
-        let com_ = &params.h1 * &spend_proof.s + k_prime;
-        let big_c = RistrettoPoint::vartime_multiscalar_mul(
-            [spend_proof.c_bar.neg(), spend_proof.k_bar, spend_proof.s_bar, spend_proof.gamma.neg()],
-            [h1_point, params.h2.basepoint(), h3_point, com_],
+        let com_ = params.h1 * spend_proof.s + k_prime;
+        let big_c = multiscalar_mul(
+            &[spend_proof.c_bar.neg(), spend_proof.k_bar, spend_proof.s_bar, spend_proof.gamma.neg()],
+            &[h1_point, params.h2, h3_point, com_],
         );
 
         let gamma = Transcript::with(params, b"spend", |transcript| {
@@ -1092,17 +1084,17 @@ impl PrivateKey {
             return Err(ErrorCode::InvalidAmount);
         }
 
-        // invert(): same reasoning as in issue() — e + self.x == 0 (mod ℓ)
-        // has negligible probability ~2^-252.
+        // invert(): same reasoning as in issue() — e + self.x == 0 (mod q)
+        // has negligible probability ~2^-256.
         let e = Scalar::random(&mut rng);
 
-        let x_a = RistrettoPoint::generator() + k_prime + &params.h1 * &t + &params.h4 * &spend_proof.ctx;
-        let a = x_a * (e + self.x).invert();
+        let x_a = ProjectivePoint::GENERATOR + k_prime + params.h1 * t + params.h4 * spend_proof.ctx;
+        let a = x_a * (e + self.x).invert().unwrap();
 
-        let x_g = RISTRETTO_BASEPOINT_TABLE * &e + self.public.w;
+        let x_g = ProjectivePoint::GENERATOR * e + self.public.w;
         let alpha = Scalar::random(&mut rng);
         let y_a = a * alpha;
-        let y_g = RISTRETTO_BASEPOINT_TABLE * &alpha;
+        let y_g = ProjectivePoint::GENERATOR * alpha;
 
         let refund_gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalars([&e, &t, &spend_proof.ctx].into_iter());
@@ -1139,6 +1131,12 @@ pub struct PreRefund {
     ctx: Scalar,
 }
 
+/// Naive multi-scalar multiplication: computes sum of s_i * P_i.
+fn multiscalar_mul(scalars: &[Scalar], points: &[ProjectivePoint]) -> ProjectivePoint {
+    scalars.iter().zip(points.iter())
+        .fold(ProjectivePoint::IDENTITY, |acc, (s, p)| acc + *p * s)
+}
+
 /// Computes the power-of-two weighted sum of points using Horner's method:
 ///   points[0] + 2*points[1] + 4*points[2] + ... + 2^(n-1)*points[n-1]
 ///
@@ -1147,7 +1145,7 @@ pub struct PreRefund {
 /// power-of-two structure to replace a general n-point multiscalar
 /// multiplication with just 2*(n-1) group operations (n-1 doublings +
 /// n-1 additions).
-fn pow2_weighted_sum(points: &[RistrettoPoint]) -> RistrettoPoint {
+fn pow2_weighted_sum(points: &[ProjectivePoint]) -> ProjectivePoint {
     let n = points.len();
     debug_assert!(n > 0);
     let mut result = points[n - 1];
@@ -1190,19 +1188,18 @@ fn pow2_weighted_scalar_sum(scalars: &[Scalar]) -> Scalar {
 ///
 /// For L=128 this reduces ~128 bit extractions to ~16 byte ORs.
 fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
-    let bytes = s.as_bytes();
-    let full_byte = L / 8;
+    let bytes: [u8; 32] = s.to_repr().into();
+    // Big-endian: bytes[0] is the MSB, bytes[31] is the LSB
+    // The lowest L bits occupy bytes[(32 - ceil(L/8))..32]
+    let full_bytes_used = L / 8;
     let rem_bits = L % 8;
+    let boundary = 32 - full_bytes_used - usize::from(rem_bits != 0);
     let mut any_high = 0u8;
-    // Check the partial byte at the L boundary (if L isn't byte-aligned).
-    // The mask keeps only bits at positions >= rem_bits within this byte.
-    if rem_bits != 0 {
-        any_high |= bytes[full_byte] >> rem_bits;
-    }
-    // Check all remaining full bytes above the L boundary.
-    let start = full_byte + usize::from(rem_bits != 0);
-    for &b in &bytes[start..32] {
+    for &b in &bytes[..boundary] {
         any_high |= b;
+    }
+    if rem_bits != 0 {
+        any_high |= bytes[boundary] >> rem_bits;
     }
     bool::from(any_high.ct_eq(&0))
 }
@@ -1222,12 +1219,13 @@ fn scalar_fits_in_bits<const L: usize>(s: &Scalar) -> bool {
 ///
 /// An array of L `Choice` values representing the binary bits of the input
 fn bits_of<const L: usize>(s: Scalar) -> [Choice; L] {
-    let bytes = s.as_bytes();
+    let bytes: [u8; 32] = s.to_repr().into();
     let mut result = [Choice::from(0u8); L];
 
-    // Extract each bit from the scalar's byte representation
+    // Big-endian: byte[31] contains bits 0-7, byte[30] contains bits 8-15, etc.
     result.iter_mut().enumerate().for_each(|(i, result_elem)| {
-        *result_elem = Choice::from((bytes[i / 8] >> (i % 8)) & 1);
+        let byte_idx = 31 - (i / 8);
+        *result_elem = Choice::from((bytes[byte_idx] >> (i % 8)) & 1);
     });
 
     result
@@ -1270,8 +1268,7 @@ impl CreditToken {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{CreditToken, PrivateKey, PreIssuance, Params};
-    /// # use curve25519_dalek::Scalar;
+    /// # use anonymous_credit_tokens::{CreditToken, PrivateKey, PreIssuance, Params, Scalar};
     /// # use rand_core::OsRng;
     /// #
     /// # // Create a valid credit token with 20 credits
@@ -1279,11 +1276,11 @@ impl CreditToken {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, private_key.public(), &request, &response).unwrap();
     /// #
     /// // Spend 10 credits (where 10 <= token balance < 2^128)
-    /// let spend_amount = Scalar::from(10u128);
+    /// let spend_amount = Scalar::from(10u64);
     /// let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
@@ -1318,17 +1315,17 @@ impl CreditToken {
         let r2_prime = Scalar::random(&mut rng);
         let r3_prime = Scalar::random(&mut rng);
 
-        let b = RistrettoPoint::generator()
-            + &params.h1 * &self.c
-            + &params.h2 * &self.k
-            + &params.h3 * &self.r
-            + &params.h4 * &self.ctx;
+        let b = ProjectivePoint::GENERATOR
+            + params.h1 * self.c
+            + params.h2 * self.k
+            + params.h3 * self.r
+            + params.h4 * self.ctx;
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
-        // invert(): r1 is freshly random, so r1 == 0 has negligible probability ~2^-252.
-        let r3 = r1.invert();
+        // invert(): r1 is freshly random, so r1 == 0 has negligible probability ~2^-256.
+        let r3 = r1.invert().unwrap();
         let a1 = a_prime * e_prime + b_bar * r2_prime;
-        let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
+        let a2 = b_bar * r3_prime + params.h1 * c_prime + params.h3 * r_prime;
 
         let i = bits_of::<L>(self.c - s);
 
@@ -1343,23 +1340,23 @@ impl CreditToken {
         // returns Choice values (see Section 3.7 note above), we use
         // conditional_select between identity and H1 instead of a full
         // scalar multiplication, which is equivalent and constant-time.
-        let mut com = [RistrettoPoint::identity(); L];
-        let h1_point = params.h1.basepoint();
-        let h1_bit_0 = RistrettoPoint::conditional_select(
-            &RistrettoPoint::identity(),
+        let mut com = [ProjectivePoint::IDENTITY; L];
+        let h1_point = params.h1;
+        let h1_bit_0 = ProjectivePoint::conditional_select(
+            &ProjectivePoint::IDENTITY,
             &h1_point,
             i[0],
         );
-        com[0] = h1_bit_0 + &params.h2 * &k_star + &params.h3 * &s_i[0];
+        com[0] = h1_bit_0 + params.h2 * k_star + params.h3 * s_i[0];
         for j in 1..L {
-            let h1_bit = RistrettoPoint::conditional_select(
-                &RistrettoPoint::identity(),
+            let h1_bit = ProjectivePoint::conditional_select(
+                &ProjectivePoint::IDENTITY,
                 &h1_point,
                 i[j],
             );
-            com[j] = h1_bit + &params.h3 * &s_i[j];
+            com[j] = h1_bit + params.h3 * s_i[j];
         }
-        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
+        let mut big_c_prime = [[ProjectivePoint::IDENTITY; 2]; L];
 
         let k0_prime = Scalar::random(&mut rng);
         let mut s_i_prime = [Scalar::ZERO; L];
@@ -1381,85 +1378,56 @@ impl CreditToken {
         // The spec branches on i[0] and uses C[0][b] * gamma0[0] directly,
         // where C[0][0] = Com[0] and C[0][1] = Com[0] - H1. Because the
         // prover knows Com[0] = H1*i[0] + H2*k* + H3*s[0], we can
-        // decompose C[0][b]*gamma0 into precomputed-table multiplications
-        // on H1, H2, H3 and use constant-time conditional_select instead
-        // of branching on the secret bit i[0].
+        // decompose C[0][b]*gamma0 into multiplications on H1, H2, H3
+        // and use constant-time conditional_select instead of branching
+        // on the secret bit i[0].
         //
-        // Optimization: merge table muls sharing the same base (8 → 5).
+        // Optimization: merge muls sharing the same base (8 → 5).
         //  (a) Compute H1*γ₀ once; derive H1*(i[0]*γ₀) via conditional_select.
         //  (b) Merge H2*w0 and H2*(k*γ₀) into H2*(w0 - k*γ₀).
         //  (c) Merge H3*z[0] and H3*(s[0]*γ₀) into H3*(z[0] - s[0]*γ₀).
-        //
-        // Algebraically, for the simulated branch:
-        //   diff0 = H2*w0 + H3*z[0] - Com[0]*γ₀
-        //         = H2*w0 + H3*z[0] - (H1*i[0] + H2*k* + H3*s[0])*γ₀
-        //         = H2*(w0 - k*γ₀) + H3*(z[0] - s[0]*γ₀) - H1*(i[0]*γ₀)
-        //
-        // Saves 3 table multiplications (~192 group additions).
-        let h2_k0_h3_s0 = &params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]; // 2 table muls
-        let h1_gamma0 = &params.h1 * &gamma_i[0]; // 1 table mul
-        let h1_i0_gamma = RistrettoPoint::conditional_select(
-            &RistrettoPoint::identity(),
+        let h2_k0_h3_s0 = params.h2 * k0_prime + params.h3 * s_i_prime[0];
+        let h1_gamma0 = params.h1 * gamma_i[0];
+        let h1_i0_gamma = ProjectivePoint::conditional_select(
+            &ProjectivePoint::IDENTITY,
             &h1_gamma0,
             i[0],
         );
-        let h2_diff0 = &params.h2 * &(w0 - k_star * gamma_i[0]); // 1 table mul
-        let h3_diff0 = &params.h3 * &(z[0] - s_i[0] * gamma_i[0]); // 1 table mul
+        let h2_diff0 = params.h2 * (w0 - k_star * gamma_i[0]);
+        let h3_diff0 = params.h3 * (z[0] - s_i[0] * gamma_i[0]);
         let diff0 = h2_diff0 + h3_diff0 - h1_i0_gamma;
 
-        big_c_prime[0][0] = RistrettoPoint::conditional_select(
+        big_c_prime[0][0] = ProjectivePoint::conditional_select(
             &diff0,
             &h2_k0_h3_s0,
             !i[0],
         );
 
-        big_c_prime[0][1] = RistrettoPoint::conditional_select(
+        big_c_prime[0][1] = ProjectivePoint::conditional_select(
             &h2_k0_h3_s0,
             &(diff0 + h1_gamma0),
             !i[0],
         );
 
         // Spec steps 53–66: compute C'[j][0] and C'[j][1] for j = 1..L-1.
-        //
-        // The spec branches on i[j] and uses C[j][b] * gamma0[j] directly,
-        // where C[j][0] = Com[j] and C[j][1] = Com[j] - H1. Because the
-        // prover knows Com[j] = H1*i[j] + H3*s[j] (j >= 1), we decompose
-        // C[j][b]*gamma0 into precomputed-table multiplications on H1, H3
-        // and use constant-time conditional_select instead of branching on
-        // the secret bit i[j].
-        //
-        // Optimization: merge table muls sharing the same base (5 → 3).
-        //  (a) Compute H1*γ_j once; derive H1*(i[j]*γ_j) via conditional_select.
-        //  (b) Merge H3*z[j] and H3*(s[j]*γ_j) into H3*(z[j] - s[j]*γ_j).
-        //
-        // Algebraically, for the simulated branch:
-        //   diff = H3*z[j] - Com[j]*γ_j
-        //        = H3*z[j] - (H1*i[j] + H3*s[j])*γ_j
-        //        = H3*(z[j] - s[j]*γ_j) - H1*(i[j]*γ_j)
-        //
-        // For L=128, this saves 2 table muls × 127 iterations = 254 table
-        // multiplications (~16,256 group additions, ~40% of inner loop cost).
         for j in 1..L {
-            let h3_s_j = &params.h3 * &s_i_prime[j]; // table mul 1
-            let h1_gamma = &params.h1 * &gamma_i[j]; // table mul 2
-            let h3_diff = &params.h3 * &(z[j] - s_i[j] * gamma_i[j]); // table mul 3
+            let h3_s_j = params.h3 * s_i_prime[j];
+            let h1_gamma = params.h1 * gamma_i[j];
+            let h3_diff = params.h3 * (z[j] - s_i[j] * gamma_i[j]);
 
-            // Derive h1*(i[j]*γ_j) from h1*γ_j via constant-time select:
-            //   when i[j]=1: h1_i_gamma = h1*γ_j
-            //   when i[j]=0: h1_i_gamma = identity
-            let h1_i_gamma = RistrettoPoint::conditional_select(
-                &RistrettoPoint::identity(),
+            let h1_i_gamma = ProjectivePoint::conditional_select(
+                &ProjectivePoint::IDENTITY,
                 &h1_gamma,
                 i[j],
             );
             let diff = h3_diff - h1_i_gamma;
 
-            big_c_prime[j][0] = RistrettoPoint::conditional_select(
+            big_c_prime[j][0] = ProjectivePoint::conditional_select(
                 &diff,
                 &h3_s_j,
                 !i[j],
             );
-            big_c_prime[j][1] = RistrettoPoint::conditional_select(
+            big_c_prime[j][1] = ProjectivePoint::conditional_select(
                 &h3_s_j,
                 &(diff + h1_gamma),
                 !i[j],
@@ -1468,7 +1436,7 @@ impl CreditToken {
         let r_star = pow2_weighted_scalar_sum(&s_i);
         let k_prime = Scalar::random(&mut rng);
         let s_prime = Scalar::random(&mut rng);
-        let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &s_prime;
+        let c_ = params.h1 * c_prime.neg() + params.h2 * k_prime + params.h3 * s_prime;
 
         let gamma = Transcript::with(params, b"spend", |transcript| {
             transcript.add_scalar(&self.k);
@@ -1575,7 +1543,7 @@ impl CreditToken {
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct Refund {
     /// The BBS+ signature's main component for the new credit token
-    a: RistrettoPoint,
+    a: ProjectivePoint,
     /// A random scalar used in the BBS+ signature
     e: Scalar,
     /// A challenge value generated as part of the proof protocol
@@ -1619,8 +1587,7 @@ impl PreRefund {
     /// # Example
     ///
     /// ```
-    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params};
-    /// # use curve25519_dalek::Scalar;
+    /// # use anonymous_credit_tokens::{PrivateKey, PreIssuance, Params, Scalar};
     /// # use rand_core::OsRng;
     /// #
     /// # // Setup (normally these would come from previous steps)
@@ -1629,9 +1596,9 @@ impl PreRefund {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u128), Scalar::ZERO, OsRng).unwrap();
+    /// # let response = private_key.issue::<128>(&params, &request, Scalar::from(20u64), Scalar::ZERO, OsRng).unwrap();
     /// # let credit_token = pre_issuance.to_credit_token::<128>(&params, public_key, &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u128);
+    /// # let spend_amount = Scalar::from(10u64);
     /// # let (spend_proof, prerefund) = credit_token.prove_spend::<128>(&params, spend_amount, OsRng).unwrap();
     /// # let refund = private_key.refund(&params, &spend_proof, Scalar::ZERO, OsRng).unwrap();
     /// #
@@ -1653,28 +1620,24 @@ impl PreRefund {
         const { assert!(L > 0 && L <= 128, "L must be in 1..=128") };
 
         // Validate received point is not identity (spec Section 5.2)
-        if refund.a == RistrettoPoint::identity() {
+        if refund.a == ProjectivePoint::IDENTITY {
             return Err(ErrorCode::InvalidProof);
         }
 
         // All scalar operands below are public constants, issuer-provided
         // (refund.*), or already revealed in the clear (self.ctx), so
         // variable-time operations are safe.
-        let x_a = RistrettoPoint::generator()
+        let x_a = ProjectivePoint::GENERATOR
             + pow2_weighted_sum(&spend_proof.com)
-            + &params.h1 * &refund.t
-            + &params.h4 * &self.ctx;
+            + params.h1 * refund.t
+            + params.h4 * self.ctx;
 
-        let x_g = RISTRETTO_BASEPOINT_TABLE * &refund.e + public_key.w;
-        let y_a = RistrettoPoint::vartime_multiscalar_mul(
-            [refund.z, refund.gamma.neg()],
-            [refund.a, x_a],
+        let x_g = ProjectivePoint::GENERATOR * refund.e + public_key.w;
+        let y_a = multiscalar_mul(
+            &[refund.z, refund.gamma.neg()],
+            &[refund.a, x_a],
         );
-        let y_g = RistrettoPoint::vartime_double_scalar_mul_basepoint(
-            &refund.gamma.neg(),
-            &x_g,
-            &refund.z,
-        );
+        let y_g = x_g * refund.gamma.neg() + ProjectivePoint::GENERATOR * refund.z;
 
         let gamma = Transcript::with(params, b"refund", |transcript| {
             transcript.add_scalars([&refund.e, &refund.t, &self.ctx].into_iter());
@@ -1779,7 +1742,14 @@ pub fn credit_to_scalar<const L: usize>(amount: u128) -> Result<Scalar, ErrorCod
     if L < 128 && amount >= (1u128 << L) {
         return Err(ErrorCode::InvalidAmount);
     }
-    Ok(Scalar::from(amount))
+    Ok(scalar_from_u128(amount))
+}
+
+/// Constructs a Scalar from a u128 value (big-endian representation).
+fn scalar_from_u128(v: u128) -> Scalar {
+    let mut bytes = [0u8; 32];
+    bytes[16..32].copy_from_slice(&v.to_be_bytes());
+    Scalar::from_repr(bytes.into()).unwrap()
 }
 
 /// Error codes for the protocol as defined in Section 5.3 of the spec.

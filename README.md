@@ -67,7 +67,7 @@ let public_key = private_key.public();
 Implement a database to track used nullifiers:
 
 ```rust
-use curve25519_dalek::Scalar;
+use anonymous_credit_tokens::Scalar;
 
 // Example interface for a nullifier database
 trait NullifierStore {
@@ -76,8 +76,10 @@ trait NullifierStore {
 }
 
 // Example implementation using a concurrent HashMap
+// Note: p256 Scalar does not implement Hash, so store
+// the big-endian byte representation as the key.
 struct InMemoryNullifierStore {
-    used_nullifiers: Arc<RwLock<HashSet<Scalar>>>,
+    used_nullifiers: Arc<RwLock<HashSet<[u8; 32]>>>,
 }
 ```
 
@@ -127,7 +129,7 @@ assert_eq!(amount_back, credit_amount_u128);
 
 ```rust
 use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
-use curve25519_dalek::Scalar;
+use anonymous_credit_tokens::Scalar;
 use rand_core::OsRng;
 
 // Client-side: Prepare for issuance
@@ -176,7 +178,7 @@ let new_credit_token = prerefund
 
 ```rust
 use anonymous_credit_tokens::{Params, PrivateKey, PreIssuance};
-use curve25519_dalek::Scalar;
+use anonymous_credit_tokens::Scalar;
 use rand_core::OsRng;
 
 // 1. System Initialization
@@ -295,7 +297,7 @@ The protocol defines structured error types:
 
 This implementation uses:
 
-- Ristretto points (via curve25519-dalek) for elliptic curve operations
+- P-256 (NIST) elliptic curve operations (via the RustCrypto p256 crate)
 - BBS+ signatures for anonymous credentials
 - Zero-knowledge proofs to demonstrate valid spending
 - Blake3 for hashing in the transcript protocol

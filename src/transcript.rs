@@ -23,11 +23,11 @@
 //! challenge values deterministically from the protocol messages.
 
 use super::Params;
-use curve25519_dalek::ristretto::RistrettoBasepointTable;
-use curve25519_dalek::RistrettoPoint;
-use curve25519_dalek::Scalar;
+use elliptic_curve::ops::Reduce;
+use elliptic_curve::sec1::ToEncodedPoint;
+use p256::{ProjectivePoint, Scalar, U256};
 
-const PROTOCOL_VERSION: &[u8] = b"curve25519-ristretto anonymous-credits v1.0";
+const PROTOCOL_VERSION: &[u8] = b"p256 anonymous-credits v1.0";
 
 /// A transcript that accumulates cryptographic protocol messages and generates challenges.
 ///
@@ -49,26 +49,26 @@ impl Transcript {
     /// needs to append step 7 (the label). This avoids 4 expensive point
     /// compressions per transcript without changing the hash output.
     pub(crate) fn base_hasher(
-        h1: &RistrettoBasepointTable,
-        h2: &RistrettoBasepointTable,
-        h3: &RistrettoBasepointTable,
-        h4: &RistrettoBasepointTable,
+        h1: &ProjectivePoint,
+        h2: &ProjectivePoint,
+        h3: &ProjectivePoint,
+        h4: &ProjectivePoint,
     ) -> blake3::Hasher {
         let mut hasher = blake3::Hasher::new();
         // Add protocol version with length prefix
         hasher.update(&(PROTOCOL_VERSION.len() as u64).to_be_bytes());
         hasher.update(PROTOCOL_VERSION);
         // Add the parameters' base points (each length-prefixed via Encode())
-        fn add_point(hasher: &mut blake3::Hasher, point: &RistrettoPoint) {
-            let compressed = point.compress();
-            let bytes = compressed.as_bytes();
+        fn add_point(hasher: &mut blake3::Hasher, point: &ProjectivePoint) {
+            let encoded = point.to_affine().to_encoded_point(true);
+            let bytes = encoded.as_bytes();
             hasher.update(&(bytes.len() as u64).to_be_bytes());
             hasher.update(bytes);
         }
-        add_point(&mut hasher, &h1.basepoint());
-        add_point(&mut hasher, &h2.basepoint());
-        add_point(&mut hasher, &h3.basepoint());
-        add_point(&mut hasher, &h4.basepoint());
+        add_point(&mut hasher, h1);
+        add_point(&mut hasher, h2);
+        add_point(&mut hasher, h3);
+        add_point(&mut hasher, h4);
         hasher
     }
 
@@ -123,25 +123,22 @@ impl Transcript {
         self.hasher.update(bytes);
     }
 
-    /// Adds a Ristretto point to the transcript.
+    /// Adds a P-256 point to the transcript.
     ///
     /// # Arguments
     ///
-    /// * `element` - A reference to a `RistrettoPoint` to add to the transcript
-    pub(crate) fn add_element(&mut self, element: &RistrettoPoint) {
-        self.update(&element.compress().as_bytes()[..]);
+    /// * `element` - A reference to a `ProjectivePoint` to add to the transcript
+    pub(crate) fn add_element(&mut self, element: &ProjectivePoint) {
+        let encoded = element.to_affine().to_encoded_point(true);
+        self.update(encoded.as_bytes());
     }
 
-    /// Adds multiple Ristretto points to the transcript.
+    /// Adds multiple P-256 points to the transcript.
     ///
     /// # Arguments
     ///
-    /// * `elements` - An iterator over references to `RistrettoPoint`s to add to the transcript
-    pub(crate) fn add_elements<'a>(&mut self, elements: impl Iterator<Item = &'a RistrettoPoint>) {
-        // TODO: batch-compress points using Montgomery's trick to amortize
-        // field inversions. See `RistrettoPoint::double_and_compress_batch`
-        // for the technique; a `compress_batch` variant upstream would
-        // allow this without changing the protocol.
+    /// * `elements` - An iterator over references to `ProjectivePoint`s to add to the transcript
+    pub(crate) fn add_elements<'a>(&mut self, elements: impl Iterator<Item = &'a ProjectivePoint>) {
         for element in elements {
             self.add_element(element);
         }
@@ -153,8 +150,8 @@ impl Transcript {
     ///
     /// * `scalar` - A reference to a `Scalar` to add to the transcript
     pub(crate) fn add_scalar(&mut self, scalar: &Scalar) {
-        // Scalars are 32 bytes in little-endian format
-        self.update(scalar.as_bytes());
+        use elliptic_curve::PrimeField;
+        self.update(scalar.to_repr().as_ref());
     }
 
     /// Adds multiple scalar values to the transcript.
@@ -170,16 +167,15 @@ impl Transcript {
 
     /// Generates a challenge scalar from the current transcript state.
     ///
-    /// This method finalizes the hash and uses `Scalar::from_hash` with 64 bytes
-    /// for better uniformity.
+    /// Per spec: 32 bytes from BLAKE3 XOF, reduced mod q via big-endian interpretation.
     ///
     /// # Returns
     ///
     /// A `Scalar` representing the challenge derived from the transcript
     pub(crate) fn challenge(self) -> Scalar {
         let mut reader = self.hasher.finalize_xof();
-        let mut output = [0u8; 64];
+        let mut output = [0u8; 32];
         reader.fill(&mut output);
-        Scalar::from_bytes_mod_order_wide(&output)
+        <Scalar as Reduce<U256>>::reduce(U256::from_be_slice(&output))
     }
 }

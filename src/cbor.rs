@@ -24,7 +24,9 @@ use crate::{
     PrivateKey, PublicKey, Refund, SpendProof,
 };
 use ciborium::value::Value;
-use curve25519_dalek::{RistrettoPoint, Scalar};
+use elliptic_curve::PrimeField;
+use p256::elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
+use p256::{AffinePoint, ProjectivePoint, Scalar};
 
 /// Maximum CBOR input size for protocol messages (64 KiB).
 /// This prevents memory amplification attacks from crafted CBOR payloads.
@@ -93,44 +95,49 @@ macro_rules! set_field {
     };
 }
 
-/// Encode a RistrettoPoint as a 32-byte CBOR byte string
-fn encode_point(point: &RistrettoPoint) -> Value {
-    Value::Bytes(point.compress().as_bytes().to_vec())
+/// Encode a ProjectivePoint as a 33-byte SEC1 compressed CBOR byte string
+fn encode_point(point: &ProjectivePoint) -> Value {
+    let affine = point.to_affine();
+    let encoded = affine.to_encoded_point(true);
+    Value::Bytes(encoded.as_bytes().to_vec())
 }
 
-/// Encode a Scalar as a 32-byte CBOR byte string (little-endian)
+/// Encode a Scalar as a 32-byte CBOR byte string (big-endian)
 fn encode_scalar(scalar: &Scalar) -> Value {
-    Value::Bytes(scalar.as_bytes().to_vec())
+    Value::Bytes(scalar.to_repr().to_vec())
 }
 
-/// Decode a RistrettoPoint from a CBOR byte string
-fn decode_point(value: &Value) -> Result<RistrettoPoint, CborError> {
+/// Decode a ProjectivePoint from a CBOR byte string (33-byte SEC1 compressed)
+fn decode_point(value: &Value) -> Result<ProjectivePoint, CborError> {
     match value {
-        Value::Bytes(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(bytes);
-            use curve25519_dalek::ristretto::CompressedRistretto;
-            // unwrap is safe: from_slice only fails on length mismatch,
-            // and this match arm requires bytes.len() == 32.
-            CompressedRistretto::from_slice(&arr)
-                .unwrap()
-                .decompress()
-                .ok_or(CborError::InvalidValue("invalid Ristretto point"))
+        Value::Bytes(bytes) if bytes.len() == 33 => {
+            let encoded = EncodedPoint::<p256::NistP256>::from_bytes(bytes)
+                .map_err(|_| CborError::InvalidValue("invalid SEC1 encoding"))?;
+            let affine = AffinePoint::from_encoded_point(&encoded);
+            if affine.is_some().into() {
+                Ok(ProjectivePoint::from(affine.unwrap()))
+            } else {
+                Err(CborError::InvalidValue("invalid P-256 point"))
+            }
         }
         _ => Err(CborError::InvalidStructure(
-            "expected 32-byte array for point",
+            "expected 33-byte array for point",
         )),
     }
 }
 
-/// Decode a Scalar from a CBOR byte string (little-endian, canonical)
+/// Decode a Scalar from a CBOR byte string (big-endian, canonical)
 fn decode_scalar(value: &Value) -> Result<Scalar, CborError> {
     match value {
         Value::Bytes(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(bytes);
-            Option::from(Scalar::from_canonical_bytes(arr))
-                .ok_or(CborError::InvalidValue("non-canonical scalar encoding"))
+            let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
+            let repr = p256::FieldBytes::from(arr);
+            let scalar = Scalar::from_repr(repr);
+            if scalar.is_some().into() {
+                Ok(scalar.unwrap())
+            } else {
+                Err(CborError::InvalidValue("non-canonical scalar encoding"))
+            }
         }
         _ => Err(CborError::InvalidStructure(
             "expected 32-byte array for scalar",
@@ -143,7 +150,7 @@ impl IssuanceRequest {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// IssuanceRequestMsg = {
-    ///     1: bstr,  ; K (compressed Ristretto point, 32 bytes)
+    ///     1: bstr,  ; K (compressed P-256 point, 33 bytes)
     ///     2: bstr,  ; gamma (scalar, 32 bytes)
     ///     3: bstr,  ; k_bar (scalar, 32 bytes)
     ///     4: bstr   ; r_bar (scalar, 32 bytes)
@@ -200,7 +207,7 @@ impl IssuanceResponse {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// IssuanceResponseMsg = {
-    ///     1: bstr,  ; A (compressed Ristretto point, 32 bytes)
+    ///     1: bstr,  ; A (compressed P-256 point, 33 bytes)
     ///     2: bstr,  ; e (scalar, 32 bytes)
     ///     3: bstr,  ; gamma_resp (scalar, 32 bytes)
     ///     4: bstr,  ; z (scalar, 32 bytes)
@@ -269,8 +276,8 @@ impl<const L: usize> SpendProof<L> {
     /// SpendProofMsg = {
     ///     1: bstr,           ; k (nullifier, 32 bytes)
     ///     2: bstr,           ; s (spend amount, 32 bytes)
-    ///     3: bstr,           ; A' (compressed point, 32 bytes)
-    ///     4: bstr,           ; B_bar (compressed point, 32 bytes)
+    ///     3: bstr,           ; A' (compressed point, 33 bytes)
+    ///     4: bstr,           ; B_bar (compressed point, 33 bytes)
     ///     5: [* bstr],       ; Com array (L compressed points)
     ///     6: bstr,           ; gamma (scalar, 32 bytes)
     ///     7: bstr,           ; e_bar (scalar, 32 bytes)
@@ -367,8 +374,7 @@ impl<const L: usize> SpendProof<L> {
                                     arr.into_iter().map(|v| decode_point(&v)).collect();
                                 let com_arr = com_arr?;
                                 if com_arr.len() == L {
-                                    use group::Group;
-                                    let mut com_fixed = [RistrettoPoint::identity(); L];
+                                    let mut com_fixed = [ProjectivePoint::IDENTITY; L];
                                     com_fixed.copy_from_slice(&com_arr);
                                     com = Some(com_fixed);
                                 } else {
@@ -485,7 +491,7 @@ impl Refund {
     /// Encode to CBOR according to spec format:
     /// ```text
     /// RefundMsg = {
-    ///     1: bstr,  ; A* (compressed Ristretto point, 32 bytes)
+    ///     1: bstr,  ; A* (compressed P-256 point, 33 bytes)
     ///     2: bstr,  ; e* (scalar, 32 bytes)
     ///     3: bstr,  ; gamma (scalar, 32 bytes)
     ///     4: bstr,  ; z (scalar, 32 bytes)
@@ -548,7 +554,7 @@ impl PrivateKey {
     /// ```text
     /// PrivateKey = {
     ///     1: bstr,  ; x (scalar, 32 bytes)
-    ///     2: bstr   ; w (public key point, 32 bytes)
+    ///     2: bstr   ; w (public key point, 33 bytes)
     /// }
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
@@ -583,8 +589,7 @@ impl PrivateKey {
                 let w = w.ok_or(CborError::InvalidStructure("missing field 2 (w)"))?;
 
                 // Validate w == g^x to prevent use of inconsistent key material
-                use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-                let expected_w = RISTRETTO_BASEPOINT_TABLE * &x;
+                let expected_w = ProjectivePoint::GENERATOR * x;
                 if w != expected_w {
                     return Err(CborError::InvalidValue(
                         "public key w does not match secret scalar x",
@@ -605,7 +610,7 @@ impl PrivateKey {
 impl PublicKey {
     /// Encode to CBOR according to format:
     /// ```text
-    /// PublicKey = bstr  ; w (compressed Ristretto point, 32 bytes)
+    /// PublicKey = bstr  ; w (compressed P-256 point, 33 bytes)
     /// ```
     pub fn to_cbor(&self) -> Result<Vec<u8>, CborError> {
         let mut bytes = Vec::new();
@@ -673,7 +678,7 @@ impl CreditToken {
     /// Encode to CBOR according to format:
     /// ```text
     /// CreditToken = {
-    ///     1: bstr,  ; a (compressed Ristretto point, 32 bytes)
+    ///     1: bstr,  ; a (compressed P-256 point, 33 bytes)
     ///     2: bstr,  ; e (scalar, 32 bytes)
     ///     3: bstr,  ; k (scalar, 32 bytes)
     ///     4: bstr,  ; r (scalar, 32 bytes)
@@ -876,14 +881,24 @@ impl ErrorMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use group::Group;
     use rand_core::OsRng;
+
+    fn random_scalar() -> Scalar {
+        use elliptic_curve::Field;
+        Scalar::random(&mut OsRng)
+    }
+
+    fn random_point() -> ProjectivePoint {
+        ProjectivePoint::random(&mut OsRng)
+    }
 
     #[test]
     fn test_issuance_request_cbor_roundtrip() {
-        let big_k = RistrettoPoint::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let k_bar = Scalar::random(&mut OsRng);
-        let r_bar = Scalar::random(&mut OsRng);
+        let big_k = random_point();
+        let gamma = random_scalar();
+        let k_bar = random_scalar();
+        let r_bar = random_scalar();
 
         let request = IssuanceRequest {
             big_k,
@@ -903,12 +918,12 @@ mod tests {
 
     #[test]
     fn test_issuance_response_cbor_roundtrip() {
-        let a = RistrettoPoint::random(&mut OsRng);
-        let e = Scalar::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let z = Scalar::random(&mut OsRng);
-        let c = Scalar::random(&mut OsRng);
-        let ctx = Scalar::random(&mut OsRng);
+        let a = random_point();
+        let e = random_scalar();
+        let gamma = random_scalar();
+        let z = random_scalar();
+        let c = random_scalar();
+        let ctx = random_scalar();
 
         let response = IssuanceResponse {
             a,
@@ -932,11 +947,11 @@ mod tests {
 
     #[test]
     fn test_refund_cbor_roundtrip() {
-        let a = RistrettoPoint::random(&mut OsRng);
-        let e = Scalar::random(&mut OsRng);
-        let gamma = Scalar::random(&mut OsRng);
-        let z = Scalar::random(&mut OsRng);
-        let t = Scalar::random(&mut OsRng);
+        let a = random_point();
+        let e = random_scalar();
+        let gamma = random_scalar();
+        let z = random_scalar();
+        let t = random_scalar();
 
         let refund = Refund { a, e, gamma, z, t };
 
@@ -952,9 +967,9 @@ mod tests {
 
     #[test]
     fn test_private_key_cbor_roundtrip() {
-        let x = Scalar::random(&mut OsRng);
+        let x = random_scalar();
         let public = PublicKey {
-            w: curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE * &x,
+            w: ProjectivePoint::GENERATOR * x,
         };
 
         let private_key = PrivateKey { x, public };
@@ -968,9 +983,9 @@ mod tests {
 
     #[test]
     fn test_private_key_cbor_rejects_inconsistent_w() {
-        let x = Scalar::random(&mut OsRng);
+        let x = random_scalar();
         // Deliberately use a wrong public key
-        let wrong_w = RistrettoPoint::random(&mut OsRng);
+        let wrong_w = random_point();
         let private_key = PrivateKey {
             x,
             public: PublicKey { w: wrong_w },
@@ -986,7 +1001,7 @@ mod tests {
 
     #[test]
     fn test_public_key_cbor_roundtrip() {
-        let w = RistrettoPoint::random(&mut OsRng);
+        let w = random_point();
         let public_key = PublicKey { w };
 
         let bytes = public_key.to_cbor().unwrap();
@@ -997,8 +1012,8 @@ mod tests {
 
     #[test]
     fn test_pre_issuance_cbor_roundtrip() {
-        let r = Scalar::random(&mut OsRng);
-        let k = Scalar::random(&mut OsRng);
+        let r = random_scalar();
+        let k = random_scalar();
 
         let pre_issuance = PreIssuance { r, k };
 
@@ -1011,12 +1026,12 @@ mod tests {
 
     #[test]
     fn test_credit_token_cbor_roundtrip() {
-        let a = RistrettoPoint::random(&mut OsRng);
-        let e = Scalar::random(&mut OsRng);
-        let k = Scalar::random(&mut OsRng);
-        let r = Scalar::random(&mut OsRng);
-        let c = Scalar::random(&mut OsRng);
-        let ctx = Scalar::random(&mut OsRng);
+        let a = random_point();
+        let e = random_scalar();
+        let k = random_scalar();
+        let r = random_scalar();
+        let c = random_scalar();
+        let ctx = random_scalar();
 
         let token = CreditToken { a, e, k, r, c, ctx };
 
@@ -1033,10 +1048,10 @@ mod tests {
 
     #[test]
     fn test_pre_refund_cbor_roundtrip() {
-        let r = Scalar::random(&mut OsRng);
-        let k = Scalar::random(&mut OsRng);
-        let m = Scalar::random(&mut OsRng);
-        let ctx = Scalar::random(&mut OsRng);
+        let r = random_scalar();
+        let k = random_scalar();
+        let m = random_scalar();
+        let ctx = random_scalar();
 
         let pre_refund = PreRefund { r, k, m, ctx };
 

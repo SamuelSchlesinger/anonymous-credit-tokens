@@ -3,7 +3,7 @@ use criterion::{
     AxisScale, BatchSize, BenchmarkId, Criterion, PlotConfiguration, black_box, criterion_group,
     criterion_main,
 };
-use curve25519_dalek::Scalar;
+use anonymous_credit_tokens::Scalar;
 use rand::{Rng, thread_rng};
 use rand_core::OsRng;
 use std::sync::Arc;
