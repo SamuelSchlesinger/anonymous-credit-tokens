@@ -1,9 +1,9 @@
-use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
+use anonymous_credit_tokens::p256::{Params, PreIssuance, PrivateKey};
 use criterion::{
     AxisScale, BatchSize, BenchmarkId, Criterion, PlotConfiguration, black_box, criterion_group,
     criterion_main,
 };
-use anonymous_credit_tokens::Scalar;
+use anonymous_credit_tokens::p256::Scalar;
 use rand::{Rng, thread_rng};
 use rand_core::OsRng;
 use std::sync::Arc;

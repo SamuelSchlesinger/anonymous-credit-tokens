@@ -1,9 +1,8 @@
-use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
+use anonymous_credit_tokens::ristretto255::{Params, PreIssuance, PrivateKey, Scalar};
 use criterion::{
     AxisScale, BatchSize, BenchmarkId, Criterion, PlotConfiguration, black_box, criterion_group,
     criterion_main,
 };
-use anonymous_credit_tokens::Scalar;
 use rand::{Rng, thread_rng};
 use rand_core::OsRng;
 use std::time::Duration;
