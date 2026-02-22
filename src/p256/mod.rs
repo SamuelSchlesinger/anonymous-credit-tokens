@@ -144,11 +144,10 @@
 
 use crate::ciphersuite::{CborError, Ciphersuite};
 use ciborium::value::Value;
-use elliptic_curve::hash2curve::{ExpandMsgXmd, GroupDigest};
-use elliptic_curve::ops::Reduce;
+use elliptic_curve::hash2curve::{ExpandMsgXmd, FromOkm, GroupDigest};
 use elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
 use elliptic_curve::PrimeField;
-use p256_crate::{AffinePoint, ProjectivePoint, U256};
+use p256_crate::{AffinePoint, ProjectivePoint};
 use sha2::Sha256;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
@@ -290,9 +289,12 @@ impl Ciphersuite for P256 {
 
     fn challenge_from_hasher(hasher: blake3::Hasher) -> Scalar {
         let mut reader = hasher.finalize_xof();
-        let mut output = [0u8; 32];
+        // Extract 48 bytes (384 bits) for FromOkm. The P-256 order n uses
+        // ~256 bits, so 384 - 256 = 128 extra bits of entropy ensures
+        // negligible bias (~2^(-160)) for the Fiat-Shamir transform.
+        let mut output = [0u8; 48];
         reader.fill(&mut output);
-        <Scalar as Reduce<U256>>::reduce(U256::from_be_slice(&output))
+        <Scalar as FromOkm>::from_okm(output[..].into())
     }
 
     fn hash_to_point(domain_separator: &str, seed: &[u8], counter: u32) -> ProjectivePoint {

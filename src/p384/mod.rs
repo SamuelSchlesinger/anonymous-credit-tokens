@@ -30,11 +30,10 @@
 
 use crate::ciphersuite::{CborError, Ciphersuite};
 use ciborium::value::Value;
-use elliptic_curve::hash2curve::{ExpandMsgXmd, GroupDigest};
-use elliptic_curve::ops::Reduce;
+use elliptic_curve::hash2curve::{ExpandMsgXmd, FromOkm, GroupDigest};
 use elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
 use elliptic_curve::PrimeField;
-use p384_crate::{AffinePoint, ProjectivePoint, U384};
+use p384_crate::{AffinePoint, ProjectivePoint};
 use sha2::Sha384;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
@@ -174,12 +173,11 @@ impl Ciphersuite for P384 {
 
     fn challenge_from_hasher(hasher: blake3::Hasher) -> Scalar {
         let mut reader = hasher.finalize_xof();
-        // Extract 48 bytes (384 bits). The P-384 order n ≈ 2^384 - 2^192, so
-        // reducing a uniform 384-bit value has statistical distance ~2^(-193)
-        // from uniform, which is negligible for 192-bit security.
-        let mut output = [0u8; 48];
+        // Extract 72 bytes for FromOkm. L = ceil((ceil(log2(q)) + k) / 8)
+        // = ceil((384 + 128) / 8) = 64, but RFC 9380 specifies L=72 for P-384.
+        let mut output = [0u8; 72];
         reader.fill(&mut output);
-        <Scalar as Reduce<U384>>::reduce(U384::from_be_slice(&output))
+        <Scalar as FromOkm>::from_okm(output[..].into())
     }
 
     fn hash_to_point(domain_separator: &str, seed: &[u8], counter: u32) -> ProjectivePoint {

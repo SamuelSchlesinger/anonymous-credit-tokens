@@ -16,7 +16,7 @@ use super::*;
 use crate::ciphersuite::Ciphersuite;
 use crate::tests_common::TestCiphersuite;
 use elliptic_curve::ops::Reduce;
-use p521_crate::ProjectivePoint;
+use p521_crate::{ProjectivePoint, U576};
 use proptest::prelude::*;
 use rand_core::OsRng;
 

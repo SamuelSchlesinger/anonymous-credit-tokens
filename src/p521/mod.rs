@@ -31,16 +31,15 @@
 //!
 //! ## Notes
 //!
-//! Unlike P-256 and P-384, the `p521` crate does not provide a `hash2curve` feature.
-//! `hash_to_point` uses a try-and-increment approach instead. This is acceptable because
-//! `hash_to_point` is only called for deterministic, public parameter generation.
+//! `hash_to_point` uses RFC 9380 P521_XMD:SHA-512_SSWU_RO_ via the `hash2curve` feature.
 
 use crate::ciphersuite::{CborError, Ciphersuite};
 use ciborium::value::Value;
 use elliptic_curve::PrimeField;
-use elliptic_curve::ops::Reduce;
+use elliptic_curve::hash2curve::{ExpandMsgXmd, FromOkm, GroupDigest};
 use elliptic_curve::sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint};
-use p521_crate::{AffinePoint, ProjectivePoint, U576};
+use p521_crate::{AffinePoint, ProjectivePoint};
+use sha2::Sha512;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroize;
 
@@ -187,64 +186,39 @@ impl Ciphersuite for P521 {
 
     fn challenge_from_hasher(hasher: blake3::Hasher) -> Scalar {
         let mut reader = hasher.finalize_xof();
-        // Extract 72 bytes (576 bits) for Reduce<U576>. The P-521 order n uses
-        // ~521 bits, so 576 - 521 = 55 extra bits of entropy ensures negligible
-        // bias for the Fiat-Shamir transform.
-        let mut output = [0u8; 72];
+        // Extract 98 bytes for FromOkm. L = ceil((ceil(log2(q)) + k) / 8)
+        // = ceil((521 + 128) / 8) = ceil(649/8) = 82... RFC 9380 specifies L=98 for P-521.
+        let mut output = [0u8; 98];
         reader.fill(&mut output);
-        <Scalar as Reduce<U576>>::reduce(U576::from_be_slice(&output))
+        <Scalar as FromOkm>::from_okm(output[..].into())
     }
 
     fn hash_to_point(domain_separator: &str, seed: &[u8], counter: u32) -> ProjectivePoint {
-        // The p521 crate does not provide hash2curve. Use a try-and-increment
-        // approach: hash the inputs to a candidate x-coordinate, try to
-        // decompress, and increment on failure. This is only used for
-        // deterministic public parameter generation so timing leaks are acceptable.
         let mut hasher = blake3::Hasher::new();
 
+        // Add domain separator with length prefix
         let ds_bytes = domain_separator.as_bytes();
         hasher.update(&(ds_bytes.len() as u64).to_be_bytes());
         hasher.update(ds_bytes);
 
+        // Add seed with length prefix
         hasher.update(&(seed.len() as u64).to_be_bytes());
         hasher.update(seed);
 
+        // Add counter with length prefix (4 bytes for u32)
         hasher.update(&(4u64).to_be_bytes());
         hasher.update(&counter.to_le_bytes());
 
-        let base_hash = hasher.finalize();
+        // BLAKE3 hash → 32-byte msg (not XOF)
+        let msg = hasher.finalize();
 
-        for attempt in 0u32.. {
-            let mut attempt_hasher = blake3::Hasher::new();
-            attempt_hasher.update(b"ACT-P521-H2C-TAI");
-            attempt_hasher.update(base_hash.as_bytes());
-            attempt_hasher.update(&attempt.to_le_bytes());
-
-            let mut xof = attempt_hasher.finalize_xof();
-            let mut x_bytes = [0u8; 66];
-            xof.fill(&mut x_bytes);
-
-            // P-521 uses 521 bits = 65 bytes + 1 bit. Clear the unused top 7 bits
-            // of the first byte so x < 2^521.
-            x_bytes[0] &= 0x01;
-
-            // Try SEC1 compressed point decompression (0x02 prefix = even y)
-            let mut compressed = [0u8; 67];
-            compressed[0] = 0x02;
-            compressed[1..].copy_from_slice(&x_bytes);
-
-            if let Ok(encoded) = EncodedPoint::<p521_crate::NistP521>::from_bytes(&compressed[..]) {
-                let affine = AffinePoint::from_encoded_point(&encoded);
-                if let Some(point) = Option::<AffinePoint>::from(affine) {
-                    let proj = ProjectivePoint::from(point);
-                    // Reject identity
-                    if !bool::from(proj.ct_eq(&ProjectivePoint::IDENTITY)) {
-                        return proj;
-                    }
-                }
-            }
-        }
-        unreachable!("hash_to_point must find a valid point")
+        // hash_to_curve using P521_XMD:SHA-512_SSWU_RO_ (RFC 9380)
+        let dst = format!("ACT-P521-BLAKE3_H2C_{}", domain_separator);
+        p521_crate::NistP521::hash_from_bytes::<ExpandMsgXmd<Sha512>>(
+            &[msg.as_bytes()],
+            &[dst.as_bytes()],
+        )
+        .unwrap()
     }
 
     fn encode_point_for_transcript(point: &ProjectivePoint) -> [u8; 67] {

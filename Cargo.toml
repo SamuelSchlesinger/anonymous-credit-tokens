@@ -16,7 +16,7 @@ p256 = ["dep:p256-crate", "dep:elliptic-curve", "dep:sha2"]
 ristretto255 = ["dep:curve25519-dalek"]
 secp256k1 = ["dep:k256-crate", "dep:elliptic-curve", "dep:sha2"]
 p384 = ["dep:p384-crate", "dep:elliptic-curve", "dep:sha2"]
-p521 = ["dep:p521-crate", "dep:elliptic-curve"]
+p521 = ["dep:p521-crate", "dep:elliptic-curve", "dep:sha2"]
 
 [dependencies]
 ciborium = "0.2"
@@ -24,7 +24,7 @@ blake3 = "1.8.1"
 p256-crate = { package = "p256", version = "0.13", features = ["arithmetic", "hash2curve"], optional = true }
 k256-crate = { package = "k256", version = "0.13", features = ["arithmetic", "hash2curve"], optional = true }
 p384-crate = { package = "p384", version = "0.13", features = ["arithmetic", "hash2curve"], optional = true }
-p521-crate = { package = "p521", version = "0.13", features = ["arithmetic"], optional = true }
+p521-crate = { package = "p521", version = "0.13", features = ["arithmetic", "hash2curve"], optional = true }
 elliptic-curve = { version = "0.13", features = ["hash2curve"], optional = true }
 sha2 = { version = "0.10", optional = true }
 curve25519-dalek = { version = "4.1.3", features = ["group", "ff", "digest", "zeroize", "precomputed-tables"], optional = true }
@@ -105,3 +105,15 @@ required-features = ["p256"]
 [[test]]
 name = "generate_test_vectors_ristretto255"
 required-features = ["ristretto255"]
+
+[[test]]
+name = "generate_test_vectors_secp256k1"
+required-features = ["secp256k1"]
+
+[[test]]
+name = "generate_test_vectors_p384"
+required-features = ["p384"]
+
+[[test]]
+name = "generate_test_vectors_p521"
+required-features = ["p521"]
