@@ -20,8 +20,8 @@
 //! big-endian length prefix.
 
 use crate::{
-    CreditToken, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund, PrivateKey,
-    PublicKey, Refund, SpendProof,
+    CreditToken, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund, PrivateKey, PublicKey,
+    Refund, SpendProof,
 };
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::{RistrettoPoint, Scalar};
@@ -53,10 +53,7 @@ fn write_scalar(buf: &mut Vec<u8>, scalar: &Scalar) {
 }
 
 fn write_var(buf: &mut Vec<u8>, data: &[u8]) -> Result<(), EncodingError> {
-    let len: u16 = data
-        .len()
-        .try_into()
-        .map_err(|_| EncodingError::TooLong)?;
+    let len: u16 = data.len().try_into().map_err(|_| EncodingError::TooLong)?;
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
     Ok(())

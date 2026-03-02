@@ -4,4 +4,4 @@
 	branch = samschles/sigma-draft-compliance
 [submodule "sigma-proofs"]
 	path = sigma-proofs
-	url = git@github.com:SamuelSchlesinger/sigma-proofs.git
+	url = git@github.com:thibmeu/sigma-proofs.git

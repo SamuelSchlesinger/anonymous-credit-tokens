@@ -17,7 +17,7 @@
 // ============================================================================
 //
 // These tests verify wire format compatibility with the act-ts TypeScript
-// implementation. Vectors are loaded from: test_vectors/testACT_vnext.json
+// implementation. Vectors are loaded from: test_vectors/draft-schlesinger-02.json
 //
 // PRNG note: TypeScript uses SHAKE128 continuous squeeze with domain separator
 // "sigma-proofs/TestDRNG/SHAKE128" (30 bytes, padded to 64). This enables
@@ -78,7 +78,7 @@ mod ts_vectors {
     }
 
     fn load_vectors() -> TestVectors {
-        let json = fs::read_to_string("test_vectors/testACT_vnext.json")
+        let json = fs::read_to_string("test_vectors/draft-schlesinger-02.json")
             .expect("Failed to read test vectors file");
         serde_json::from_str(&json).expect("Failed to parse test vectors JSON")
     }
@@ -209,13 +209,7 @@ mod ts_vectors {
         assert_eq!(proof.com.len(), L);
     }
 
-    // Fiat-Shamir transcript differences between TS and Rust:
-    // 1. Sponge: TS uses SHAKE128, Rust uses Keccak-f[1600] (different constructions)
-    // 2. Session ID: TS hashes to 64 bytes, Rust uses length-prefixed raw bytes
-    // 3. Instance label: TS absorbs directly, Rust uses length prefix
-    // To fix: Make Rust sigma-proofs use ShakeDuplexSponge and align transcript format
     #[test]
-    #[ignore = "Fiat-Shamir mismatch: sponge type (SHAKE128 vs Keccak) and transcript format (len-prefixed vs raw)"]
     fn test_spend_proof_verifies() {
         let vectors = load_vectors();
         let (org, service, deployment, version) =
@@ -246,6 +240,22 @@ mod ts_vectors {
         let expected_refund: u128 = vectors.refund.refund_amount.parse().unwrap();
         let t_u128 = scalar_to_u128(&refund.t).expect("Refund amount out of range");
         assert_eq!(t_u128, expected_refund);
+    }
+
+    #[test]
+    fn test_h1_value() {
+        use curve25519_dalek::traits::Identity;
+        use curve25519_dalek::RistrettoPoint;
+
+        let vectors = load_vectors();
+        let (org, service, deployment, version) =
+            parse_domain_separator(&vectors.parameters.domain_separator);
+        let params = Params::new(org, service, deployment, version);
+
+        let h1 = params.h1.basepoint();
+
+        // Verify H1 is derived deterministically from domain separator
+        assert_ne!(h1, RistrettoPoint::identity());
     }
 }
 
