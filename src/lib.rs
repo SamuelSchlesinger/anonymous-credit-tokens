@@ -194,7 +194,7 @@ fn powers_of_two<const L: usize>() -> [Scalar; L] {
 ///
 /// Replaces a general n-point multiscalar multiplication with n-1 doublings
 /// + n-1 additions.
-fn pow2_weighted_sum(points: &[RistrettoPoint]) -> RistrettoPoint {
+pub(crate) fn pow2_weighted_sum(points: &[RistrettoPoint]) -> RistrettoPoint {
     let n = points.len();
     debug_assert!(n > 0);
     let mut result = points[n - 1];
@@ -224,7 +224,7 @@ fn pow2_weighted_scalar_sum(scalars: &[Scalar]) -> Scalar {
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct PrivateKey {
     /// The secret scalar used in cryptographic operations
-    x: Scalar,
+    pub(crate) x: Scalar,
     /// The corresponding public key that can be shared with clients
     #[zeroize(skip)]
     public: PublicKey,
@@ -821,19 +821,19 @@ impl PrivateKey {
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct SpendProof<const L: usize> {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
-    k: Scalar,
+    pub(crate) k: Scalar,
     /// The amount being spent in this transaction
-    s: Scalar,
+    pub(crate) s: Scalar,
     /// The request context (revealed in the clear during spending)
-    ctx: Scalar,
+    pub(crate) ctx: Scalar,
     /// The blinded signature component
-    a_prime: RistrettoPoint,
+    pub(crate) a_prime: RistrettoPoint,
     /// A blinded token component
-    b_bar: RistrettoPoint,
+    pub(crate) b_bar: RistrettoPoint,
     /// Commitments for the binary decomposition of the remaining balance
-    com: [RistrettoPoint; L],
+    pub(crate) com: [RistrettoPoint; L],
     /// The NISigmaProtocol compact proof
-    pok: Vec<u8>,
+    pub(crate) pok: Vec<u8>,
 }
 
 impl<const L: usize> SpendProof<L> {
@@ -890,7 +890,7 @@ impl<const L: usize> SpendProof<L> {
 /// because the sigma-proofs library rejects equations with Identity as the
 /// image (trivial kernel check). Accordingly, the witness values for s2 and k2
 /// are (1-b[j])*s_com[j] and (1-b[0])*kstar respectively.
-fn build_spend_relation<const L: usize>(
+pub(crate) fn build_spend_relation<const L: usize>(
     params: &Params,
     a_prime: RistrettoPoint,
     b_bar: RistrettoPoint,
