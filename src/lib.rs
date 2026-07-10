@@ -132,7 +132,7 @@ pub const D: usize = 80;
 /// The maximum credit amount representable in a token: 3^D - 1.
 pub const MAX_CREDITS: u128 = 3u128.pow(D as u32) - 1;
 
-pub mod cbor;
+pub mod wire;
 
 /// Attempts to convert a Scalar to a u128 value.
 ///
@@ -196,9 +196,56 @@ fn pow3_scalars() -> [Scalar; D] {
     out
 }
 
-/// Builds a session identifier from a label and protocol-bound scalars.
-fn session(label: &[u8], scalars: &[&Scalar]) -> Vec<u8> {
-    let mut out = label.to_vec();
+/// expand_message_xmd from Section 5.3.1 of RFC 9380, instantiated
+/// with SHA-512.
+fn expand_message_xmd_sha512(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec<u8> {
+    use sha2::{Digest, Sha512};
+    const B_IN_BYTES: usize = 64;
+    const S_IN_BYTES: usize = 128;
+    let ell = len_in_bytes.div_ceil(B_IN_BYTES);
+    assert!(ell <= 255 && len_in_bytes <= 65535 && dst.len() <= 255);
+    let mut dst_prime = dst.to_vec();
+    dst_prime.push(dst.len() as u8);
+
+    let b0 = Sha512::new()
+        .chain_update([0u8; S_IN_BYTES])
+        .chain_update(msg)
+        .chain_update((len_in_bytes as u16).to_be_bytes())
+        .chain_update([0u8])
+        .chain_update(&dst_prime)
+        .finalize();
+    let mut b_i = Sha512::new()
+        .chain_update(b0)
+        .chain_update([1u8])
+        .chain_update(&dst_prime)
+        .finalize();
+    let mut out = b_i.to_vec();
+    for i in 2..=ell {
+        let xored: Vec<u8> = b0.iter().zip(b_i.iter()).map(|(x, y)| x ^ y).collect();
+        b_i = Sha512::new()
+            .chain_update(&xored)
+            .chain_update([i as u8])
+            .chain_update(&dst_prime)
+            .finalize();
+        out.extend_from_slice(&b_i);
+    }
+    out.truncate(len_in_bytes);
+    out
+}
+
+/// hash_to_ristretto255 from Appendix B of RFC 9380, instantiated with
+/// expand_message_xmd using SHA-512, as required by the
+/// ACT(ristretto255, SHAKE128) suite.
+fn hash_to_ristretto255(msg: &[u8], dst: &[u8]) -> RistrettoPoint {
+    let uniform_bytes = expand_message_xmd_sha512(msg, dst, 64);
+    RistrettoPoint::from_uniform_bytes(&uniform_bytes.try_into().expect("64 bytes"))
+}
+
+/// Builds a session identifier from the domain separator, a label, and
+/// protocol-bound scalars, as specified for each proof in the draft.
+fn session(params: &Params, label: &[u8], scalars: &[&Scalar]) -> Vec<u8> {
+    let mut out = params.domain_separator.clone();
+    out.extend_from_slice(label);
     for s in scalars {
         out.extend_from_slice(s.as_bytes());
     }
@@ -261,6 +308,8 @@ pub struct PublicKey {
 /// your deployment.
 #[derive(Clone)]
 pub struct Params {
+    /// The domain separator this instance was derived from
+    domain_separator: Vec<u8>,
     /// First generator point used in commitment schemes (credit values)
     h1: RistrettoBasepointTable,
     /// Second generator point used in commitment schemes (nullifiers)
@@ -273,7 +322,8 @@ pub struct Params {
 
 impl PartialEq for Params {
     fn eq(&self, other: &Params) -> bool {
-        self.h1.basepoint() == other.h1.basepoint()
+        self.domain_separator == other.domain_separator
+            && self.h1.basepoint() == other.h1.basepoint()
             && self.h2.basepoint() == other.h2.basepoint()
             && self.h3.basepoint() == other.h3.basepoint()
             && self.h4.basepoint() == other.h4.basepoint()
@@ -283,27 +333,15 @@ impl PartialEq for Params {
 impl std::fmt::Debug for Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Params")
-            .field("h1", &"RistrettoBasepointTable")
-            .field("h2", &"RistrettoBasepointTable")
-            .field("h3", &"RistrettoBasepointTable")
-            .field("h4", &"RistrettoBasepointTable")
-            .finish()
+            .field(
+                "domain_separator",
+                &String::from_utf8_lossy(&self.domain_separator),
+            )
+            .finish_non_exhaustive()
     }
 }
 
 impl Params {
-    /// Generates random system parameters using the provided random number generator.
-    ///
-    /// This is used internally to create the default parameters with a deterministic seed.
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        Params {
-            h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-            h4: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
-        }
-    }
-
     /// Creates system parameters using a structured domain separator.
     ///
     /// This method creates deterministic parameters based on deployment-specific
@@ -329,60 +367,58 @@ impl Params {
     /// );
     /// ```
     pub fn new(organization: &str, service: &str, deployment_id: &str, version: &str) -> Self {
-        // Construct the structured domain separator
         let domain_separator = format!(
             "ACT-v1:{}:{}:{}:{}",
             organization, service, deployment_id, version
         );
+        Self::from_domain_separator(domain_separator.as_bytes())
+    }
 
-        // Hash the domain separator with length prefix to create a seed
-        let mut hasher = blake3::Hasher::new();
-        let domain_separator_bytes = domain_separator.as_bytes();
-        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
-        hasher.update(domain_separator_bytes);
-        let seed = hasher.finalize();
-
-        // Generate H1, H2, H3, H4 using counter-based approach
-        let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
-        let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
-        let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
-        let h4 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 3);
+    /// Creates system parameters from a raw domain separator, implementing
+    /// the SetGenerators function from the ACT specification.
+    ///
+    /// The generators H1..H4 are derived independently via hash_to_ristretto255
+    /// with distinct inputs, and re-derived with an incremented counter in the
+    /// (cryptographically unreachable) event of a collision, so that no party
+    /// knows discrete-logarithm relations among them.
+    ///
+    /// The `domain_separator` SHOULD follow the structured format produced by
+    /// [`Params::new`].
+    pub fn from_domain_separator(domain_separator: &[u8]) -> Self {
+        let dst = [b"HashToGroup-", domain_separator].concat();
+        let g0 = RistrettoPoint::generator();
+        let mut h = [g0; 4];
+        let mut counter: u32 = 0;
+        loop {
+            let mut encodings = std::collections::HashSet::new();
+            encodings.insert(g0.compress().to_bytes());
+            for p in h.iter() {
+                encodings.insert(p.compress().to_bytes());
+            }
+            if encodings.len() == 5 {
+                break;
+            }
+            assert!(counter <= 255, "generator derivation failed");
+            let ctr = [counter as u8];
+            h[0] = hash_to_ristretto255(&[b"GenH1", &ctr[..], domain_separator].concat(), &dst);
+            h[1] = hash_to_ristretto255(&[b"GenH2", &ctr[..], domain_separator].concat(), &dst);
+            h[2] = hash_to_ristretto255(&[b"GenH3", &ctr[..], domain_separator].concat(), &dst);
+            h[3] = hash_to_ristretto255(&[b"GenH4", &ctr[..], domain_separator].concat(), &dst);
+            counter += 1;
+        }
 
         Params {
-            h1: RistrettoBasepointTable::create(&h1),
-            h2: RistrettoBasepointTable::create(&h2),
-            h3: RistrettoBasepointTable::create(&h3),
-            h4: RistrettoBasepointTable::create(&h4),
+            domain_separator: domain_separator.to_vec(),
+            h1: RistrettoBasepointTable::create(&h[0]),
+            h2: RistrettoBasepointTable::create(&h[1]),
+            h3: RistrettoBasepointTable::create(&h[2]),
+            h4: RistrettoBasepointTable::create(&h[3]),
         }
     }
 
-    /// Hash to Ristretto255 point using BLAKE3 with counter.
-    ///
-    /// This implements a deterministic hash-to-curve function that maps
-    /// the domain separator, seed, and counter to a Ristretto255 point.
-    /// All inputs are length-prefixed to ensure domain separation.
-    fn hash_to_ristretto(domain_separator: &str, seed: &[u8], counter: u32) -> RistrettoPoint {
-        let mut hasher = blake3::Hasher::new();
-
-        // Add domain separator with length prefix
-        let domain_separator_bytes = domain_separator.as_bytes();
-        hasher.update(&(domain_separator_bytes.len() as u64).to_be_bytes());
-        hasher.update(domain_separator_bytes);
-
-        // Add seed with length prefix
-        hasher.update(&(seed.len() as u64).to_be_bytes());
-        hasher.update(seed);
-
-        // Add counter with length prefix (4 bytes for u32)
-        hasher.update(&(4u64).to_be_bytes());
-        hasher.update(&counter.to_le_bytes());
-
-        // Generate 64 bytes for from_uniform_bytes
-        let mut uniform_bytes = [0u8; 64];
-        let mut output_reader = hasher.finalize_xof();
-        output_reader.fill(&mut uniform_bytes);
-
-        RistrettoPoint::from_uniform_bytes(&uniform_bytes)
+    /// Returns the domain separator these parameters were derived from.
+    pub fn domain_separator(&self) -> &[u8] {
+        &self.domain_separator
     }
 }
 
@@ -486,7 +522,9 @@ impl PreIssuance {
             params.h3.basepoint(),
             big_k,
         );
-        let prover = statement.into_nizk(b"request").unwrap();
+        let prover = statement
+            .into_nizk(&session(params, b"request", &[]))
+            .unwrap();
         let witness = vec![self.k, self.r];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
@@ -540,7 +578,7 @@ impl PreIssuance {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, response.a, g, x_a, x_g);
         let verifier = statement
-            .into_nizk(&session(b"respond", &[&response.c, &ctx]))
+            .into_nizk(&session(params, b"respond", &[&response.c, &ctx]))
             .unwrap();
         if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
@@ -630,7 +668,7 @@ impl PrivateKey {
             params.h3.basepoint(),
             request.big_k,
         );
-        let verifier = statement.into_nizk(b"request").unwrap();
+        let verifier = statement.into_nizk(&session(params, b"request", &[])).unwrap();
         if verifier.verify_compact(&request.pok).is_err() {
             return Err(Error::InvalidIssuanceRequestProof);
         }
@@ -647,7 +685,7 @@ impl PrivateKey {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a, g, x_a, x_g);
         let prover = statement
-            .into_nizk(&session(b"respond", &[&c, &ctx]))
+            .into_nizk(&session(params, b"respond", &[&c, &ctx]))
             .unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -906,7 +944,7 @@ impl PrivateKey {
             &spend_proof.t,
         );
         let verifier = statement
-            .into_nizk(&session(b"spend", &[&spend_proof.k, &spend_proof.ctx]))
+            .into_nizk(&session(params, b"spend", &[&spend_proof.k, &spend_proof.ctx]))
             .map_err(|_| Error::InvalidClientSpendProof)?;
         if verifier.verify_compact(&spend_proof.pok).is_err() {
             return Err(Error::InvalidClientSpendProof);
@@ -932,7 +970,7 @@ impl PrivateKey {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
         let prover = statement
-            .into_nizk(&session(b"refund", &[&e_star, &t, &spend_proof.ctx]))
+            .into_nizk(&session(params, b"refund", &[&e_star, &t, &spend_proof.ctx]))
             .unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -1109,7 +1147,7 @@ impl CreditToken {
             params, &self.k, &s, &a, &self.ctx, &a_prime, &b_bar, &a_bar, &com, &t,
         );
         let prover = statement
-            .into_nizk(&session(b"spend", &[&self.k, &self.ctx]))
+            .into_nizk(&session(params, b"spend", &[&self.k, &self.ctx]))
             .map_err(|_| Error::InvalidClientSpendProof)?;
 
         let mut witness = Vec::with_capacity(4 * D + 7);
@@ -1261,7 +1299,7 @@ impl PreRefund {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
         let verifier = statement
-            .into_nizk(&session(b"refund", &[&refund.e, &refund.t, &spend_proof.ctx]))
+            .into_nizk(&session(params, b"refund", &[&refund.e, &refund.t, &spend_proof.ctx]))
             .unwrap();
         if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);

@@ -254,7 +254,11 @@ This implementation uses:
 - Privately verifiable BBS-style signatures for anonymous credentials
 - Sigma protocol proofs (via the sigma-proofs crate, following
   draft-irtf-cfrg-sigma-protocols) to demonstrate valid spending
-- Blake3 for deriving the system parameters
+- hash_to_ristretto255 (RFC 9380, with expand_message_xmd over SHA-512)
+  for deriving the system parameters, per the specification's
+  SetGenerators function
+- The TLS presentation language wire format from the specification for
+  protocol messages
 - Base-3 digit decomposition for range proofs, covering credit values
   in [0, 3^80)
 

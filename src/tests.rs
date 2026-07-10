@@ -415,7 +415,7 @@ fn test_wraparound_attack_is_blocked_by_amount_validation() {
         &spend_proof.t,
     );
     let verifier = statement
-        .into_nizk(&session(b"spend", &[&spend_proof.k, &spend_proof.ctx]))
+        .into_nizk(&session(&params, b"spend", &[&spend_proof.k, &spend_proof.ctx]))
         .unwrap();
     assert!(
         verifier.verify_compact(&spend_proof.pok).is_ok(),
@@ -815,9 +815,9 @@ proptest! {
         prop_assert!(private_key.refund(&params, &spend_proof, 0, OsRng).is_err());
     }
 
-    /// CBOR roundtrip for real spend proofs.
+    /// Wire-format roundtrip for real spend proofs.
     #[test]
-    fn prop_cbor_round_trip_spend_proof(
+    fn prop_wire_round_trip_spend_proof(
         c in 0u128..10_000,
         a in 0u128..1_000,
     ) {
@@ -826,8 +826,8 @@ proptest! {
         let token = issue_token(&params, &private_key, c, test_ctx());
         let (spend_proof, prerefund) = token.prove_spend(&params, c / 2, a, OsRng).unwrap();
 
-        let bytes = spend_proof.to_cbor().unwrap();
-        let decoded = SpendProof::from_cbor(&bytes).unwrap();
+        let bytes = spend_proof.to_bytes();
+        let decoded = SpendProof::from_bytes(&bytes).unwrap();
 
         // The decoded proof still verifies and refunds correctly.
         let refund = private_key.refund(&params, &decoded, 0, OsRng).unwrap();
@@ -837,26 +837,26 @@ proptest! {
         prop_assert_eq!(new_token.credits(), Scalar::from(c - c / 2 + a));
     }
 
-    /// CBOR roundtrip for refunds produced by the issuer.
+    /// Wire-format roundtrip for refunds produced by the issuer.
     #[test]
-    fn prop_cbor_round_trip_refund(t in 0u128..50) {
+    fn prop_wire_round_trip_refund(t in 0u128..50) {
         let params = test_params();
         let private_key = PrivateKey::random(OsRng);
         let token = issue_token(&params, &private_key, 100, test_ctx());
         let (spend_proof, prerefund) = token.prove_spend(&params, 50, 0, OsRng).unwrap();
         let refund = private_key.refund(&params, &spend_proof, t, OsRng).unwrap();
 
-        let bytes = refund.to_cbor().unwrap();
-        let decoded = Refund::from_cbor(&bytes).unwrap();
+        let bytes = refund.to_bytes();
+        let decoded = Refund::from_bytes(&bytes).unwrap();
         let new_token = prerefund
             .to_credit_token(&params, &spend_proof, &decoded, private_key.public())
             .unwrap();
         prop_assert_eq!(new_token.credits(), Scalar::from(50 + t));
     }
 
-    /// CBOR roundtrip for credit tokens (including the context field).
+    /// Wire-format roundtrip for credit tokens (including the context field).
     #[test]
-    fn prop_cbor_round_trip_credit_token(
+    fn prop_wire_round_trip_credit_token(
         a in point_strategy(),
         e in scalar_strategy(),
         k in scalar_strategy(),
@@ -865,8 +865,8 @@ proptest! {
         ctx in scalar_strategy(),
     ) {
         let token = CreditToken { a, e, k, r, c, ctx };
-        let bytes = token.to_cbor().unwrap();
-        let decoded = CreditToken::from_cbor(&bytes).unwrap();
+        let bytes = token.to_bytes();
+        let decoded = CreditToken::from_bytes(&bytes).unwrap();
         prop_assert_eq!(token, decoded);
     }
 
