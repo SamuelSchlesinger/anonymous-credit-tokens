@@ -40,9 +40,13 @@ fn main() {
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(&params, OsRng);
 
+    // The request context binds tokens to application context; both sides
+    // derive it from shared state (here, a fixed example value).
+    let ctx = Scalar::from(42u64);
+
     // Server issues 40 credits
     let issuance_response = private_key
-        .issue(&params, &issuance_request, Scalar::from(40u64), OsRng)
+        .issue(&params, &issuance_request, 40, ctx, OsRng)
         .unwrap();
 
     // Client receives the credit token
@@ -52,14 +56,14 @@ fn main() {
             private_key.public(),
             &issuance_request,
             &issuance_response,
+            ctx,
         )
         .unwrap();
     println!("Credits: {:?}", credit_token.credits().to_bytes()[0]);
 
     // 3. First Purchase/Transaction
-    // Client spends 20 credits
-    let charge = Scalar::from(20u64);
-    let (spend_proof, prerefund) = credit_token.prove_spend(&params, charge, OsRng);
+    // Client spends 20 credits, with no top-up
+    let (spend_proof, prerefund) = credit_token.prove_spend(&params, 20, 0, OsRng).unwrap();
 
     // Server checks nullifier and processes the spending
     let nullifier = spend_proof.nullifier();
@@ -68,12 +72,13 @@ fn main() {
     }
     nullifier_store.mark_used(nullifier);
 
-    // Server issues a refund
-    let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    // Server issues a refund, returning 5 of the 20 spent credits
+    // (an issuer-chosen partial refund)
+    let refund = private_key.refund(&params, &spend_proof, 5, OsRng).unwrap();
 
-    // Client receives a new credit token with 20 credits remaining
+    // Client receives a new credit token with 25 credits remaining
     credit_token = prerefund
-        .to_credit_token(&spend_proof, &refund, private_key.public())
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
     println!("Credits: {:?}", credit_token.credits().to_bytes()[0]);
 }

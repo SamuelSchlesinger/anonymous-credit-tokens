@@ -14,8 +14,9 @@
 
 //! # Anonymous Credit Tokens
 //!
-//! A Rust implementation of an Anonymous Credit Scheme (ACS) that enables
-//! privacy-preserving payment systems for web applications and services.
+//! A Rust implementation of Anonymous Credit Tokens (ACT), following
+//! draft-schlesinger-cfrg-act: a privacy-preserving credit scheme in which an
+//! issuer grants tokens holding credits that clients spend anonymously.
 //!
 //! ## WARNING
 //!
@@ -39,7 +40,7 @@
 //!    │ ──────────────────────────────────>  │
 //!    │                                      │ 3. Verify request
 //!    │                                      │ 4. Generate IssuanceResponse
-//!    │                                      │    [SENT TO CLIENT]
+//!    │                                      │    (c credits, context ctx)
 //!    │ <─────────────────────────────────── │
 //!    │ 5. Convert PreIssuance+Response      │
 //!    │    to CreditToken                    │
@@ -48,19 +49,20 @@
 //!    │       ┌─────────────────┐            │
 //!    │       │  Spending Phase │            │
 //!    │       └─────────────────┘            │
-//!    │ 6. Create SpendProof                 │
+//!    │ 6. Create SpendProof for spend s     │
+//!    │    and optional top-up a             │
 //!    │    [SENT TO ISSUER]                  │
 //!    │    and PreRefund                     │
 //!    │    [KEPT BY CLIENT]                  │
 //!    │ ──────────────────────────────────>  │
 //!    │                                      │ 7. Verify SpendProof
 //!    │                                      │ 8. Check nullifier
-//!    │                                      │ 9. Generate Refund
-//!    │                                      │    [SENT TO CLIENT]
+//!    │                                      │ 9. Generate Refund with
+//!    │                                      │    partial refund t
 //!    │ <─────────────────────────────────── │
 //!    │ 10. Convert PreRefund+Refund         │
-//!    │     to new CreditToken               │
-//!    │     with remaining balance           │
+//!    │     to new CreditToken with          │
+//!    │     balance c - s + a + t            │
 //!    │     [KEPT BY CLIENT]                 │
 //! ┌──┴───┐                              ┌───┴───┐
 //! │Client│                              │Issuer │
@@ -74,17 +76,22 @@
 //!
 //! - **Credit Issuance**: Services can issue digital credit tokens to users
 //! - **Anonymous Spending**: Users can spend these credits without revealing their identity
+//! - **Top-Ups**: An issuer-authorized top-up amount can be added to the balance
+//!   during a spend, bound as a public value in the spend proof
+//! - **Partial Refunds**: The issuer can return part of the spent amount when
+//!   issuing the refund
 //! - **Double-Spend Prevention**: The system prevents credits from being used multiple times
-//! - **Privacy-Preserving Refunds**: Unspent credits can be refunded without compromising user privacy
+//! - **Privacy-Preserving Refunds**: Unspent credits are refunded without compromising user privacy
 //!
-//! The implementation uses BBS signatures and zero-knowledge proofs to ensure both
-//! security and privacy, making it suitable for integration into web services and distributed systems.
+//! Credit values lie in the range `[0, 3^D)` and range proofs use a base-3 digit
+//! decomposition, which minimizes proof size for this proof system.
 //!
 //! ## Key Concepts
 //!
 //! - **Issuer**: The service that creates and validates credit tokens (typically your backend server)
 //! - **Client**: The user who receives, holds, and spends credit tokens (typically your users)
-//! - **Credit Token**: A cryptographic token representing a certain amount of credits
+//! - **Credit Token**: A cryptographic token representing a certain amount of credits,
+//!   bound to a request context `ctx`
 //! - **Nullifier**: A unique identifier used to prevent double-spending
 //!
 //! ## Usage Examples
@@ -95,8 +102,6 @@ use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTabl
 use group::Group;
 use rand_core::CryptoRngCore;
 use sigma_proofs::LinearRelation;
-use std::ops::Neg;
-use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zeroize::ZeroizeOnDrop;
 
 #[derive(Debug, PartialEq)]
@@ -110,14 +115,22 @@ pub enum Error {
     InvalidClientSpendProof,
     AmountTooBigError,
     ScalarOutOfRangeError,
+    /// A spend, top-up, or balance amount is outside [0, 3^D).
+    InvalidAmount,
+    /// A partial refund amount exceeds max(0, s - a) or 3^D - 1.
+    InvalidRefundAmount,
 }
 
-/// The bit length used for binary decomposition of values in range proofs.
-/// This defines the maximum value (2^128 - 1) that can be represented.
-pub const L: usize = 128;
+/// The number of base-3 digits used in the range proof decomposition.
+///
+/// This is MAX_DIGITS from the ACT specification: the largest D for which
+/// 3^D < 2^127, so every credit amount fits the u128 encoding while keeping
+/// 3^D + 2^128 far below the group order (see the specification's security
+/// considerations on amount validation and modular wraparound).
+pub const D: usize = 80;
 
-mod transcript;
-use transcript::Transcript;
+/// The maximum credit amount representable in a token: 3^D - 1.
+pub const MAX_CREDITS: u128 = 3u128.pow(D as u32) - 1;
 
 pub mod cbor;
 
@@ -126,15 +139,6 @@ pub mod cbor;
 /// This function attempts to extract a u128 value from a Scalar. Since Scalars can
 /// represent values much larger than a u128, this function returns None if the
 /// Scalar represents a value outside the u128 range.
-///
-/// # Arguments
-///
-/// * `scalar` - The Scalar value to convert to a u128
-///
-/// # Returns
-///
-/// * `Ok(u128)` - The u128 value if the Scalar is within the u128 range
-/// * `Err(Error) - If the Scalar value is too large to fit in a u128
 ///
 /// # Example
 ///
@@ -151,6 +155,54 @@ pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
 
     // Check if the scalar is within u128 range and the high bits are zero
     bytes[16..].iter().all(|&b| b == 0).then_some(value)
+}
+
+/// Decomposes a scalar value into its base-3 representation.
+///
+/// This implements TritDecompose from the ACT specification: D rounds of
+/// short division by 3 over the 32-byte little-endian scalar encoding. The
+/// quotient in each step is computed with a multiply-and-shift
+/// (`(acc * 683) >> 11`, exact for `acc < 2048`), so the algorithm contains
+/// no data-dependent branches, divisions, or table lookups.
+///
+/// The input must represent an integer in `[0, 3^D)`; higher-order residue
+/// is discarded.
+fn trits_of(s: &Scalar) -> [Scalar; D] {
+    let mut bytes = *s.as_bytes();
+    let mut result = [Scalar::ZERO; D];
+
+    for digit in result.iter_mut() {
+        let mut r: u32 = 0;
+        for i in (0..32).rev() {
+            let acc = r * 256 + bytes[i] as u32; // 0 <= acc < 768
+            let q = (acc * 683) >> 11; // floor(acc / 3)
+            bytes[i] = q as u8;
+            r = acc - 3 * q; // acc mod 3
+        }
+        *digit = Scalar::from(r as u64);
+    }
+
+    result
+}
+
+/// Returns the powers of three `3^0, ..., 3^(D-1)` as scalars.
+fn pow3_scalars() -> [Scalar; D] {
+    let mut out = [Scalar::ZERO; D];
+    let mut acc: u128 = 1;
+    for o in out.iter_mut() {
+        *o = Scalar::from(acc);
+        acc *= 3;
+    }
+    out
+}
+
+/// Builds a session identifier from a label and protocol-bound scalars.
+fn session(label: &[u8], scalars: &[&Scalar]) -> Vec<u8> {
+    let mut out = label.to_vec();
+    for s in scalars {
+        out.extend_from_slice(s.as_bytes());
+    }
+    out
 }
 
 /// The private key of the issuer, used to issue and refund credit tokens.
@@ -170,14 +222,6 @@ pub struct PrivateKey {
 impl PrivateKey {
     /// Creates a new random private key using the provided cryptographically secure random number generator.
     ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// A new `PrivateKey` with a randomly generated secret scalar and the corresponding public key
-    ///
     /// # Example
     ///
     /// ```
@@ -195,10 +239,6 @@ impl PrivateKey {
     }
 
     /// Returns a reference to the public key associated with this private key.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the `PublicKey`
     pub fn public(&self) -> &PublicKey {
         &self.public
     }
@@ -221,17 +261,22 @@ pub struct PublicKey {
 /// your deployment.
 #[derive(Clone)]
 pub struct Params {
-    /// First generator point used in commitment schemes
+    /// First generator point used in commitment schemes (credit values)
     h1: RistrettoBasepointTable,
-    /// Second generator point used in commitment schemes
+    /// Second generator point used in commitment schemes (nullifiers)
     h2: RistrettoBasepointTable,
-    /// Third generator point used in commitment schemes
+    /// Third generator point used in commitment schemes (blinding factors)
     h3: RistrettoBasepointTable,
+    /// Fourth generator point, binding the request context
+    h4: RistrettoBasepointTable,
 }
 
 impl PartialEq for Params {
     fn eq(&self, other: &Params) -> bool {
-        self.h1.basepoint() == other.h1.basepoint() && self.h2.basepoint() == other.h2.basepoint() && self.h3.basepoint() == other.h2.basepoint()
+        self.h1.basepoint() == other.h1.basepoint()
+            && self.h2.basepoint() == other.h2.basepoint()
+            && self.h3.basepoint() == other.h3.basepoint()
+            && self.h4.basepoint() == other.h4.basepoint()
     }
 }
 
@@ -241,6 +286,7 @@ impl std::fmt::Debug for Params {
             .field("h1", &"RistrettoBasepointTable")
             .field("h2", &"RistrettoBasepointTable")
             .field("h3", &"RistrettoBasepointTable")
+            .field("h4", &"RistrettoBasepointTable")
             .finish()
     }
 }
@@ -249,19 +295,12 @@ impl Params {
     /// Generates random system parameters using the provided random number generator.
     ///
     /// This is used internally to create the default parameters with a deterministic seed.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// A new `Params` instance with randomly generated points
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
         Params {
             h1: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h2: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
             h3: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
+            h4: RistrettoBasepointTable::create(&RistrettoPoint::random(&mut rng)),
         }
     }
 
@@ -303,15 +342,17 @@ impl Params {
         hasher.update(domain_separator_bytes);
         let seed = hasher.finalize();
 
-        // Generate H1, H2, H3 using counter-based approach
+        // Generate H1, H2, H3, H4 using counter-based approach
         let h1 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 0);
         let h2 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 1);
         let h3 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 2);
+        let h4 = Self::hash_to_ristretto(&domain_separator, seed.as_bytes(), 3);
 
         Params {
             h1: RistrettoBasepointTable::create(&h1),
             h2: RistrettoBasepointTable::create(&h2),
             h3: RistrettoBasepointTable::create(&h3),
+            h4: RistrettoBasepointTable::create(&h4),
         }
     }
 
@@ -320,16 +361,6 @@ impl Params {
     /// This implements a deterministic hash-to-curve function that maps
     /// the domain separator, seed, and counter to a Ristretto255 point.
     /// All inputs are length-prefixed to ensure domain separation.
-    ///
-    /// # Arguments
-    ///
-    /// * `domain_separator` - The domain separator string
-    /// * `seed` - The seed bytes (typically from hashing the domain separator)
-    /// * `counter` - A counter to generate different points from the same seed
-    ///
-    /// # Returns
-    ///
-    /// A deterministically generated Ristretto255 point
     fn hash_to_ristretto(domain_separator: &str, seed: &[u8], counter: u32) -> RistrettoPoint {
         let mut hasher = blake3::Hasher::new();
 
@@ -385,13 +416,13 @@ pub struct IssuanceRequest {
 ///
 /// This token represents the client's anonymous credits. It contains the cryptographic
 /// elements needed to prove ownership and spend credits without revealing the client's
-/// identity. The token includes a credit value `c` that represents the total amount
-/// of credits available to spend.
+/// identity. The token includes a credit value `c` and the request context `ctx` it
+/// is bound to.
 #[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct CreditToken {
-    /// A Ristretto point representing the BBS+ signature component
+    /// A Ristretto point representing the BBS signature component
     a: RistrettoPoint,
-    /// A random scalar used in the BBS+ signature
+    /// A random scalar used in the BBS signature
     e: Scalar,
     /// The token's unique identifier (used to prevent double-spending)
     k: Scalar,
@@ -399,6 +430,8 @@ pub struct CreditToken {
     r: Scalar,
     /// The amount of credits available in this token
     c: Scalar,
+    /// The request context this token is bound to
+    ctx: Scalar,
 }
 
 impl PreIssuance {
@@ -409,14 +442,6 @@ impl PreIssuance {
     /// It is critical to use high-quality randomness for this operation. If the `k` value
     /// collides with a previously used one, the resulting credit token could become unspendable
     /// due to double-spending prevention mechanisms.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// A new `PreIssuance` instance with randomly generated values
     ///
     /// # Example
     ///
@@ -438,14 +463,6 @@ impl PreIssuance {
     /// This method generates a zero-knowledge proof that allows the issuer to verify the
     /// integrity of the request without learning the client's secret values. The resulting
     /// request can be sent to the issuer for processing.
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// An `IssuanceRequest` that can be sent to the issuer
     ///
     /// # Example
     ///
@@ -479,19 +496,9 @@ impl PreIssuance {
     /// Constructs a credit token from the issuer's response to an issuance request.
     ///
     /// This method verifies the issuer's response and, if valid, creates a credit token
-    /// that the client can use to spend credits. The method validates the cryptographic
-    /// proof from the issuer to ensure the response is legitimate.
-    ///
-    /// # Arguments
-    ///
-    /// * `public` - The issuer's public key
-    /// * `request` - The original issuance request sent to the issuer
-    /// * `response` - The issuer's response containing the signature components
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(CreditToken)` - A valid credit token if the issuer's response is verified
-    /// * `Err(Error)` - If the verification fails, indicating a potential invalid response
+    /// that the client can use to spend credits. The `ctx` value is the request context
+    /// agreed with the issuer (derived from shared application context); the token is
+    /// bound to it.
     ///
     /// # Example
     ///
@@ -505,14 +512,15 @@ impl PreIssuance {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let credit_amount = Scalar::from(20u128);
-    /// # let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
+    /// # let ctx = Scalar::from(7u64);
+    /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
     /// #
     /// let credit_token = pre_issuance.to_credit_token(
     ///     &params,
     ///     public_key,
     ///     &request,
-    ///     &response
+    ///     &response,
+    ///     ctx,
     /// ).unwrap();
     /// ```
     pub fn to_credit_token(
@@ -521,16 +529,19 @@ impl PreIssuance {
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
+        ctx: Scalar,
     ) -> Result<CreditToken, Error> {
         // Reconstruct the signature base points for verification
         let g = RistrettoPoint::generator();
-        let x_a = g + &params.h1 * &response.c + request.big_k;
+        let x_a = g + &params.h1 * &response.c + &params.h4 * &ctx + request.big_k;
         let x_g = g * response.e + public.w;
 
         // Verify that the challenge matches the expected value
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, response.a, g, x_a, x_g);
-        let verifier = statement.into_nizk(b"respond").unwrap();
+        let verifier = statement
+            .into_nizk(&session(b"respond", &[&response.c, &ctx]))
+            .unwrap();
         if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
         }
@@ -542,6 +553,7 @@ impl PreIssuance {
             r: self.r,
             k: self.k,
             c: response.c,
+            ctx,
         })
     }
 }
@@ -550,13 +562,14 @@ impl PreIssuance {
 ///
 /// This response contains the cryptographic signature components and proof
 /// values that allow the client to construct a valid credit token. It includes
-/// the credit amount (`c`) assigned by the issuer and the BBS+ signature
-/// elements that authenticate this amount.
+/// the credit amount (`c`) assigned by the issuer and the BBS signature
+/// elements that authenticate this amount. The request context is not included:
+/// both parties derive it from shared application context.
 #[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct IssuanceResponse {
-    /// The BBS+ signature's main component
+    /// The BBS signature's main component
     a: RistrettoPoint,
-    /// A random scalar used in the BBS+ signature
+    /// A random scalar used in the BBS signature
     e: Scalar,
     /// The amount of credits being issued
     c: Scalar,
@@ -568,21 +581,16 @@ impl PrivateKey {
     /// Issues credits to a client in response to their issuance request.
     ///
     /// This method verifies the client's request for legitimacy and, if valid, creates
-    /// a cryptographic signature binding the specified credit amount to the client's
-    /// commitment. The response contains a BBS+ signature and a zero-knowledge proof
-    /// that allows the client to verify the signature's authenticity without revealing
-    /// the issuer's private key.
+    /// a cryptographic signature binding the specified credit amount and request context
+    /// to the client's commitment.
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters
     /// * `request` - The client's issuance request
-    /// * `c` - The amount of credits to issue
+    /// * `c` - The amount of credits to issue, in `[0, 3^D)`
+    /// * `ctx` - The request context scalar to bind the token to
     /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(IssuanceResponse)` - The response containing the signature if the request is valid
-    /// * `Err(Error)` - If the request verification fails
     ///
     /// # Example
     ///
@@ -597,16 +605,23 @@ impl PrivateKey {
     /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
-    /// let credit_amount = Scalar::from(20u128);
-    /// let response = private_key.issue(&params, &request, credit_amount, OsRng).unwrap();
+    /// let ctx = Scalar::from(7u64);
+    /// let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
     /// ```
     pub fn issue(
         &self,
         params: &Params,
         request: &IssuanceRequest,
-        c: Scalar,
+        c: u128,
+        ctx: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, Error> {
+        // Validate the credit amount
+        if c > MAX_CREDITS {
+            return Err(Error::AmountTooBigError);
+        }
+        let c = Scalar::from(c);
+
         // Verify the client's zero-knowledge proof
         let mut statement = LinearRelation::new();
         proofs::pedersen(
@@ -620,18 +635,20 @@ impl PrivateKey {
             return Err(Error::InvalidIssuanceRequestProof);
         }
 
-        // Create a BBS+ signature on the client's commitment and credit amount
+        // Create a BBS signature on the client's commitment, credit amount, and context
         let g = RistrettoPoint::generator();
         let e = Scalar::random(&mut rng);
         let exp = e + self.x;
-        let x_a = g + &params.h1 * &c + request.big_k;
+        let x_a = g + &params.h1 * &c + &params.h4 * &ctx + request.big_k;
         let a = x_a * exp.invert();
         let x_g = g * exp;
 
         // Generate a zero-knowledge proof that the signature is valid
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a, g, x_a, x_g);
-        let prover = statement.into_nizk(b"respond").unwrap();
+        let prover = statement
+            .into_nizk(&session(b"respond", &[&c, &ctx]))
+            .unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
@@ -641,46 +658,30 @@ impl PrivateKey {
 
 /// A zero-knowledge proof that allows spending credits anonymously.
 ///
-/// This proof demonstrates that the client possesses a valid credit token with
-/// sufficient balance to spend the requested amount, without revealing the token itself.
-/// The proof includes a nullifier that prevents double-spending, and a range proof
-/// that ensures the remaining balance is non-negative.
+/// This proof demonstrates that the client possesses a valid credit token such that
+/// the new balance `c - s + a` is in `[0, 3^D)`, without revealing the token itself.
+/// The proof includes a nullifier that prevents double-spending, the public spend
+/// amount `s`, the public top-up amount `a`, and the request context `ctx`.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct SpendProof {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
     /// The amount being spent in this transaction
     s: Scalar,
+    /// The top-up amount being added in this transaction (0 for a plain spend)
+    a: Scalar,
+    /// The request context the token is bound to
+    ctx: Scalar,
     /// The blinded signature component
     a_prime: RistrettoPoint,
     /// A blinded token component
     b_bar: RistrettoPoint,
-    /// Commitments for the binary decomposition of the remaining balance
-    com: [RistrettoPoint; L],
-    /// The challenge value for the zero-knowledge proof
-    gamma: Scalar,
-    /// Response value for the signature proof
-    e_bar: Scalar,
-    /// Response value for signature transformations
-    r2_bar: Scalar,
-    /// Response value for signature transformations
-    r3_bar: Scalar,
-    /// Response value for the credit amount
-    c_bar: Scalar,
-    /// Response value for the blinding factor
-    r_bar: Scalar,
-    /// Response value for the range proof (bit 0, value 0)
-    w00: Scalar,
-    /// Response value for the range proof (bit 0, value 1)
-    w01: Scalar,
-    /// Challenge values for each bit in the range proof
-    gamma0: [Scalar; L],
-    /// Response values for the range proof bit commitments
-    z: [[Scalar; 2]; L],
-    /// Response value for the credit identifier
-    k_bar: Scalar,
-    /// Response value for the range proof sum commitment
-    s_bar: Scalar,
+    /// Digit commitments for the base-3 decomposition of the new balance
+    com: [RistrettoPoint; D],
+    /// Auxiliary commitments for the ternary range proof
+    t: [RistrettoPoint; D],
+    /// The compact sigma protocol proof
+    pok: Vec<u8>,
 }
 
 impl SpendProof {
@@ -689,30 +690,143 @@ impl SpendProof {
     /// The nullifier is a unique identifier for this spend that should be recorded
     /// by the issuer to prevent double-spending. If the same nullifier is seen twice,
     /// the second spend attempt should be rejected.
-    ///
-    /// # Returns
-    ///
-    /// The nullifier as a `Scalar` value
     pub fn nullifier(&self) -> Scalar {
         self.k
     }
 
     /// Returns the amount of credits being spent in this transaction.
-    ///
-    /// # Returns
-    ///
-    /// The credit amount as a `Scalar` value
     pub fn charge(&self) -> Scalar {
         self.s
     }
+
+    /// Returns the top-up amount declared in this transaction.
+    pub fn topup(&self) -> Scalar {
+        self.a
+    }
+
+    /// Returns the request context revealed by this spend.
+    pub fn context(&self) -> Scalar {
+        self.ctx
+    }
+}
+
+/// Builds the LinearRelation statement for the spend proof, shared between the
+/// prover and the verifier.
+///
+/// The statement consists of `3D + 3` equations over `4D + 7` witness scalars:
+///
+/// 1. `A_bar = e*(-A') + r2*B_bar` (BBS signature validity)
+/// 2. `H1_prime = r3*B_bar + c*(-H1) + r*(-H3)` (credential structure)
+/// 3. For each digit j, three equations enforcing `d[j] in {0, 1, 2}`:
+///    - opening: `Com[j] = d[j]*H1 + s[j]*H3` (digit 0 also carries `kstar*H2`)
+///    - auxiliary opening: `T[j] + Com[j] = d[j]*Com[j] + rho[j]*H3`
+///    - zero constraint: `T[j]*2 = d[j]*T[j] + w[j]*H3` (digit 0 also carries `k3*H2`)
+/// 4. `Com_total = c*H1 + kstar*H2 + sum_j s[j]*3^j*H3` (commitment consistency),
+///    where `Com_total = (s - a)*H1 + sum_j 3^j*Com[j]`.
+#[allow(clippy::too_many_arguments)]
+fn spend_statement(
+    params: &Params,
+    k: &Scalar,
+    s: &Scalar,
+    a: &Scalar,
+    ctx: &Scalar,
+    a_prime: &RistrettoPoint,
+    b_bar: &RistrettoPoint,
+    a_bar: &RistrettoPoint,
+    com: &[RistrettoPoint; D],
+    t: &[RistrettoPoint; D],
+) -> LinearRelation<RistrettoPoint> {
+    let g = RistrettoPoint::generator();
+    let pow3 = pow3_scalars();
+    let mut rel = LinearRelation::new();
+
+    // Scalar variables, in witness order.
+    let [e_var, r2_var] = rel.allocate_scalars::<2>();
+    let [r3_var, c_var, r_var] = rel.allocate_scalars::<3>();
+    let d_vars = rel.allocate_scalars_vec(D);
+    let s_vars = rel.allocate_scalars_vec(D);
+    let rho_vars = rel.allocate_scalars_vec(D);
+    let w_vars = rel.allocate_scalars_vec(D);
+    let [k_star_var, k3_var] = rel.allocate_scalars::<2>();
+
+    // Element variables.
+    let neg_a_prime_var = rel.allocate_element_with(-a_prime);
+    let b_bar_var = rel.allocate_element_with(*b_bar);
+    let a_bar_var = rel.allocate_element_with(*a_bar);
+    let neg_h1_var = rel.allocate_element_with(-params.h1.basepoint());
+    let neg_h3_var = rel.allocate_element_with(-params.h3.basepoint());
+    let h1_prime_var =
+        rel.allocate_element_with(g + &params.h2 * k + &params.h4 * ctx);
+    let h1_var = rel.allocate_element_with(params.h1.basepoint());
+    let h2_var = rel.allocate_element_with(params.h2.basepoint());
+    let h3_var = rel.allocate_element_with(params.h3.basepoint());
+    let com_vars = rel.allocate_elements_with(&com[..]);
+    let t_vars = rel.allocate_elements_with(&t[..]);
+    // T[j] + Com[j] and T[j]*2, the left-hand sides of the auxiliary opening
+    // and zero constraint equations.
+    let tc_values: Vec<RistrettoPoint> = (0..D).map(|j| t[j] + com[j]).collect();
+    let t2_values: Vec<RistrettoPoint> = (0..D).map(|j| t[j] + t[j]).collect();
+    let tc_vars = rel.allocate_elements_with(&tc_values);
+    let t2_vars = rel.allocate_elements_with(&t2_values);
+    let com_total = {
+        let mut acc = &params.h1 * &(s - a);
+        for j in 0..D {
+            acc += com[j] * pow3[j];
+        }
+        acc
+    };
+    let com_total_var = rel.allocate_element_with(com_total);
+
+    // Eq 1: A_bar = e*(-A') + r2*B_bar (rearranged BBS signature validity)
+    rel.append_equation(a_bar_var, e_var * neg_a_prime_var + r2_var * b_bar_var);
+
+    // Eq 2: H1_prime = r3*B_bar + c*(-H1) + r*(-H3) (credential structure)
+    rel.append_equation(
+        h1_prime_var,
+        r3_var * b_bar_var + c_var * neg_h1_var + r_var * neg_h3_var,
+    );
+
+    // Eqs 3..2+3D: ternary range proof.
+    // Digit 0 carries the new nullifier kstar under H2.
+    rel.append_equation(
+        com_vars[0],
+        d_vars[0] * h1_var + k_star_var * h2_var + s_vars[0] * h3_var,
+    );
+    rel.append_equation(
+        tc_vars[0],
+        d_vars[0] * com_vars[0] + rho_vars[0] * h3_var,
+    );
+    rel.append_equation(
+        t2_vars[0],
+        d_vars[0] * t_vars[0] + k3_var * h2_var + w_vars[0] * h3_var,
+    );
+    for j in 1..D {
+        rel.append_equation(com_vars[j], d_vars[j] * h1_var + s_vars[j] * h3_var);
+        rel.append_equation(tc_vars[j], d_vars[j] * com_vars[j] + rho_vars[j] * h3_var);
+        rel.append_equation(t2_vars[j], d_vars[j] * t_vars[j] + w_vars[j] * h3_var);
+    }
+
+    // Eq 3D+3: commitment consistency.
+    let mut terms = c_var * (h1_var * Scalar::ONE) + k_star_var * (h2_var * Scalar::ONE);
+    for j in 0..D {
+        terms = terms + s_vars[j] * (h3_var * pow3[j]);
+    }
+    rel.append_equation(com_total_var, terms);
+
+    rel
 }
 
 impl PrivateKey {
     /// Processes a spend proof and issues a refund token for the remaining credits.
     ///
-    /// This method verifies the validity of a spend proof and, if valid, issues a refund
-    /// token for the remaining balance. The refund token can be used by the client to
-    /// construct a new credit token with the remaining balance.
+    /// This method validates the public amounts, verifies the spend proof, and, if
+    /// valid, issues a refund for the new balance `c - s + a`, homomorphically adding
+    /// the partial refund amount `t`. The refund allows the client to construct a new
+    /// credit token with balance `c - s + a + t`.
+    ///
+    /// A non-zero top-up amount `a` in the spend proof MUST be authorized by
+    /// application policy before calling this method; verifying the proof constitutes
+    /// consent to grant those credits.
     ///
     /// # Security Warning
     ///
@@ -722,13 +836,10 @@ impl PrivateKey {
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters
     /// * `spend_proof` - The client's proof of valid spending
+    /// * `t` - The partial refund amount, in `[0, max(0, s - a)]`
     /// * `rng` - A cryptographically secure random number generator
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Refund)` - The refund token if the spend proof is valid
-    /// * `Err(Error)` - If the spend proof verification fails
     ///
     /// # Example
     ///
@@ -737,105 +848,99 @@ impl PrivateKey {
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
-    /// # // Setup (normally these would come from previous steps)
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u128);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
+    /// # let ctx = Scalar::from(7u64);
+    /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response, ctx).unwrap();
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, 10, 0, OsRng).unwrap();
     /// #
     /// // First check if we've seen this nullifier before
     /// let nullifier = spend_proof.nullifier();
     /// // ... check nullifier database
     ///
-    /// // Then process the refund
-    /// let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    /// // Then process the refund, returning 2 of the 10 spent credits
+    /// let refund = private_key.refund(&params, &spend_proof, 2, OsRng).unwrap();
     /// ```
     pub fn refund(
         &self,
         params: &Params,
         spend_proof: &SpendProof,
+        t: u128,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, Error> {
         if spend_proof.a_prime == RistrettoPoint::identity() {
             return Err(Error::IdentityPointError);
         }
 
-        let a_bar = spend_proof.a_prime * self.x;
-        let big_h1 = RistrettoPoint::generator() + &params.h2 * &spend_proof.k;
-        let a1 = spend_proof.a_prime * spend_proof.e_bar
-            + spend_proof.b_bar * spend_proof.r2_bar
-            + a_bar * spend_proof.gamma.neg();
-        let a2 = spend_proof.b_bar * spend_proof.r3_bar
-            + &params.h1 * &spend_proof.c_bar
-            + &params.h3 * &spend_proof.r_bar
-            + big_h1 * spend_proof.gamma.neg();
-        let mut gamma01 = [Scalar::ZERO; L];
-        gamma01[0] = spend_proof.gamma - spend_proof.gamma0[0];
-        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
-        big_c[0][0] = spend_proof.com[0];
-        big_c[0][1] = spend_proof.com[0] - params.h1.basepoint();
-        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-        big_c_prime[0][0] = &params.h2 * &spend_proof.w00 + &params.h3 * &spend_proof.z[0][0]
-            - big_c[0][0] * spend_proof.gamma0[0];
-        big_c_prime[0][1] = &params.h2 * &spend_proof.w01 + &params.h3 * &spend_proof.z[0][1]
-            - big_c[0][1] * gamma01[0];
-        for j in 1..L {
-            gamma01[j] = spend_proof.gamma - spend_proof.gamma0[j];
-            big_c[j][0] = spend_proof.com[j];
-            big_c[j][1] = spend_proof.com[j] - params.h1.basepoint();
-            big_c_prime[j][0] =
-                &params.h3 * &spend_proof.z[j][0] - big_c[j][0] * spend_proof.gamma0[j];
-            big_c_prime[j][1] = &params.h3 * &spend_proof.z[j][1] - big_c[j][1] * gamma01[j];
+        // Validate the public amounts as integers. These checks are REQUIRED
+        // for soundness: the range proof constrains the new balance only
+        // modulo the group order (see the specification's security
+        // considerations on amount validation and modular wraparound).
+        let s = scalar_to_u128(&spend_proof.s).ok_or(Error::ScalarOutOfRangeError)?;
+        let a = scalar_to_u128(&spend_proof.a).ok_or(Error::ScalarOutOfRangeError)?;
+        if s > MAX_CREDITS || a > MAX_CREDITS {
+            return Err(Error::InvalidAmount);
         }
 
-        let k_prime = spend_proof
-            .com
-            .iter()
-            .enumerate()
-            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
-            .fold(RistrettoPoint::identity(), |a, b| a + b);
-        let com_ = &params.h1 * &spend_proof.s + k_prime;
-        let big_c = &params.h1 * &spend_proof.c_bar.neg()
-            + &params.h2 * &spend_proof.k_bar
-            + &params.h3 * &spend_proof.s_bar
-            - com_ * spend_proof.gamma;
+        // Validate the partial refund amount: t <= max(0, s - a).
+        if t > s.saturating_sub(a) {
+            return Err(Error::InvalidRefundAmount);
+        }
+        let t = Scalar::from(t);
 
-        let gamma = Transcript::with(params, b"spend", |transcript| {
-            transcript.add_scalar(&spend_proof.k);
-            transcript.add_elements([&spend_proof.a_prime, &spend_proof.b_bar].into_iter());
-            transcript.add_elements([&a1, &a2].into_iter());
-            transcript.add_elements(spend_proof.com.iter());
-            for c_prime in big_c_prime.iter() {
-                transcript.add_elements(c_prime.iter());
-            }
-            transcript.add_element(&big_c);
-        });
-
-        if gamma != spend_proof.gamma {
+        // Verify the spend proof.
+        let a_bar = spend_proof.a_prime * self.x;
+        let statement = spend_statement(
+            params,
+            &spend_proof.k,
+            &spend_proof.s,
+            &spend_proof.a,
+            &spend_proof.ctx,
+            &spend_proof.a_prime,
+            &spend_proof.b_bar,
+            &a_bar,
+            &spend_proof.com,
+            &spend_proof.t,
+        );
+        let verifier = statement
+            .into_nizk(&session(b"spend", &[&spend_proof.k, &spend_proof.ctx]))
+            .map_err(|_| Error::InvalidClientSpendProof)?;
+        if verifier.verify_compact(&spend_proof.pok).is_err() {
             return Err(Error::InvalidClientSpendProof);
         }
 
-        // Issuing a refund
+        // Issue a refund for the new balance, adding the partial refund t
+        // homomorphically.
+        let pow3 = pow3_scalars();
+        let k_prime = spend_proof
+            .com
+            .iter()
+            .zip(pow3.iter())
+            .map(|(com, p)| com * p)
+            .fold(RistrettoPoint::identity(), |acc, x| acc + x);
+
         let e_star = Scalar::random(&mut rng);
         let g = RistrettoPoint::generator();
         let exp = e_star + self.x;
-        let x_a_star = g + k_prime;
+        let x_a_star = g + k_prime + &params.h1 * &t + &params.h4 * &spend_proof.ctx;
         let a_star = x_a_star * exp.invert();
         let x_g = g * exp;
 
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
-        let prover = statement.into_nizk(b"refund").unwrap();
+        let prover = statement
+            .into_nizk(&session(b"refund", &[&e_star, &t, &spend_proof.ctx]))
+            .unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
 
         Ok(Refund {
             a: a_star,
             e: e_star,
+            t,
             pok,
         })
     }
@@ -844,7 +949,7 @@ impl PrivateKey {
 /// Client state maintained during the refund protocol.
 ///
 /// This structure holds the client's secret values that are needed to complete
-/// the refund protocol and construct a new credit token with the remaining balance.
+/// the refund protocol and construct a new credit token with the new balance.
 /// The client must keep this information private after spending credits and while
 /// awaiting a refund.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
@@ -853,37 +958,8 @@ pub struct PreRefund {
     r: Scalar,
     /// A random identifier for the new credit token
     k: Scalar,
-    /// The remaining balance after spending
-    m: Scalar,
-}
-
-/// Decomposes a scalar value into its binary representation.
-///
-/// This helper function converts a scalar value into an array of L scalars,
-/// where each scalar is either 0 or 1, representing the binary decomposition
-/// of the input value. This is used in range proofs to demonstrate that a value
-/// falls within a certain range.
-///
-/// # Arguments
-///
-/// * `s` - The scalar value to decompose
-///
-/// # Returns
-///
-/// An array of L scalars (0 or 1) representing the binary bits of the input
-fn bits_of(s: Scalar) -> [Scalar; L] {
-    let bytes = s.as_bytes();
-    let mut result = [Scalar::ZERO; L];
-
-    // Extract each bit from the scalar's byte representation
-    result.iter_mut().enumerate().for_each(|(i, result_elem)| {
-        let b = i / 8; // Byte index
-        let j = i % 8; // Bit position within the byte
-        let bit = (bytes[b] >> j) & 0b1; // Extract the bit
-        *result_elem = Scalar::from(bit as u128); // Convert to scalar (0 or 1)
-    });
-
-    result
+    /// The new balance after spending and top-up (before the partial refund)
+    v: Scalar,
 }
 
 impl CreditToken {
@@ -897,21 +973,29 @@ impl CreditToken {
         self.c
     }
 
+    /// Returns the request context this token is bound to.
+    pub fn context(&self) -> Scalar {
+        self.ctx
+    }
+
     /// Creates a zero-knowledge proof for spending credits from this token.
     ///
-    /// This method generates a proof that the client possesses a valid credit token with
-    /// sufficient balance to spend the requested amount, without revealing the token itself.
-    /// The proof includes a range proof to demonstrate that the remaining balance is
-    /// non-negative, and a nullifier to prevent double-spending.
+    /// This method generates a proof that the client possesses a valid credit token
+    /// such that the new balance `c - s + a` lies in `[0, 3^D)`, without revealing
+    /// the token itself. The proof includes a ternary range proof over the new
+    /// balance and a nullifier to prevent double-spending.
     ///
-    /// # Precondition
-    ///
-    /// This function requires that `2^L > self.c >= s`. If this condition is not met,
-    /// the proof will be invalid and will be rejected by the issuer.
+    /// The top-up amount `a` is bound into the proof as a public value:
+    /// verification fails under any other value, so the issuer authorizes the
+    /// top-up by verifying the proof with it. Use `a = 0` for a plain spend.
+    /// Note that `s` may exceed the token balance when the top-up covers the
+    /// difference.
     ///
     /// # Arguments
     ///
-    /// * `s` - The amount of credits to spend
+    /// * `params` - The system parameters
+    /// * `s` - The amount of credits to spend, in `[0, 3^D)`
+    /// * `a` - The top-up amount, in `[0, 3^D)`; 0 for a plain spend
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Returns
@@ -932,230 +1016,191 @@ impl CreditToken {
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response).unwrap();
+    /// # let ctx = Scalar::from(7u64);
+    /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, private_key.public(), &request, &response, ctx).unwrap();
     /// #
-    /// // Spend 10 credits (where 10 <= token balance < 2^128)
-    /// let spend_amount = Scalar::from(10u128);
-    /// let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
+    /// // Spend 10 credits with no top-up
+    /// let (spend_proof, prerefund) = credit_token.prove_spend(&params, 10, 0, OsRng).unwrap();
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
     /// ```
     pub fn prove_spend(
         &self,
         params: &Params,
+        s: u128,
+        a: u128,
+        rng: impl CryptoRngCore,
+    ) -> Result<(SpendProof, PreRefund), Error> {
+        // Validate the amounts and compute the new balance as integers.
+        if s > MAX_CREDITS || a > MAX_CREDITS {
+            return Err(Error::InvalidAmount);
+        }
+        let c = scalar_to_u128(&self.c).ok_or(Error::ScalarOutOfRangeError)?;
+        let v = (c + a).checked_sub(s).ok_or(Error::InvalidAmount)?;
+        if v > MAX_CREDITS {
+            return Err(Error::InvalidAmount);
+        }
+        let digits = trits_of(&Scalar::from(v));
+
+        self.prove_spend_with_digits(params, Scalar::from(s), Scalar::from(a), &digits, rng)
+    }
+
+    /// Core of the spend proof generation, parameterized by the digit
+    /// decomposition of the new balance. Split out so that tests can exercise
+    /// the protocol with dishonest digit values.
+    fn prove_spend_with_digits(
+        &self,
+        params: &Params,
         s: Scalar,
+        a: Scalar,
+        digits: &[Scalar; D],
         mut rng: impl CryptoRngCore,
-    ) -> (SpendProof, PreRefund) {
+    ) -> Result<(SpendProof, PreRefund), Error> {
+        let pow3 = pow3_scalars();
+
+        // Randomize the signature.
         let r1 = Scalar::random(&mut rng);
         let r2 = Scalar::random(&mut rng);
-        let c_prime = Scalar::random(&mut rng);
-        let r_prime = Scalar::random(&mut rng);
-        let e_prime = Scalar::random(&mut rng);
-        let r2_prime = Scalar::random(&mut rng);
-        let r3_prime = Scalar::random(&mut rng);
-
         let b = RistrettoPoint::generator()
             + &params.h1 * &self.c
             + &params.h2 * &self.k
-            + &params.h3 * &self.r;
+            + &params.h3 * &self.r
+            + &params.h4 * &self.ctx;
         let a_prime = self.a * (r1 * r2);
         let b_bar = b * r1;
         let r3 = r1.invert();
-        let a1 = a_prime * e_prime + b_bar * r2_prime;
-        let a2 = b_bar * r3_prime + &params.h1 * &c_prime + &params.h3 * &r_prime;
+        let a_bar = b_bar * r2 - a_prime * self.e;
 
-        let i = bits_of(self.c - s);
-
+        // Create digit commitments; digit 0 carries the new nullifier k_star.
         let k_star = Scalar::random(&mut rng);
-        let s_i: Vec<Scalar> = (0..L).map(|_| Scalar::random(&mut rng)).collect();
-        let mut com = [RistrettoPoint::identity(); L];
-        com[0] = &params.h1 * &i[0] + &params.h2 * &k_star + &params.h3 * &s_i[0];
-        for j in 1..L {
-            com[j] = &params.h1 * &i[j] + &params.h3 * &s_i[j];
+        let mut s_com = [Scalar::ZERO; D];
+        for s_j in s_com.iter_mut() {
+            *s_j = Scalar::random(&mut rng);
         }
-        let mut big_c = [[RistrettoPoint::identity(); 2]; L];
-        let mut big_c_prime = [[RistrettoPoint::identity(); 2]; L];
-
-        big_c[0][0] = com[0];
-        big_c[0][1] = com[0] - params.h1.basepoint();
-        let k0_prime = Scalar::random(&mut rng);
-        let mut s_i_prime = [Scalar::ZERO; L];
-        for s_prime in s_i_prime.iter_mut() {
-            *s_prime = Scalar::random(&mut rng);
-        }
-        let mut gamma_i = [Scalar::ZERO; L];
-        for gamma in gamma_i.iter_mut() {
-            *gamma = Scalar::random(&mut rng);
-        }
-        let w0 = Scalar::random(&mut rng);
-        let mut z = [Scalar::ZERO; L];
-        for z_val in z.iter_mut() {
-            *z_val = Scalar::random(&mut rng);
+        let mut com = [RistrettoPoint::identity(); D];
+        com[0] = &params.h1 * &digits[0] + &params.h2 * &k_star + &params.h3 * &s_com[0];
+        for j in 1..D {
+            com[j] = &params.h1 * &digits[j] + &params.h3 * &s_com[j];
         }
 
-        big_c_prime[0][0] = RistrettoPoint::conditional_select(
-            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][0] * gamma_i[0]),
-            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
-            i[0].ct_eq(&Scalar::ZERO),
+        // Create auxiliary commitments T[j] = (d[j] - 1)*Com[j] + rho[j]*H3.
+        let mut rho = [Scalar::ZERO; D];
+        for rho_j in rho.iter_mut() {
+            *rho_j = Scalar::random(&mut rng);
+        }
+        let mut t = [RistrettoPoint::identity(); D];
+        for j in 0..D {
+            t[j] = com[j] * (digits[j] - Scalar::ONE) + &params.h3 * &rho[j];
+        }
+
+        // Witness values for the zero constraint equations:
+        // w[j] = (2 - d[j]) * ((d[j] - 1)*s[j] + rho[j]),
+        // k3 = (2 - d[0]) * (d[0] - 1) * k_star.
+        let two = Scalar::from(2u64);
+        let mut w = [Scalar::ZERO; D];
+        for j in 0..D {
+            w[j] = (two - digits[j]) * ((digits[j] - Scalar::ONE) * s_com[j] + rho[j]);
+        }
+        let k3 = (two - digits[0]) * (digits[0] - Scalar::ONE) * k_star;
+
+        // Build the statement and prove it.
+        let statement = spend_statement(
+            params, &self.k, &s, &a, &self.ctx, &a_prime, &b_bar, &a_bar, &com, &t,
         );
+        let prover = statement
+            .into_nizk(&session(b"spend", &[&self.k, &self.ctx]))
+            .map_err(|_| Error::InvalidClientSpendProof)?;
 
-        big_c_prime[0][1] = RistrettoPoint::conditional_select(
-            &(&params.h2 * &k0_prime + &params.h3 * &s_i_prime[0]),
-            &(&params.h2 * &w0 + &params.h3 * &z[0] - big_c[0][1] * gamma_i[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
+        let mut witness = Vec::with_capacity(4 * D + 7);
+        witness.push(self.e);
+        witness.push(r2);
+        witness.push(r3);
+        witness.push(self.c);
+        witness.push(self.r);
+        witness.extend_from_slice(&digits[..]);
+        witness.extend_from_slice(&s_com);
+        witness.extend_from_slice(&rho);
+        witness.extend_from_slice(&w);
+        witness.push(k_star);
+        witness.push(k3);
+        let pok = prover
+            .prove_compact(&witness, &mut rng)
+            .map_err(|_| Error::InvalidClientSpendProof)?;
 
-        for j in 1..L {
-            big_c[j][0] = com[j];
-            big_c[j][1] = com[j] - params.h1.basepoint();
-
-            big_c_prime[j][0] = RistrettoPoint::conditional_select(
-                &(&params.h3 * &z[j] - big_c[j][0] * gamma_i[j]),
-                &(&params.h3 * &s_i_prime[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-            big_c_prime[j][1] = RistrettoPoint::conditional_select(
-                &(&params.h3 * &s_i_prime[j]),
-                &(&params.h3 * &z[j] - big_c[j][1] * gamma_i[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-        }
-        let r_star = s_i
+        // The new balance and its blinding factor under the summed commitment.
+        let v = digits
             .iter()
-            .enumerate()
-            .map(|(i, si)| si * Scalar::from(2u128.pow(i as u32)))
-            .fold(Scalar::ZERO, |x, y| x + y);
-        let k_prime = Scalar::random(&mut rng);
-        let s_prime = Scalar::random(&mut rng);
-        let c_ = &params.h1 * &c_prime.neg() + &params.h2 * &k_prime + &params.h3 * &s_prime;
-
-        let gamma = Transcript::with(params, b"spend", |transcript| {
-            transcript.add_scalar(&self.k);
-            transcript.add_elements([&a_prime, &b_bar].into_iter());
-            transcript.add_elements([&a1, &a2].into_iter());
-            transcript.add_elements(com.iter());
-            for c_prime in big_c_prime.iter() {
-                transcript.add_elements(c_prime.iter());
-            }
-            transcript.add_element(&c_);
-        });
-
-        let e_bar = gamma.neg() * self.e + e_prime;
-        let r2_bar = gamma * r2 + r2_prime;
-        let r3_bar = gamma * r3 + r3_prime;
-        let c_bar = gamma.neg() * self.c + c_prime;
-        let r_bar = gamma.neg() * self.r + r_prime;
-        let mut gamma00 = [Scalar::ZERO; L];
-        gamma00[0] = Scalar::conditional_select(
-            &gamma_i[0],
-            &(gamma - gamma_i[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        let w00 = Scalar::conditional_select(
-            &w0,
-            &(gamma00[0] * k_star + k0_prime),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        let w01 = Scalar::conditional_select(
-            &((gamma - gamma00[0]) * k_star + k0_prime),
-            &w0,
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        let mut z00 = [[Scalar::ZERO; 2]; L];
-        z00[0][0] = Scalar::conditional_select(
-            &z[0],
-            &(gamma00[0] * s_i[0] + s_i_prime[0]),
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        z00[0][1] = Scalar::conditional_select(
-            &((gamma - gamma00[0]) * s_i[0] + s_i_prime[0]),
-            &z[0],
-            i[0].ct_eq(&Scalar::ZERO),
-        );
-        for j in 1..L {
-            gamma00[j] = Scalar::conditional_select(
-                &gamma_i[j],
-                &(gamma - gamma_i[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-            z00[j][0] = Scalar::conditional_select(
-                &z[j],
-                &(gamma00[j] * s_i[j] + s_i_prime[j]),
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-            z00[j][1] = Scalar::conditional_select(
-                &((gamma - gamma00[j]) * s_i[j] + s_i_prime[j]),
-                &z[j],
-                i[j].ct_eq(&Scalar::ZERO),
-            );
-        }
-        let k_bar = gamma * k_star + k_prime;
-        let s_bar = gamma * r_star + s_prime;
+            .zip(pow3.iter())
+            .map(|(d, p)| d * p)
+            .fold(Scalar::ZERO, |acc, x| acc + x);
+        let r_star = s_com
+            .iter()
+            .zip(pow3.iter())
+            .map(|(s_j, p)| s_j * p)
+            .fold(Scalar::ZERO, |acc, x| acc + x);
 
         let prerefund = PreRefund {
             k: k_star,
             r: r_star,
-            m: self.c - s,
+            v,
         };
 
-        (
+        Ok((
             SpendProof {
                 k: self.k,
                 s,
+                a,
+                ctx: self.ctx,
                 a_prime,
                 b_bar,
                 com,
-                gamma,
-                e_bar,
-                r2_bar,
-                r3_bar,
-                c_bar,
-                r_bar,
-                w00,
-                w01,
-                gamma0: gamma00,
-                z: z00,
-                k_bar,
-                s_bar,
+                t,
+                pok,
             },
             prerefund,
-        )
+        ))
     }
 }
 
 /// The issuer's response to a spending proof, used to create a new credit token.
 ///
 /// This response contains the cryptographic signature components needed for the client
-/// to construct a new credit token with the remaining balance. It includes a BBS+
-/// signature on the remaining balance and proof values that authenticate the response.
+/// to construct a new credit token with the new balance. It includes a BBS
+/// signature on the new balance, the partial refund amount `t`, and proof values
+/// that authenticate the response.
 #[derive(ZeroizeOnDrop, Debug, Clone, PartialEq)]
 pub struct Refund {
-    /// The BBS+ signature's main component for the new credit token
+    /// The BBS signature's main component for the new credit token
     a: RistrettoPoint,
-    /// A random scalar used in the BBS+ signature
+    /// A random scalar used in the BBS signature
     e: Scalar,
+    /// The partial refund amount added homomorphically by the issuer
+    t: Scalar,
     /// Proof of knowledge of correct BBS signature.
     pok: Vec<u8>,
+}
+
+impl Refund {
+    /// Returns the partial refund amount granted by the issuer.
+    pub fn amount(&self) -> Scalar {
+        self.t
+    }
 }
 
 impl PreRefund {
     /// Constructs a new credit token from the refund response.
     ///
     /// This method verifies the issuer's refund response and, if valid, creates a new
-    /// credit token with the remaining balance. This completes the spending protocol
+    /// credit token with balance `c - s + a + t`. This completes the spending protocol
     /// by providing the client with a new token for their unspent credits.
     ///
     /// # Arguments
     ///
+    /// * `params` - The system parameters
     /// * `spend_proof` - The original spending proof sent to the issuer
     /// * `refund` - The issuer's refund response
     /// * `public_key` - The issuer's public key
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(CreditToken)` - A new credit token with the remaining balance if the refund is valid
-    /// * `Err(Error)r - If the verification fails
     ///
     /// # Example
     ///
@@ -1164,20 +1209,20 @@ impl PreRefund {
     /// # use curve25519_dalek::Scalar;
     /// # use rand_core::OsRng;
     /// #
-    /// # // Setup (normally these would come from previous steps)
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
     /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
-    /// # let response = private_key.issue(&params, &request, Scalar::from(20u128), OsRng).unwrap();
-    /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response).unwrap();
-    /// # let spend_amount = Scalar::from(10u128);
-    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, spend_amount, OsRng);
-    /// # let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+    /// # let ctx = Scalar::from(7u64);
+    /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
+    /// # let credit_token = pre_issuance.to_credit_token(&params, public_key, &request, &response, ctx).unwrap();
+    /// # let (spend_proof, prerefund) = credit_token.prove_spend(&params, 10, 0, OsRng).unwrap();
+    /// # let refund = private_key.refund(&params, &spend_proof, 0, OsRng).unwrap();
     /// #
-    /// // Construct the new credit token with the remaining balance
+    /// // Construct the new credit token with the new balance
     /// let new_credit_token = prerefund.to_credit_token(
+    ///     &params,
     ///     &spend_proof,
     ///     &refund,
     ///     public_key
@@ -1185,23 +1230,39 @@ impl PreRefund {
     /// ```
     pub fn to_credit_token(
         &self,
+        params: &Params,
         spend_proof: &SpendProof,
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, Error> {
-        // Verify the client's zero-knowledge proof
+        // Validate the refund amount and the new balance as integers.
+        let t = scalar_to_u128(&refund.t).ok_or(Error::ScalarOutOfRangeError)?;
+        if t > MAX_CREDITS {
+            return Err(Error::InvalidRefundAmount);
+        }
+        let v = scalar_to_u128(&self.v).ok_or(Error::ScalarOutOfRangeError)?;
+        if v + t > MAX_CREDITS {
+            return Err(Error::InvalidRefundAmount);
+        }
+
+        // Reconstruct the summed commitment to the new balance.
+        let pow3 = pow3_scalars();
         let g = RistrettoPoint::generator();
-        let x_a = g + spend_proof
+        let k_prime = spend_proof
             .com
             .iter()
-            .enumerate()
-            .map(|(i, com)| com * Scalar::from(2u128.pow(i as u32)))
-            .fold(RistrettoPoint::identity(), |a, b| a + b);
+            .zip(pow3.iter())
+            .map(|(com, p)| com * p)
+            .fold(RistrettoPoint::identity(), |acc, x| acc + x);
+        let x_a = g + k_prime + &params.h1 * &refund.t + &params.h4 * &spend_proof.ctx;
         let x_g = g * refund.e + public_key.w;
 
+        // Verify the issuer's proof.
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
-        let verifier = statement.into_nizk(b"refund").unwrap();
+        let verifier = statement
+            .into_nizk(&session(b"refund", &[&refund.e, &refund.t, &spend_proof.ctx]))
+            .unwrap();
         if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);
         }
@@ -1212,7 +1273,8 @@ impl PreRefund {
             e: refund.e,
             k: self.k,
             r: self.r,
-            c: self.m,
+            c: self.v + refund.t,
+            ctx: spend_proof.ctx,
         })
     }
 }

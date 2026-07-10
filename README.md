@@ -104,26 +104,26 @@ let public_key = private_key.public();
 
 ### Scalar Conversion Utilities
 
+Credit amounts are plain `u128` values in the API, bounded by
+`MAX_CREDITS = 3^80 - 1`. Protocol values that arrive as scalars can be
+decoded with `scalar_to_u128`:
+
 ```rust
-use anonymous_credit_tokens::{u128_to_scalar, scalar_to_u128};
+use anonymous_credit_tokens::scalar_to_u128;
+use curve25519_dalek::Scalar;
 
-// Convert u128 to Scalar for credit amounts
-let credit_amount_u128 = 500u128;
-let credit_amount_scalar = u128_to_scalar(credit_amount_u128);
+let scalar = Scalar::from(500u64);
+assert_eq!(scalar_to_u128(&scalar), Some(500));
 
-// Use the scalar for issuing credits
-// ...
-
-// Convert back to u128 for display or other purposes
-let amount_back = scalar_to_uu128(&credit_amount_scalar).unwrap();
-assert_eq!(amount_back, credit_amount_u128);
-
-// Conversion will return None if the scalar is outside u128 range
-let large_scalar = // ... some large scalar
-let result = scalar_to_u128(&large_scalar); // Returns None if too large
+// Conversion returns None if the scalar is outside the u128 range.
+let large_scalar = Scalar::ZERO - Scalar::ONE;
+assert_eq!(scalar_to_u128(&large_scalar), None);
 ```
 
 ### Issuing Credits
+
+Tokens are bound to a request context scalar `ctx` that both parties
+derive from shared application context:
 
 ```rust
 use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
@@ -136,23 +136,28 @@ let params = Params::new("example-org", "payment-api", "production", "2024-01-15
 let issuance_request = preissuance.request(&params, OsRng);
 
 // Server-side: Process the request (credit amount: 20)
-let credit_amount = Scalar::from(20u64);
+let ctx = Scalar::from(42u64); // derived from application context
 let issuance_response = private_key
-    .issue(&params, &issuance_request, credit_amount, OsRng)
+    .issue(&params, &issuance_request, 20, ctx, OsRng)
     .unwrap();
 
 // Client-side: Construct the credit token
 let credit_token = preissuance
-    .to_credit_token(&params, private_key.public(), &issuance_request, &issuance_response)
+    .to_credit_token(&params, private_key.public(), &issuance_request, &issuance_response, ctx)
     .unwrap();
 ```
 
 ### Spending Credits
 
+A spend declares a public spend amount `s` and a public top-up amount
+`a` (0 for a plain spend). The issuer may return part of the spent
+amount with the partial refund parameter `t`, bounded by
+`max(0, s - a)`:
+
 ```rust
-// Client-side: Creates a spending proof (spending 10 out of 20 credits)
-let charge = Scalar::from(10u64);
-let (spend_proof, prerefund) = credit_token.prove_spend(&params, charge, OsRng);
+// Client-side: Creates a spending proof (spending 10 out of 20 credits,
+// with no top-up)
+let (spend_proof, prerefund) = credit_token.prove_spend(&params, 10, 0, OsRng).unwrap();
 
 // Server-side: Verify and process the spending proof
 // IMPORTANT: Check that the nullifier hasn't been used before
@@ -162,8 +167,8 @@ if nullifier_store.is_used(&nullifier) {
 }
 nullifier_store.mark_used(nullifier);
 
-// Server-side: Create a refund
-let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+// Server-side: Create a refund, keeping the full spend amount (t = 0)
+let refund = private_key.refund(&params, &spend_proof, 0, OsRng).unwrap();
 
 // Client-side: Construct a new credit token with remaining credits
 let new_credit_token = prerefund
@@ -171,16 +176,34 @@ let new_credit_token = prerefund
     .unwrap();
 ```
 
+### Top-Ups
+
+Credits can be added to a token during a spend. The top-up amount is a
+public value bound by the proof, so the issuer authorizes it simply by
+verifying the proof with it (for example, after an out-of-band
+purchase tied to the request context):
+
+```rust
+// Client spends 10 credits while adding 100 purchased credits:
+// the new balance is c - 10 + 100.
+let (spend_proof, prerefund) = credit_token.prove_spend(&params, 10, 100, OsRng).unwrap();
+
+// The issuer sees s = 10 and a = 100 in the proof and only proceeds
+// if its policy authorizes the top-up.
+let refund = private_key.refund(&params, &spend_proof, 0, OsRng).unwrap();
+```
+
 ### Complete Transaction Lifecycle
 
 ```rust
-use anonymous_credit_tokens::{PrivateKey, PreIssuance};
+use anonymous_credit_tokens::{Params, PreIssuance, PrivateKey};
 use curve25519_dalek::Scalar;
 use rand_core::OsRng;
 
 // 1. System Initialization
 let params = Params::new("example-org", "payment-api", "production", "2024-01-15");
 let private_key = PrivateKey::random(OsRng);
+let ctx = Scalar::from(42u64);
 
 // 2. User Registration/Credit Issuance
 // Client prepares for issuance
@@ -189,18 +212,17 @@ let issuance_request = preissuance.request(&params, OsRng);
 
 // Server issues 40 credits
 let issuance_response = private_key
-    .issue(&params, &issuance_request, Scalar::from(40u64), OsRng)
+    .issue(&params, &issuance_request, 40, ctx, OsRng)
     .unwrap();
 
 // Client receives the credit token
 let credit_token1 = preissuance
-    .to_credit_token(&params, private_key.public(), &issuance_request, &issuance_response)
+    .to_credit_token(&params, private_key.public(), &issuance_request, &issuance_response, ctx)
     .unwrap();
 
 // 3. First Purchase/Transaction
 // Client spends 20 credits
-let charge = Scalar::from(20u64);
-let (spend_proof, prerefund) = credit_token1.prove_spend(&params, charge, OsRng);
+let (spend_proof, prerefund) = credit_token1.prove_spend(&params, 20, 0, OsRng).unwrap();
 
 // Server checks nullifier and processes the spending
 let nullifier = spend_proof.nullifier();
@@ -209,18 +231,17 @@ if nullifier_store.is_used(&nullifier) {
 }
 nullifier_store.mark_used(nullifier);
 
-// Server issues a refund
-let refund = private_key.refund(&params, &spend_proof, OsRng).unwrap();
+// Server issues a refund, returning 5 of the 20 spent credits
+let refund = private_key.refund(&params, &spend_proof, 5, OsRng).unwrap();
 
-// Client receives a new credit token with 20 credits remaining
+// Client receives a new credit token with 25 credits remaining
 let credit_token2 = prerefund
     .to_credit_token(&params, &spend_proof, &refund, private_key.public())
     .unwrap();
 
 // 4. Second Purchase/Transaction
-// Client spends remaining 20 credits
-let charge = Scalar::from(20u64);
-let (spend_proof2, prerefund2) = credit_token2.prove_spend(&params, charge, OsRng);
+// Client spends the remaining 25 credits
+let (spend_proof2, prerefund2) = credit_token2.prove_spend(&params, 25, 0, OsRng).unwrap();
 
 // Server processes as before...
 ```
@@ -230,10 +251,12 @@ let (spend_proof2, prerefund2) = credit_token2.prove_spend(&params, charge, OsRn
 This implementation uses:
 
 - Ristretto points (via curve25519-dalek) for elliptic curve operations
-- BBS+ signatures for anonymous credentials
-- Zero-knowledge proofs to demonstrate valid spending
-- Blake3 for hashing in the transcript protocol
-- Binary decomposition for range proofs
+- Privately verifiable BBS-style signatures for anonymous credentials
+- Sigma protocol proofs (via the sigma-proofs crate, following
+  draft-irtf-cfrg-sigma-protocols) to demonstrate valid spending
+- Blake3 for deriving the system parameters
+- Base-3 digit decomposition for range proofs, covering credit values
+  in [0, 3^80)
 
 ### How It Works
 
