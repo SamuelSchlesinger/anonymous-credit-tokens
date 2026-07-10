@@ -56,7 +56,6 @@ dependencies = [
  "rand_core 0.6.4",
  "sha2 0.10.9",
  "sigma-proofs",
- "subtle",
  "zeroize",
 ]
 
@@ -1704,8 +1703,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "sigma-proofs"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3cb3e621dd751c7e89b0d82fcc70cc5a10ad8c55f22d7de8ce91429e35bfcd2"
+source = "git+https://github.com/SamuelSchlesinger/sigma-proofs.git?branch=act-protocol-id#23aaa9a1f999af681ffe4b34d7882091c224b127"
 dependencies = [
  "bls12_381",
  "curve25519-dalek",

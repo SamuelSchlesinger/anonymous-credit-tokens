@@ -119,7 +119,13 @@ fn token_creation_benchmark(c: &mut Criterion) {
                 let issuance_request = preissuance.request(&params, OsRng);
                 let credit_amount: u128 = thread_rng().gen_range(10..1000);
                 let issuance_response = private_key
-                    .issue(&params, &issuance_request, credit_amount, bench_ctx(), OsRng)
+                    .issue(
+                        &params,
+                        &issuance_request,
+                        credit_amount,
+                        bench_ctx(),
+                        OsRng,
+                    )
                     .unwrap();
                 (
                     preissuance,

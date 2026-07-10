@@ -102,15 +102,13 @@ use curve25519_dalek::{RistrettoPoint, Scalar, ristretto::RistrettoBasepointTabl
 use group::Group;
 use rand_core::CryptoRngCore;
 use sigma_proofs::LinearRelation;
-use zeroize::ZeroizeOnDrop;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
     InvalidIssuanceRequestProof,
     InvalidIssuanceResponseProof,
-    DoubleSpendError,
     InvalidRefundProof,
-    InvalidRefundResponseProof,
     IdentityPointError,
     InvalidClientSpendProof,
     AmountTooBigError,
@@ -120,6 +118,10 @@ pub enum Error {
     /// A partial refund amount exceeds max(0, s - a) or 3^D - 1.
     InvalidRefundAmount,
 }
+
+// Note: double-spend detection is the caller's responsibility (see
+// PrivateKey::refund), so this library never raises a double-spend error; the
+// caller records nullifiers and rejects reuse with its own error type.
 
 /// The number of base-3 digits used in the range proof decomposition.
 ///
@@ -196,14 +198,32 @@ fn pow3_scalars() -> [Scalar; D] {
     out
 }
 
+/// Reduces a domain separation tag longer than 255 bytes per RFC 9380
+/// Section 5.3.3, so that arbitrarily long ACT domain separators are accepted
+/// rather than panicking.
+fn normalize_dst_sha512(dst: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha512};
+    if dst.len() <= 255 {
+        dst.to_vec()
+    } else {
+        Sha512::new()
+            .chain_update(b"H2C-OVERSIZED-DST-")
+            .chain_update(dst)
+            .finalize()
+            .to_vec()
+    }
+}
+
 /// expand_message_xmd from Section 5.3.1 of RFC 9380, instantiated
-/// with SHA-512.
+/// with SHA-512. Domain separation tags longer than 255 bytes are reduced per
+/// Section 5.3.3.
 fn expand_message_xmd_sha512(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec<u8> {
     use sha2::{Digest, Sha512};
     const B_IN_BYTES: usize = 64;
     const S_IN_BYTES: usize = 128;
     let ell = len_in_bytes.div_ceil(B_IN_BYTES);
-    assert!(ell <= 255 && len_in_bytes <= 65535 && dst.len() <= 255);
+    assert!(ell <= 255 && len_in_bytes <= 65535);
+    let dst = normalize_dst_sha512(dst);
     let mut dst_prime = dst.to_vec();
     dst_prime.push(dst.len() as u8);
 
@@ -239,6 +259,18 @@ fn expand_message_xmd_sha512(msg: &[u8], dst: &[u8], len_in_bytes: usize) -> Vec
 fn hash_to_ristretto255(msg: &[u8], dst: &[u8]) -> RistrettoPoint {
     let uniform_bytes = expand_message_xmd_sha512(msg, dst, 64);
     RistrettoPoint::from_uniform_bytes(&uniform_bytes.try_into().expect("64 bytes"))
+}
+
+/// The ACT Fiat-Shamir protocol identifier, from the ACT(ristretto255,
+/// SHAKE128) suite. draft-irtf-cfrg-sigma-protocols Section 5 makes the
+/// protocol identifier the caller's responsibility, and the Fiat-Shamir draft
+/// standardizes no ristretto255 ciphersuite, so ACT defines its own. The value
+/// is zero-padded to the 64 bytes the Fiat-Shamir transform requires.
+fn act_protocol_id() -> [u8; 64] {
+    const LABEL: &[u8] = b"ACT-v1_SchnorrProof_Shake128_Ristretto255";
+    let mut id = [0u8; 64];
+    id[..LABEL.len()].copy_from_slice(LABEL);
+    id
 }
 
 /// Builds a session identifier from the domain separator, a label, and
@@ -385,6 +417,13 @@ impl Params {
     /// The `domain_separator` SHOULD follow the structured format produced by
     /// [`Params::new`].
     pub fn from_domain_separator(domain_separator: &[u8]) -> Self {
+        // The specification requires a non-empty domain separator and warns
+        // against generic or unstructured separators, which would collapse the
+        // cryptographic isolation between deployments.
+        assert!(
+            !domain_separator.is_empty(),
+            "domain separator must be non-empty"
+        );
         let dst = [b"HashToGroup-", domain_separator].concat();
         let g0 = RistrettoPoint::generator();
         let mut h = [g0; 4];
@@ -523,7 +562,7 @@ impl PreIssuance {
             big_k,
         );
         let prover = statement
-            .into_nizk(&session(params, b"request", &[]))
+            .into_nizk_with_protocol_id(&session(params, b"request", &[]), act_protocol_id())
             .unwrap();
         let witness = vec![self.k, self.r];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -578,7 +617,10 @@ impl PreIssuance {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, response.a, g, x_a, x_g);
         let verifier = statement
-            .into_nizk(&session(params, b"respond", &[&response.c, &ctx]))
+            .into_nizk_with_protocol_id(
+                &session(params, b"respond", &[&response.c, &ctx]),
+                act_protocol_id(),
+            )
             .unwrap();
         if verifier.verify_compact(&response.pok).is_err() {
             return Err(Error::InvalidIssuanceResponseProof);
@@ -668,7 +710,9 @@ impl PrivateKey {
             params.h3.basepoint(),
             request.big_k,
         );
-        let verifier = statement.into_nizk(&session(params, b"request", &[])).unwrap();
+        let verifier = statement
+            .into_nizk_with_protocol_id(&session(params, b"request", &[]), act_protocol_id())
+            .unwrap();
         if verifier.verify_compact(&request.pok).is_err() {
             return Err(Error::InvalidIssuanceRequestProof);
         }
@@ -685,7 +729,10 @@ impl PrivateKey {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a, g, x_a, x_g);
         let prover = statement
-            .into_nizk(&session(params, b"respond", &[&c, &ctx]))
+            .into_nizk_with_protocol_id(
+                &session(params, b"respond", &[&c, &ctx]),
+                act_protocol_id(),
+            )
             .unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -793,8 +840,7 @@ fn spend_statement(
     let a_bar_var = rel.allocate_element_with(*a_bar);
     let neg_h1_var = rel.allocate_element_with(-params.h1.basepoint());
     let neg_h3_var = rel.allocate_element_with(-params.h3.basepoint());
-    let h1_prime_var =
-        rel.allocate_element_with(g + &params.h2 * k + &params.h4 * ctx);
+    let h1_prime_var = rel.allocate_element_with(g + &params.h2 * k + &params.h4 * ctx);
     let h1_var = rel.allocate_element_with(params.h1.basepoint());
     let h2_var = rel.allocate_element_with(params.h2.basepoint());
     let h3_var = rel.allocate_element_with(params.h3.basepoint());
@@ -830,10 +876,7 @@ fn spend_statement(
         com_vars[0],
         d_vars[0] * h1_var + k_star_var * h2_var + s_vars[0] * h3_var,
     );
-    rel.append_equation(
-        tc_vars[0],
-        d_vars[0] * com_vars[0] + rho_vars[0] * h3_var,
-    );
+    rel.append_equation(tc_vars[0], d_vars[0] * com_vars[0] + rho_vars[0] * h3_var);
     rel.append_equation(
         t2_vars[0],
         d_vars[0] * t_vars[0] + k3_var * h2_var + w_vars[0] * h3_var,
@@ -944,7 +987,19 @@ impl PrivateKey {
             &spend_proof.t,
         );
         let verifier = statement
-            .into_nizk(&session(params, b"spend", &[&spend_proof.k, &spend_proof.ctx]))
+            .into_nizk_with_protocol_id(
+                &session(
+                    params,
+                    b"spend",
+                    &[
+                        &spend_proof.k,
+                        &spend_proof.s,
+                        &spend_proof.a,
+                        &spend_proof.ctx,
+                    ],
+                ),
+                act_protocol_id(),
+            )
             .map_err(|_| Error::InvalidClientSpendProof)?;
         if verifier.verify_compact(&spend_proof.pok).is_err() {
             return Err(Error::InvalidClientSpendProof);
@@ -970,7 +1025,10 @@ impl PrivateKey {
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, a_star, g, x_a_star, x_g);
         let prover = statement
-            .into_nizk(&session(params, b"refund", &[&e_star, &t, &spend_proof.ctx]))
+            .into_nizk_with_protocol_id(
+                &session(params, b"refund", &[&e_star, &t, &spend_proof.ctx]),
+                act_protocol_id(),
+            )
             .unwrap();
         let witness = vec![exp];
         let pok = prover.prove_compact(&witness, &mut rng).unwrap();
@@ -998,6 +1056,8 @@ pub struct PreRefund {
     k: Scalar,
     /// The new balance after spending and top-up (before the partial refund)
     v: Scalar,
+    /// The request context this spend was bound to
+    ctx: Scalar,
 }
 
 impl CreditToken {
@@ -1075,7 +1135,13 @@ impl CreditToken {
             return Err(Error::InvalidAmount);
         }
         let c = scalar_to_u128(&self.c).ok_or(Error::ScalarOutOfRangeError)?;
-        let v = (c + a).checked_sub(s).ok_or(Error::InvalidAmount)?;
+        // c is bounded by MAX_CREDITS in honest flow, but a corrupted or
+        // crafted token could carry a larger c; use checked arithmetic so a
+        // bad token is rejected rather than overflowing.
+        let v = c
+            .checked_add(a)
+            .and_then(|ca| ca.checked_sub(s))
+            .ok_or(Error::InvalidAmount)?;
         if v > MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
@@ -1147,10 +1213,15 @@ impl CreditToken {
             params, &self.k, &s, &a, &self.ctx, &a_prime, &b_bar, &a_bar, &com, &t,
         );
         let prover = statement
-            .into_nizk(&session(params, b"spend", &[&self.k, &self.ctx]))
+            .into_nizk_with_protocol_id(
+                &session(params, b"spend", &[&self.k, &s, &a, &self.ctx]),
+                act_protocol_id(),
+            )
             .map_err(|_| Error::InvalidClientSpendProof)?;
 
-        let mut witness = Vec::with_capacity(4 * D + 7);
+        // The witness holds the token's long-term secrets (e, c, r) and the
+        // fresh proof secrets; wrap it so the heap buffer is zeroized on drop.
+        let mut witness = Zeroizing::new(Vec::with_capacity(4 * D + 7));
         witness.push(self.e);
         witness.push(r2);
         witness.push(r3);
@@ -1182,6 +1253,7 @@ impl CreditToken {
             k: k_star,
             r: r_star,
             v,
+            ctx: self.ctx,
         };
 
         Ok((
@@ -1279,7 +1351,9 @@ impl PreRefund {
             return Err(Error::InvalidRefundAmount);
         }
         let v = scalar_to_u128(&self.v).ok_or(Error::ScalarOutOfRangeError)?;
-        if v + t > MAX_CREDITS {
+        // Use checked arithmetic: a corrupted PreRefund could carry a v larger
+        // than MAX_CREDITS, which must be rejected rather than wrapping.
+        if v.checked_add(t).is_none_or(|vt| vt > MAX_CREDITS) {
             return Err(Error::InvalidRefundAmount);
         }
 
@@ -1292,14 +1366,21 @@ impl PreRefund {
             .zip(pow3.iter())
             .map(|(com, p)| com * p)
             .fold(RistrettoPoint::identity(), |acc, x| acc + x);
-        let x_a = g + k_prime + &params.h1 * &refund.t + &params.h4 * &spend_proof.ctx;
+        // Reconstruct against the context bound in the client's own state, so
+        // that pairing this PreRefund with a spend proof or refund from a
+        // different context fails verification rather than silently minting an
+        // unspendable token.
+        let x_a = g + k_prime + &params.h1 * &refund.t + &params.h4 * &self.ctx;
         let x_g = g * refund.e + public_key.w;
 
         // Verify the issuer's proof.
         let mut statement = LinearRelation::new();
         proofs::dleq(&mut statement, refund.a, g, x_a, x_g);
         let verifier = statement
-            .into_nizk(&session(params, b"refund", &[&refund.e, &refund.t, &spend_proof.ctx]))
+            .into_nizk_with_protocol_id(
+                &session(params, b"refund", &[&refund.e, &refund.t, &self.ctx]),
+                act_protocol_id(),
+            )
             .unwrap();
         if verifier.verify_compact(&refund.pok).is_err() {
             return Err(Error::InvalidRefundProof);
@@ -1312,7 +1393,7 @@ impl PreRefund {
             k: self.k,
             r: self.r,
             c: self.v + refund.t,
-            ctx: spend_proof.ctx,
+            ctx: self.ctx,
         })
     }
 }

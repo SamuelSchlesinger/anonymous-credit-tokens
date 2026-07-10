@@ -121,6 +121,16 @@ fn test_params_generators_distinct() {
     }
 }
 
+#[test]
+fn test_long_domain_separator_does_not_panic() {
+    // A domain separator long enough to push the hash-to-group DST past 255
+    // bytes must be handled via RFC 9380's oversized-DST reduction, not panic.
+    let long = "x".repeat(300);
+    let params = Params::from_domain_separator(long.as_bytes());
+    let params2 = Params::from_domain_separator(long.as_bytes());
+    assert_eq!(params, params2);
+}
+
 // ===== TERNARY DECOMPOSITION =====
 
 #[test]
@@ -208,7 +218,13 @@ fn test_issuance_wrong_context_rejected() {
     let wrong_ctx = test_ctx() + Scalar::ONE;
     assert_eq!(
         pre_issuance
-            .to_credit_token(&params, private_key.public(), &request, &response, wrong_ctx)
+            .to_credit_token(
+                &params,
+                private_key.public(),
+                &request,
+                &response,
+                wrong_ctx
+            )
             .err(),
         Some(Error::InvalidIssuanceResponseProof)
     );
@@ -270,7 +286,9 @@ fn test_partial_refund_bounds() {
         private_key.refund(&params, &spend_proof, 31, OsRng).err(),
         Some(Error::InvalidRefundAmount)
     );
-    let refund = private_key.refund(&params, &spend_proof, 30, OsRng).unwrap();
+    let refund = private_key
+        .refund(&params, &spend_proof, 30, OsRng)
+        .unwrap();
     let token = prerefund
         .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -361,7 +379,9 @@ fn test_refund_bound_accounts_for_topup() {
         private_key.refund(&params, &spend_proof, 31, OsRng).err(),
         Some(Error::InvalidRefundAmount)
     );
-    let refund = private_key.refund(&params, &spend_proof, 30, OsRng).unwrap();
+    let refund = private_key
+        .refund(&params, &spend_proof, 30, OsRng)
+        .unwrap();
     let token = prerefund
         .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -415,7 +435,19 @@ fn test_wraparound_attack_is_blocked_by_amount_validation() {
         &spend_proof.t,
     );
     let verifier = statement
-        .into_nizk(&session(&params, b"spend", &[&spend_proof.k, &spend_proof.ctx]))
+        .into_nizk_with_protocol_id(
+            &session(
+                &params,
+                b"spend",
+                &[
+                    &spend_proof.k,
+                    &spend_proof.s,
+                    &spend_proof.a,
+                    &spend_proof.ctx,
+                ],
+            ),
+            act_protocol_id(),
+        )
         .unwrap();
     assert!(
         verifier.verify_compact(&spend_proof.pok).is_ok(),
@@ -452,6 +484,41 @@ fn test_wraparound_topup_is_blocked_by_amount_validation() {
     assert_eq!(
         private_key.refund(&params, &spend_proof, 0, OsRng).err(),
         Some(Error::ScalarOutOfRangeError)
+    );
+}
+
+/// The public spend amount s and top-up amount a are each bound by the proof,
+/// not merely their difference. A man-in-the-middle who shifts (s, a) by a
+/// common delta preserves the new balance v = c - s + a but must not produce a
+/// verifying proof, otherwise the charge and top-up the issuer records could be
+/// inflated without the client's consent.
+#[test]
+fn test_spend_amounts_are_individually_bound() {
+    let params = test_params();
+    let private_key = PrivateKey::random(OsRng);
+    let token = issue_token(&params, &private_key, 100, test_ctx());
+
+    let (spend_proof, _) = token.prove_spend(&params, 30, 10, OsRng).unwrap();
+    // Baseline: the honest proof verifies.
+    assert!(private_key.refund(&params, &spend_proof, 0, OsRng).is_ok());
+
+    // Shift (s, a) -> (s + 5, a + 5): v is unchanged, and both remain valid
+    // credit amounts, but the proof was bound to the original s and a.
+    let mut shifted = spend_proof.clone();
+    shifted.s += Scalar::from(5u64);
+    shifted.a += Scalar::from(5u64);
+    assert_eq!(
+        private_key.refund(&params, &shifted, 0, OsRng).err(),
+        Some(Error::InvalidClientSpendProof),
+        "shifting (s, a) by a common delta must invalidate the proof"
+    );
+
+    // Shifting only s (changing v) must also fail.
+    let mut only_s = spend_proof.clone();
+    only_s.s += Scalar::from(1u64);
+    assert_eq!(
+        private_key.refund(&params, &only_s, 0, OsRng).err(),
+        Some(Error::InvalidClientSpendProof)
     );
 }
 
@@ -670,6 +737,31 @@ fn test_context_propagates_through_chain() {
         .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
     assert_eq!(new_token.context(), ctx);
+}
+
+/// Pairing a stored PreRefund with a spend/refund from a different context is
+/// detected: the refund token construction verifies against the context in the
+/// client's own state, so a mispairing fails rather than minting an unspendable
+/// token.
+#[test]
+fn test_prerefund_context_mispairing_rejected() {
+    let params = test_params();
+    let private_key = PrivateKey::random(OsRng);
+
+    // Two spends under different contexts.
+    let token_a = issue_token(&params, &private_key, 100, Scalar::from(111u64));
+    let token_b = issue_token(&params, &private_key, 100, Scalar::from(222u64));
+    let (_proof_a, prerefund_a) = token_a.prove_spend(&params, 10, 0, OsRng).unwrap();
+    let (proof_b, _prerefund_b) = token_b.prove_spend(&params, 10, 0, OsRng).unwrap();
+    let refund_b = private_key.refund(&params, &proof_b, 0, OsRng).unwrap();
+
+    // Mispair A's state with B's proof/refund.
+    assert_eq!(
+        prerefund_a
+            .to_credit_token(&params, &proof_b, &refund_b, private_key.public())
+            .err(),
+        Some(Error::InvalidRefundProof)
+    );
 }
 
 // ===== INTEGRATION =====

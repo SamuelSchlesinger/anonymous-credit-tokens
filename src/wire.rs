@@ -105,8 +105,7 @@ impl<'a> Reader<'a> {
     /// Reads a canonically encoded scalar.
     fn scalar(&mut self) -> Result<Scalar, WireError> {
         let bytes: [u8; NS] = self.take(NS)?.try_into().expect("fixed width");
-        Option::<Scalar>::from(Scalar::from_canonical_bytes(bytes))
-            .ok_or(WireError::InvalidScalar)
+        Option::<Scalar>::from(Scalar::from_canonical_bytes(bytes)).ok_or(WireError::InvalidScalar)
     }
 
     /// Reads a 2-byte big-endian length-prefixed pok field.
@@ -351,12 +350,14 @@ impl PreIssuance {
 }
 
 impl PreRefund {
-    /// Encodes this state for client storage as `r || k || v` (96 bytes).
+    /// Encodes this state for client storage as `r || k || v || ctx`
+    /// (128 bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(96);
+        let mut out = Vec::with_capacity(128);
         put_scalar(&mut out, &self.r);
         put_scalar(&mut out, &self.k);
         put_scalar(&mut out, &self.v);
+        put_scalar(&mut out, &self.ctx);
         out
     }
 
@@ -366,8 +367,9 @@ impl PreRefund {
         let r = rd.scalar()?;
         let k = rd.scalar()?;
         let v = rd.scalar()?;
+        let ctx = rd.scalar()?;
         rd.finish()?;
-        Ok(PreRefund { r, k, v })
+        Ok(PreRefund { r, k, v, ctx })
     }
 }
 
@@ -492,11 +494,13 @@ mod tests {
             r: Scalar::from(1u64),
             k: Scalar::from(2u64),
             v: Scalar::from(3u64),
+            ctx: Scalar::from(4u64),
         };
         let prerefund2 = PreRefund::from_bytes(&prerefund.to_bytes()).unwrap();
         assert_eq!(prerefund.r, prerefund2.r);
         assert_eq!(prerefund.k, prerefund2.k);
         assert_eq!(prerefund.v, prerefund2.v);
+        assert_eq!(prerefund.ctx, prerefund2.ctx);
 
         let key2 = PrivateKey::from_bytes(&private_key.to_bytes()).unwrap();
         assert_eq!(private_key.x, key2.x);
