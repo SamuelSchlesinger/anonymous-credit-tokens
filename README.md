@@ -105,7 +105,8 @@ let public_key = private_key.public();
 ### Scalar Conversion Utilities
 
 Credit amounts are plain `u128` values in the API, bounded by
-`MAX_CREDITS = 3^80 - 1`. Protocol values that arrive as scalars can be
+`MAX_CREDITS = 3^D - 1` (D = 8 on this branch). Protocol values that
+arrive as scalars can be
 decoded with `scalar_to_u128`:
 
 ```rust
@@ -260,7 +261,7 @@ This implementation uses:
 - The TLS presentation language wire format from the specification for
   protocol messages
 - Base-3 digit decomposition for range proofs, covering credit values
-  in [0, 3^80)
+  in [0, 3^D) with D = 8 on this branch
 
 ### How It Works
 

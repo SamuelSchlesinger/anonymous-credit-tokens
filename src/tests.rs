@@ -155,7 +155,7 @@ fn test_trit_decompose_edges() {
         5,
         26,
         27,
-        3u128.pow(40),
+        3u128.pow(D as u32 - 1),
         MAX_CREDITS - 1,
         MAX_CREDITS,
     ] {
@@ -604,12 +604,12 @@ fn test_tampered_spend_proof_rejected() {
     }
     {
         let mut p = spend_proof.clone();
-        p.com[7] += RistrettoPoint::generator();
+        p.com[D - 1] += RistrettoPoint::generator();
         assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
     }
     {
         let mut p = spend_proof.clone();
-        p.t[11] += RistrettoPoint::generator();
+        p.t[D / 2] += RistrettoPoint::generator();
         assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
     }
     {
@@ -818,9 +818,9 @@ proptest! {
     /// final = c - s + a + t.
     #[test]
     fn prop_balance_conservation(
-        c in 0u128..100_000,
-        s in 0u128..100_000,
-        a in 0u128..1_000,
+        c in 0u128..=MAX_CREDITS / 2,
+        s in 0u128..=MAX_CREDITS,
+        a in 0u128..=MAX_CREDITS / 2,
         t_frac in 0u128..=100,
     ) {
         prop_assume!(c + a >= s);
@@ -836,9 +836,9 @@ proptest! {
     /// Spending more than c + a always fails client-side.
     #[test]
     fn prop_overspend_always_fails(
-        c in 0u128..10_000,
-        a in 0u128..10_000,
-        excess in 1u128..10_000,
+        c in 0u128..=MAX_CREDITS / 2,
+        a in 0u128..=MAX_CREDITS / 2,
+        excess in 1u128..=MAX_CREDITS,
     ) {
         let params = test_params();
         let private_key = PrivateKey::random(OsRng);
@@ -852,10 +852,10 @@ proptest! {
     /// Partial refunds beyond max(0, s - a) always fail issuer-side.
     #[test]
     fn prop_excess_refund_always_fails(
-        c in 0u128..10_000,
+        c in 0u128..=MAX_CREDITS / 2,
         s_frac in 0u128..=100,
-        a in 0u128..100,
-        excess in 1u128..1_000,
+        a in 0u128..=MAX_CREDITS / 2,
+        excess in 1u128..=MAX_CREDITS,
     ) {
         let params = test_params();
         let private_key = PrivateKey::random(OsRng);
@@ -880,7 +880,7 @@ proptest! {
     /// Sequential spends accumulate correctly.
     #[test]
     fn prop_sequential_spends_accumulate(
-        c in 100u128..10_000,
+        c in 100u128..=MAX_CREDITS,
         s1_frac in 0u128..=100,
         s2_frac in 0u128..=100,
     ) {
@@ -910,8 +910,8 @@ proptest! {
     /// Wire-format roundtrip for real spend proofs.
     #[test]
     fn prop_wire_round_trip_spend_proof(
-        c in 0u128..10_000,
-        a in 0u128..1_000,
+        c in 0u128..=MAX_CREDITS / 2,
+        a in 0u128..=MAX_CREDITS / 2,
     ) {
         let params = test_params();
         let private_key = PrivateKey::random(OsRng);
@@ -964,7 +964,7 @@ proptest! {
 
     /// Tokens issued under different parameters or keys do not cross-verify.
     #[test]
-    fn prop_issuer_isolation(c in 1u128..10_000) {
+    fn prop_issuer_isolation(c in 1u128..=MAX_CREDITS) {
         let params1 = test_params();
         let params2 = Params::new("other-org", "other-svc", "prod", "2024-01-01");
         let key1 = PrivateKey::random(OsRng);

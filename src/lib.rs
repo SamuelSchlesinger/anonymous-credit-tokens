@@ -125,11 +125,19 @@ pub enum Error {
 
 /// The number of base-3 digits used in the range proof decomposition.
 ///
-/// This is MAX_DIGITS from the ACT specification: the largest D for which
-/// 3^D < 2^127, so every credit amount fits the u128 encoding while keeping
-/// 3^D + 2^128 far below the group order (see the specification's security
-/// considerations on amount validation and modular wraparound).
-pub const D: usize = 80;
+/// The ACT specification treats D as a deployment parameter with
+/// `D <= MAX_DIGITS = 80` (the largest D for which 3^D < 2^127, so every
+/// credit amount fits the u128 encoding while keeping 3^D + 2^128 far below
+/// the group order; see the specification's security considerations on
+/// amount validation and modular wraparound).
+///
+/// This branch fixes D = 8 — balances in [0, 6561) — sized for
+/// rate-limiting-style deployments (MoLE). The spend proof is linear in D
+/// (192*D + 450 bytes on the wire), so small D keeps presentations inside
+/// ordinary HTTP header budgets: 1,986 bytes at D = 8 versus 15,810 at
+/// D = 80. Making D a const generic so one build supports several
+/// deployments remains TODO.
+pub const D: usize = 8;
 
 /// The maximum credit amount representable in a token: 3^D - 1.
 pub const MAX_CREDITS: u128 = 3u128.pow(D as u32) - 1;
