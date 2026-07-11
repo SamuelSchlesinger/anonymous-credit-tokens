@@ -27,7 +27,7 @@
 //! |---------------------|-----------------|
 //! | IssuanceRequestMsg  | 130 bytes       |
 //! | IssuanceResponseMsg | 162 bytes       |
-//! | SpendProofMsg       | 192*D + 450     |
+//! | SpendProofMsg       | 384*D + 482     |
 //! | RefundMsg           | 162 bytes       |
 //!
 //! Client storage types (CreditToken, PreIssuance, PreRefund) and keys use
@@ -64,8 +64,8 @@ const NS: usize = 32;
 pub const ISSUANCE_REQUEST_SIZE: usize = 130;
 /// The exact wire size of IssuanceResponseMsg: Ne + 4*Ns + 2.
 pub const ISSUANCE_RESPONSE_SIZE: usize = 162;
-/// The exact wire size of SpendProofMsg: (2D+2)*Ne + (4D+12)*Ns + 2.
-pub const SPEND_PROOF_SIZE: usize = 192 * D + 450;
+/// The exact wire size of SpendProofMsg: (4D+3)*Ne + (8D+12)*Ns + 2.
+pub const SPEND_PROOF_SIZE: usize = 384 * D + 482;
 /// The exact wire size of RefundMsg: Ne + 4*Ns + 2.
 pub const REFUND_SIZE: usize = 162;
 
@@ -210,8 +210,11 @@ impl SpendProof {
     ///     opaque ctx[Ns];
     ///     opaque A_prime[Ne];
     ///     opaque B_bar[Ne];
-    ///     opaque Com[D][Ne];
-    ///     opaque T[D][Ne];
+    ///     opaque Com1[D][Ne];
+    ///     opaque T1[D][Ne];
+    ///     opaque Com2[D][Ne];
+    ///     opaque T2[D][Ne];
+    ///     opaque K_n[Ne];
     ///     opaque pok<1..2^16-1>;
     /// } SpendProofMsg;
     /// ```
@@ -223,12 +226,19 @@ impl SpendProof {
         put_scalar(&mut out, &self.ctx);
         put_point(&mut out, &self.a_prime);
         put_point(&mut out, &self.b_bar);
-        for com in self.com.iter() {
+        for com in self.com1.iter() {
             put_point(&mut out, com);
         }
-        for t in self.t.iter() {
+        for t in self.t1.iter() {
             put_point(&mut out, t);
         }
+        for com in self.com2.iter() {
+            put_point(&mut out, com);
+        }
+        for t in self.t2.iter() {
+            put_point(&mut out, t);
+        }
+        put_point(&mut out, &self.k_n);
         put_pok(&mut out, &self.pok);
         out
     }
@@ -246,14 +256,23 @@ impl SpendProof {
         let ctx = r.scalar()?;
         let a_prime = r.point()?;
         let b_bar = r.point()?;
-        let mut com = [RistrettoPoint::identity(); D];
-        for c in com.iter_mut() {
+        let mut com1 = [RistrettoPoint::identity(); D];
+        for c in com1.iter_mut() {
             *c = r.point()?;
         }
-        let mut t = [RistrettoPoint::identity(); D];
-        for t_j in t.iter_mut() {
+        let mut t1 = [RistrettoPoint::identity(); D];
+        for t_j in t1.iter_mut() {
             *t_j = r.point()?;
         }
+        let mut com2 = [RistrettoPoint::identity(); D];
+        for c in com2.iter_mut() {
+            *c = r.point()?;
+        }
+        let mut t2 = [RistrettoPoint::identity(); D];
+        for t_j in t2.iter_mut() {
+            *t_j = r.point()?;
+        }
+        let k_n = r.point()?;
         let pok = r.pok()?;
         r.finish()?;
         Ok(SpendProof {
@@ -263,8 +282,11 @@ impl SpendProof {
             ctx,
             a_prime,
             b_bar,
-            com,
-            t,
+            com1,
+            t1,
+            com2,
+            t2,
+            k_n,
             pok,
         })
     }
@@ -473,8 +495,9 @@ mod tests {
         let new_token = prerefund
             .to_credit_token(&params, &spend_proof2, &refund2, private_key.public())
             .unwrap();
-        // 100 - 30 + 5 + 10 = 85.
-        assert_eq!(new_token.credits(), Scalar::from(85u64));
+        // 100 - 30 + 10 = 80 (the return amount t = 10 grants part of the
+        // authorized top-up of 5 plus 5 refunded credits).
+        assert_eq!(new_token.credits(), Scalar::from(80u64));
     }
 
     #[test]

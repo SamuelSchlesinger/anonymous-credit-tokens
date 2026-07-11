@@ -58,11 +58,11 @@
 //!    │                                      │ 7. Verify SpendProof
 //!    │                                      │ 8. Check nullifier
 //!    │                                      │ 9. Generate Refund with
-//!    │                                      │    partial refund t
+//!    │                                      │    return amount t
 //!    │ <─────────────────────────────────── │
 //!    │ 10. Convert PreRefund+Refund         │
 //!    │     to new CreditToken with          │
-//!    │     balance c - s + a + t            │
+//!    │     balance c - s + t                │
 //!    │     [KEPT BY CLIENT]                 │
 //! ┌──┴───┐                              ┌───┴───┐
 //! │Client│                              │Issuer │
@@ -76,15 +76,20 @@
 //!
 //! - **Credit Issuance**: Services can issue digital credit tokens to users
 //! - **Anonymous Spending**: Users can spend these credits without revealing their identity
-//! - **Top-Ups**: An issuer-authorized top-up amount can be added to the balance
-//!   during a spend, bound as a public value in the spend proof
-//! - **Partial Refunds**: The issuer can return part of the spent amount when
-//!   issuing the refund
+//! - **Top-Ups**: An issuer-authorized top-up amount can be declared in a spend,
+//!   bound as a public value in the spend proof; a range proof shows it fits
+//!   under the credit ceiling
+//! - **Refund-Time Adjustment**: At refund time the issuer chooses a return
+//!   amount `t` in `[0, s + a]` added to the post-spend balance, granting the
+//!   top-up (`t = a`), clawing it back (`t < a`), or refunding part of the
+//!   spent amount (`t > a`)
 //! - **Double-Spend Prevention**: The system prevents credits from being used multiple times
 //! - **Privacy-Preserving Refunds**: Unspent credits are refunded without compromising user privacy
 //!
-//! Credit values lie in the range `[0, 3^D)` and range proofs use a base-3 digit
-//! decomposition, which minimizes proof size for this proof system.
+//! Credit values lie in the range `[0, 3^D)`. Each spend carries two base-3
+//! range proofs: the post-spend balance `c - s` and the topped-up balance
+//! `c + a` both lie in `[0, 3^D)`, so a spend never exceeds the balance and a
+//! top-up never overflows the ceiling, whatever return amount the issuer picks.
 //!
 //! ## Key Concepts
 //!
@@ -113,9 +118,10 @@ pub enum Error {
     InvalidClientSpendProof,
     AmountTooBigError,
     ScalarOutOfRangeError,
-    /// A spend, top-up, or balance amount is outside [0, 3^D).
+    /// A spend, top-up, or balance amount is invalid: outside [0, 3^D),
+    /// a spend exceeding the balance, or a top-up overflowing the ceiling.
     InvalidAmount,
-    /// A partial refund amount exceeds max(0, s - a) or 3^D - 1.
+    /// A return amount exceeds s + a, or the resulting balance is invalid.
     InvalidRefundAmount,
 }
 
@@ -133,8 +139,8 @@ pub enum Error {
 ///
 /// This branch fixes D = 8 — balances in [0, 6561) — sized for
 /// rate-limiting-style deployments (MoLE). The spend proof is linear in D
-/// (192*D + 450 bytes on the wire), so small D keeps presentations inside
-/// ordinary HTTP header budgets: 1,986 bytes at D = 8 versus 15,810 at
+/// (384*D + 482 bytes on the wire), so small D keeps presentations inside
+/// ordinary HTTP header budgets: 3,554 bytes at D = 8 versus 31,202 at
 /// D = 80. Making D a const generic so one build supports several
 /// deployments remains TODO.
 pub const D: usize = 8;
@@ -751,17 +757,19 @@ impl PrivateKey {
 
 /// A zero-knowledge proof that allows spending credits anonymously.
 ///
-/// This proof demonstrates that the client possesses a valid credit token such that
-/// the new balance `c - s + a` is in `[0, 3^D)`, without revealing the token itself.
-/// The proof includes a nullifier that prevents double-spending, the public spend
-/// amount `s`, the public top-up amount `a`, and the request context `ctx`.
+/// This proof demonstrates that the client possesses a valid credit token whose
+/// balance `c` covers the spend (`c - s` in `[0, 3^D)`) and leaves headroom for
+/// the declared top-up (`c + a` in `[0, 3^D)`), without revealing the token
+/// itself. The proof includes a nullifier that prevents double-spending, the
+/// public spend amount `s`, the public top-up amount `a`, and the request
+/// context `ctx`.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct SpendProof {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
     /// The amount being spent in this transaction
     s: Scalar,
-    /// The top-up amount being added in this transaction (0 for a plain spend)
+    /// The top-up amount authorized in this transaction (0 for a plain spend)
     a: Scalar,
     /// The request context the token is bound to
     ctx: Scalar,
@@ -769,10 +777,18 @@ pub struct SpendProof {
     a_prime: RistrettoPoint,
     /// A blinded token component
     b_bar: RistrettoPoint,
-    /// Digit commitments for the base-3 decomposition of the new balance
-    com: [RistrettoPoint; D],
-    /// Auxiliary commitments for the ternary range proof
-    t: [RistrettoPoint; D],
+    /// Digit commitments for the base-3 decomposition of the post-spend
+    /// balance c - s
+    com1: [RistrettoPoint; D],
+    /// Auxiliary commitments for the first (floor) range proof
+    t1: [RistrettoPoint; D],
+    /// Digit commitments for the base-3 decomposition of the topped-up
+    /// balance c + a
+    com2: [RistrettoPoint; D],
+    /// Auxiliary commitments for the second (ceiling) range proof
+    t2: [RistrettoPoint; D],
+    /// Commitment to the new token's nullifier: K_n = kstar*H2 + rn*H3
+    k_n: RistrettoPoint,
     /// The compact sigma protocol proof
     pok: Vec<u8>,
 }
@@ -806,16 +822,25 @@ impl SpendProof {
 /// Builds the LinearRelation statement for the spend proof, shared between the
 /// prover and the verifier.
 ///
-/// The statement consists of `3D + 3` equations over `4D + 7` witness scalars:
+/// The statement consists of `6D + 5` equations over `8D + 7` witness scalars:
 ///
 /// 1. `A_bar = e*(-A') + r2*B_bar` (BBS signature validity)
 /// 2. `H1_prime = r3*B_bar + c*(-H1) + r*(-H3)` (credential structure)
-/// 3. For each digit j, three equations enforcing `d[j] in {0, 1, 2}`:
-///    - opening: `Com[j] = d[j]*H1 + s[j]*H3` (digit 0 also carries `kstar*H2`)
-///    - auxiliary opening: `T[j] + Com[j] = d[j]*Com[j] + rho[j]*H3`
-///    - zero constraint: `T[j]*2 = d[j]*T[j] + w[j]*H3` (digit 0 also carries `k3*H2`)
-/// 4. `Com_total = c*H1 + kstar*H2 + sum_j s[j]*3^j*H3` (commitment consistency),
-///    where `Com_total = (s - a)*H1 + sum_j 3^j*Com[j]`.
+/// 3. For each digit j of the post-spend balance `v1 = c - s`, three
+///    equations enforcing `d1[j] in {0, 1, 2}`:
+///    - opening: `Com1[j] = d1[j]*H1 + s1[j]*H3`
+///    - auxiliary opening: `T1[j] + Com1[j] = d1[j]*Com1[j] + rho1[j]*H3`
+///    - zero constraint: `T1[j]*2 = d1[j]*T1[j] + w1[j]*H3`
+/// 4. The same three equations per digit for the topped-up balance
+///    `v2 = c + a` (Com2/T2)
+/// 5. `K_n = kstar*H2 + rn*H3` (nullifier commitment opening)
+/// 6. `Com_total1 = c*H1 + sum_j s1[j]*3^j*H3` (consistency: v1 = c - s),
+///    where `Com_total1 = s*H1 + sum_j 3^j*Com1[j]`
+/// 7. `Com_total2 = c*H1 + sum_j s2[j]*3^j*H3` (consistency: v2 = c + a),
+///    where `Com_total2 = (-a)*H1 + sum_j 3^j*Com2[j]`
+///
+/// Both consistency equations share the witness `c`, tying the two range
+/// proofs to the same hidden balance.
 #[allow(clippy::too_many_arguments)]
 fn spend_statement(
     params: &Params,
@@ -826,8 +851,11 @@ fn spend_statement(
     a_prime: &RistrettoPoint,
     b_bar: &RistrettoPoint,
     a_bar: &RistrettoPoint,
-    com: &[RistrettoPoint; D],
-    t: &[RistrettoPoint; D],
+    com1: &[RistrettoPoint; D],
+    t1: &[RistrettoPoint; D],
+    com2: &[RistrettoPoint; D],
+    t2: &[RistrettoPoint; D],
+    k_n: &RistrettoPoint,
 ) -> LinearRelation<RistrettoPoint> {
     let g = RistrettoPoint::generator();
     let pow3 = pow3_scalars();
@@ -836,11 +864,15 @@ fn spend_statement(
     // Scalar variables, in witness order.
     let [e_var, r2_var] = rel.allocate_scalars::<2>();
     let [r3_var, c_var, r_var] = rel.allocate_scalars::<3>();
-    let d_vars = rel.allocate_scalars_vec(D);
-    let s_vars = rel.allocate_scalars_vec(D);
-    let rho_vars = rel.allocate_scalars_vec(D);
-    let w_vars = rel.allocate_scalars_vec(D);
-    let [k_star_var, k3_var] = rel.allocate_scalars::<2>();
+    let d1_vars = rel.allocate_scalars_vec(D);
+    let s1_vars = rel.allocate_scalars_vec(D);
+    let rho1_vars = rel.allocate_scalars_vec(D);
+    let w1_vars = rel.allocate_scalars_vec(D);
+    let d2_vars = rel.allocate_scalars_vec(D);
+    let s2_vars = rel.allocate_scalars_vec(D);
+    let rho2_vars = rel.allocate_scalars_vec(D);
+    let w2_vars = rel.allocate_scalars_vec(D);
+    let [k_star_var, rn_var] = rel.allocate_scalars::<2>();
 
     // Element variables.
     let neg_a_prime_var = rel.allocate_element_with(-a_prime);
@@ -852,22 +884,37 @@ fn spend_statement(
     let h1_var = rel.allocate_element_with(params.h1.basepoint());
     let h2_var = rel.allocate_element_with(params.h2.basepoint());
     let h3_var = rel.allocate_element_with(params.h3.basepoint());
-    let com_vars = rel.allocate_elements_with(&com[..]);
-    let t_vars = rel.allocate_elements_with(&t[..]);
-    // T[j] + Com[j] and T[j]*2, the left-hand sides of the auxiliary opening
-    // and zero constraint equations.
-    let tc_values: Vec<RistrettoPoint> = (0..D).map(|j| t[j] + com[j]).collect();
-    let t2_values: Vec<RistrettoPoint> = (0..D).map(|j| t[j] + t[j]).collect();
-    let tc_vars = rel.allocate_elements_with(&tc_values);
-    let t2_vars = rel.allocate_elements_with(&t2_values);
-    let com_total = {
-        let mut acc = &params.h1 * &(s - a);
+    // Per-decomposition element variables: Com[j], T[j], and the derived
+    // T[j] + Com[j] and T[j]*2 left-hand sides.
+    let com1_vars = rel.allocate_elements_with(&com1[..]);
+    let t1_vars = rel.allocate_elements_with(&t1[..]);
+    let tc1_values: Vec<RistrettoPoint> = (0..D).map(|j| t1[j] + com1[j]).collect();
+    let t21_values: Vec<RistrettoPoint> = (0..D).map(|j| t1[j] + t1[j]).collect();
+    let tc1_vars = rel.allocate_elements_with(&tc1_values);
+    let t21_vars = rel.allocate_elements_with(&t21_values);
+    let com2_vars = rel.allocate_elements_with(&com2[..]);
+    let t2_vars = rel.allocate_elements_with(&t2[..]);
+    let tc2_values: Vec<RistrettoPoint> = (0..D).map(|j| t2[j] + com2[j]).collect();
+    let t22_values: Vec<RistrettoPoint> = (0..D).map(|j| t2[j] + t2[j]).collect();
+    let tc2_vars = rel.allocate_elements_with(&tc2_values);
+    let t22_vars = rel.allocate_elements_with(&t22_values);
+    let kn_var = rel.allocate_element_with(*k_n);
+    let com_total1 = {
+        let mut acc = &params.h1 * s;
         for j in 0..D {
-            acc += com[j] * pow3[j];
+            acc += com1[j] * pow3[j];
         }
         acc
     };
-    let com_total_var = rel.allocate_element_with(com_total);
+    let com_total1_var = rel.allocate_element_with(com_total1);
+    let com_total2 = {
+        let mut acc = &params.h1 * &(-a);
+        for j in 0..D {
+            acc += com2[j] * pow3[j];
+        }
+        acc
+    };
+    let com_total2_var = rel.allocate_element_with(com_total2);
 
     // Eq 1: A_bar = e*(-A') + r2*B_bar (rearranged BBS signature validity)
     rel.append_equation(a_bar_var, e_var * neg_a_prime_var + r2_var * b_bar_var);
@@ -878,29 +925,41 @@ fn spend_statement(
         r3_var * b_bar_var + c_var * neg_h1_var + r_var * neg_h3_var,
     );
 
-    // Eqs 3..2+3D: ternary range proof.
-    // Digit 0 carries the new nullifier kstar under H2.
-    rel.append_equation(
-        com_vars[0],
-        d_vars[0] * h1_var + k_star_var * h2_var + s_vars[0] * h3_var,
-    );
-    rel.append_equation(tc_vars[0], d_vars[0] * com_vars[0] + rho_vars[0] * h3_var);
-    rel.append_equation(
-        t2_vars[0],
-        d_vars[0] * t_vars[0] + k3_var * h2_var + w_vars[0] * h3_var,
-    );
-    for j in 1..D {
-        rel.append_equation(com_vars[j], d_vars[j] * h1_var + s_vars[j] * h3_var);
-        rel.append_equation(tc_vars[j], d_vars[j] * com_vars[j] + rho_vars[j] * h3_var);
-        rel.append_equation(t2_vars[j], d_vars[j] * t_vars[j] + w_vars[j] * h3_var);
+    // Eqs 3..2+3D: ternary range proof over v1 = c - s.
+    for j in 0..D {
+        rel.append_equation(com1_vars[j], d1_vars[j] * h1_var + s1_vars[j] * h3_var);
+        rel.append_equation(
+            tc1_vars[j],
+            d1_vars[j] * com1_vars[j] + rho1_vars[j] * h3_var,
+        );
+        rel.append_equation(t21_vars[j], d1_vars[j] * t1_vars[j] + w1_vars[j] * h3_var);
     }
 
-    // Eq 3D+3: commitment consistency.
-    let mut terms = c_var * (h1_var * Scalar::ONE) + k_star_var * (h2_var * Scalar::ONE);
+    // Eqs 3+3D..2+6D: ternary range proof over v2 = c + a.
     for j in 0..D {
-        terms = terms + s_vars[j] * (h3_var * pow3[j]);
+        rel.append_equation(com2_vars[j], d2_vars[j] * h1_var + s2_vars[j] * h3_var);
+        rel.append_equation(
+            tc2_vars[j],
+            d2_vars[j] * com2_vars[j] + rho2_vars[j] * h3_var,
+        );
+        rel.append_equation(t22_vars[j], d2_vars[j] * t2_vars[j] + w2_vars[j] * h3_var);
     }
-    rel.append_equation(com_total_var, terms);
+
+    // Eq 6D+3: nullifier commitment opening.
+    rel.append_equation(kn_var, k_star_var * h2_var + rn_var * h3_var);
+
+    // Eqs 6D+4, 6D+5: commitment consistency for both decompositions,
+    // sharing the balance witness c.
+    let mut terms1 = c_var * (h1_var * Scalar::ONE) + s1_vars[0] * (h3_var * pow3[0]);
+    for j in 1..D {
+        terms1 = terms1 + s1_vars[j] * (h3_var * pow3[j]);
+    }
+    rel.append_equation(com_total1_var, terms1);
+    let mut terms2 = c_var * (h1_var * Scalar::ONE) + s2_vars[0] * (h3_var * pow3[0]);
+    for j in 1..D {
+        terms2 = terms2 + s2_vars[j] * (h3_var * pow3[j]);
+    }
+    rel.append_equation(com_total2_var, terms2);
 
     rel
 }
@@ -909,13 +968,19 @@ impl PrivateKey {
     /// Processes a spend proof and issues a refund token for the remaining credits.
     ///
     /// This method validates the public amounts, verifies the spend proof, and, if
-    /// valid, issues a refund for the new balance `c - s + a`, homomorphically adding
-    /// the partial refund amount `t`. The refund allows the client to construct a new
-    /// credit token with balance `c - s + a + t`.
+    /// valid, issues a refund for the post-spend balance `c - s`, homomorphically
+    /// adding the return amount `t`. The refund allows the client to construct a
+    /// new credit token with balance `c - s + t`.
+    ///
+    /// The return amount ranges over `[0, s + a]`, and the issuer chooses it after
+    /// seeing the request: `t = a` grants exactly the authorized top-up, `t < a`
+    /// claws part or all of it back (e.g., when an out-of-band payment fails), and
+    /// `t > a` additionally refunds part of the spent amount. Both endpoints are
+    /// covered by the spend proof's two range proofs, so any choice keeps the
+    /// client's new balance in `[0, 3^D)`.
     ///
     /// A non-zero top-up amount `a` in the spend proof MUST be authorized by
-    /// application policy before calling this method; verifying the proof constitutes
-    /// consent to grant those credits.
+    /// application policy before calling this method.
     ///
     /// # Security Warning
     ///
@@ -927,7 +992,7 @@ impl PrivateKey {
     ///
     /// * `params` - The system parameters
     /// * `spend_proof` - The client's proof of valid spending
-    /// * `t` - The partial refund amount, in `[0, max(0, s - a)]`
+    /// * `t` - The return amount, in `[0, s + a]`
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Example
@@ -974,8 +1039,10 @@ impl PrivateKey {
             return Err(Error::InvalidAmount);
         }
 
-        // Validate the partial refund amount: t <= max(0, s - a).
-        if t > s.saturating_sub(a) {
+        // Validate the return amount: t <= s + a. Both bounds are covered by
+        // the spend proof's range proofs (t = 0 lands on c - s >= 0, and
+        // t = s + a lands on c + a < 3^D).
+        if t > s + a {
             return Err(Error::InvalidRefundAmount);
         }
         let t = Scalar::from(t);
@@ -991,8 +1058,11 @@ impl PrivateKey {
             &spend_proof.a_prime,
             &spend_proof.b_bar,
             &a_bar,
-            &spend_proof.com,
-            &spend_proof.t,
+            &spend_proof.com1,
+            &spend_proof.t1,
+            &spend_proof.com2,
+            &spend_proof.t2,
+            &spend_proof.k_n,
         );
         let verifier = statement
             .into_nizk_with_protocol_id(
@@ -1013,15 +1083,16 @@ impl PrivateKey {
             return Err(Error::InvalidClientSpendProof);
         }
 
-        // Issue a refund for the new balance, adding the partial refund t
-        // homomorphically.
+        // Issue a refund for the post-spend balance, adding the return
+        // amount t homomorphically. K' commits to v1 = c - s and the new
+        // nullifier.
         let pow3 = pow3_scalars();
         let k_prime = spend_proof
-            .com
+            .com1
             .iter()
             .zip(pow3.iter())
             .map(|(com, p)| com * p)
-            .fold(RistrettoPoint::identity(), |acc, x| acc + x);
+            .fold(spend_proof.k_n, |acc, x| acc + x);
 
         let e_star = Scalar::random(&mut rng);
         let g = RistrettoPoint::generator();
@@ -1058,11 +1129,11 @@ impl PrivateKey {
 /// awaiting a refund.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
 pub struct PreRefund {
-    /// A random blinding factor for the new credit token
+    /// The blinding factor for the new credit token
     r: Scalar,
     /// A random identifier for the new credit token
     k: Scalar,
-    /// The new balance after spending and top-up (before the partial refund)
+    /// The post-spend balance c - s (before the return amount)
     v: Scalar,
     /// The request context this spend was bound to
     ctx: Scalar,
@@ -1086,22 +1157,24 @@ impl CreditToken {
 
     /// Creates a zero-knowledge proof for spending credits from this token.
     ///
-    /// This method generates a proof that the client possesses a valid credit token
-    /// such that the new balance `c - s + a` lies in `[0, 3^D)`, without revealing
-    /// the token itself. The proof includes a ternary range proof over the new
-    /// balance and a nullifier to prevent double-spending.
+    /// This method generates a proof that the client possesses a valid credit
+    /// token whose balance covers the spend (`c - s` in `[0, 3^D)`) and leaves
+    /// headroom for the top-up (`c + a` in `[0, 3^D)`), without revealing the
+    /// token itself. The proof carries two ternary range proofs, one per
+    /// bound, and a nullifier to prevent double-spending. The two proven
+    /// values are the endpoints of the settlement corridor: the issuer's
+    /// return amount can later land the final balance anywhere in
+    /// `[c - s, c + a]`.
     ///
     /// The top-up amount `a` is bound into the proof as a public value:
     /// verification fails under any other value, so the issuer authorizes the
     /// top-up by verifying the proof with it. Use `a = 0` for a plain spend.
-    /// Note that `s` may exceed the token balance when the top-up covers the
-    /// difference.
     ///
     /// # Arguments
     ///
     /// * `params` - The system parameters
-    /// * `s` - The amount of credits to spend, in `[0, 3^D)`
-    /// * `a` - The top-up amount, in `[0, 3^D)`; 0 for a plain spend
+    /// * `s` - The amount of credits to spend, at most the token balance
+    /// * `a` - The top-up amount, with `c + a` in `[0, 3^D)`; 0 for a plain spend
     /// * `rng` - A cryptographically secure random number generator
     ///
     /// # Returns
@@ -1138,38 +1211,48 @@ impl CreditToken {
         a: u128,
         rng: impl CryptoRngCore,
     ) -> Result<(SpendProof, PreRefund), Error> {
-        // Validate the amounts and compute the new balance as integers.
+        // Validate the amounts and compute the two proven values as integers.
         if s > MAX_CREDITS || a > MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
         let c = scalar_to_u128(&self.c).ok_or(Error::ScalarOutOfRangeError)?;
-        // c is bounded by MAX_CREDITS in honest flow, but a corrupted or
-        // crafted token could carry a larger c; use checked arithmetic so a
-        // bad token is rejected rather than overflowing.
-        let v = c
-            .checked_add(a)
-            .and_then(|ca| ca.checked_sub(s))
-            .ok_or(Error::InvalidAmount)?;
-        if v > MAX_CREDITS {
+        // The post-spend balance: the spend must be covered by the balance.
+        let v1 = c.checked_sub(s).ok_or(Error::InvalidAmount)?;
+        // The topped-up balance: the top-up must fit under the ceiling. A
+        // corrupted or crafted token could carry a larger c; use checked
+        // arithmetic so a bad token is rejected rather than overflowing.
+        let v2 = c.checked_add(a).ok_or(Error::InvalidAmount)?;
+        if v2 > MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
-        let digits = trits_of(&Scalar::from(v));
+        let digits1 = trits_of(&Scalar::from(v1));
+        let digits2 = trits_of(&Scalar::from(v2));
 
-        self.prove_spend_with_digits(params, Scalar::from(s), Scalar::from(a), &digits, rng)
+        self.prove_spend_with_digits(
+            params,
+            Scalar::from(s),
+            Scalar::from(a),
+            &digits1,
+            &digits2,
+            rng,
+        )
     }
 
     /// Core of the spend proof generation, parameterized by the digit
-    /// decomposition of the new balance. Split out so that tests can exercise
-    /// the protocol with dishonest digit values.
+    /// decompositions of the post-spend balance `c - s` and the topped-up
+    /// balance `c + a`. Split out so that tests can exercise the protocol
+    /// with dishonest digit values.
     fn prove_spend_with_digits(
         &self,
         params: &Params,
         s: Scalar,
         a: Scalar,
-        digits: &[Scalar; D],
+        digits1: &[Scalar; D],
+        digits2: &[Scalar; D],
         mut rng: impl CryptoRngCore,
     ) -> Result<(SpendProof, PreRefund), Error> {
         let pow3 = pow3_scalars();
+        let two = Scalar::from(2u64);
 
         // Randomize the signature.
         let r1 = Scalar::random(&mut rng);
@@ -1184,41 +1267,37 @@ impl CreditToken {
         let r3 = r1.invert();
         let a_bar = b_bar * r2 - a_prime * self.e;
 
-        // Create digit commitments; digit 0 carries the new nullifier k_star.
+        // Create digit and auxiliary commitments for both decompositions:
+        // Com[j] = d[j]*H1 + s[j]*H3, T[j] = (d[j] - 1)*Com[j] + rho[j]*H3,
+        // and the derived zero-constraint witnesses
+        // w[j] = (2 - d[j]) * ((d[j] - 1)*s[j] + rho[j]).
+        let commit = |digits: &[Scalar; D], rng: &mut dyn CryptoRngCore| {
+            let mut s_com = [Scalar::ZERO; D];
+            let mut rho = [Scalar::ZERO; D];
+            let mut com = [RistrettoPoint::identity(); D];
+            let mut t = [RistrettoPoint::identity(); D];
+            let mut w = [Scalar::ZERO; D];
+            for j in 0..D {
+                s_com[j] = Scalar::random(&mut *rng);
+                rho[j] = Scalar::random(&mut *rng);
+                com[j] = &params.h1 * &digits[j] + &params.h3 * &s_com[j];
+                t[j] = com[j] * (digits[j] - Scalar::ONE) + &params.h3 * &rho[j];
+                w[j] = (two - digits[j]) * ((digits[j] - Scalar::ONE) * s_com[j] + rho[j]);
+            }
+            (s_com, rho, com, t, w)
+        };
+        let (s_com1, rho1, com1, t1, w1) = commit(digits1, &mut rng);
+        let (s_com2, rho2, com2, t2, w2) = commit(digits2, &mut rng);
+
+        // Commit to the new token's nullifier: K_n = k_star*H2 + rn*H3.
         let k_star = Scalar::random(&mut rng);
-        let mut s_com = [Scalar::ZERO; D];
-        for s_j in s_com.iter_mut() {
-            *s_j = Scalar::random(&mut rng);
-        }
-        let mut com = [RistrettoPoint::identity(); D];
-        com[0] = &params.h1 * &digits[0] + &params.h2 * &k_star + &params.h3 * &s_com[0];
-        for j in 1..D {
-            com[j] = &params.h1 * &digits[j] + &params.h3 * &s_com[j];
-        }
-
-        // Create auxiliary commitments T[j] = (d[j] - 1)*Com[j] + rho[j]*H3.
-        let mut rho = [Scalar::ZERO; D];
-        for rho_j in rho.iter_mut() {
-            *rho_j = Scalar::random(&mut rng);
-        }
-        let mut t = [RistrettoPoint::identity(); D];
-        for j in 0..D {
-            t[j] = com[j] * (digits[j] - Scalar::ONE) + &params.h3 * &rho[j];
-        }
-
-        // Witness values for the zero constraint equations:
-        // w[j] = (2 - d[j]) * ((d[j] - 1)*s[j] + rho[j]),
-        // k3 = (2 - d[0]) * (d[0] - 1) * k_star.
-        let two = Scalar::from(2u64);
-        let mut w = [Scalar::ZERO; D];
-        for j in 0..D {
-            w[j] = (two - digits[j]) * ((digits[j] - Scalar::ONE) * s_com[j] + rho[j]);
-        }
-        let k3 = (two - digits[0]) * (digits[0] - Scalar::ONE) * k_star;
+        let rn = Scalar::random(&mut rng);
+        let k_n = &params.h2 * &k_star + &params.h3 * &rn;
 
         // Build the statement and prove it.
         let statement = spend_statement(
-            params, &self.k, &s, &a, &self.ctx, &a_prime, &b_bar, &a_bar, &com, &t,
+            params, &self.k, &s, &a, &self.ctx, &a_prime, &b_bar, &a_bar, &com1, &t1, &com2,
+            &t2, &k_n,
         );
         let prover = statement
             .into_nizk_with_protocol_id(
@@ -1229,38 +1308,43 @@ impl CreditToken {
 
         // The witness holds the token's long-term secrets (e, c, r) and the
         // fresh proof secrets; wrap it so the heap buffer is zeroized on drop.
-        let mut witness = Zeroizing::new(Vec::with_capacity(4 * D + 7));
+        let mut witness = Zeroizing::new(Vec::with_capacity(8 * D + 7));
         witness.push(self.e);
         witness.push(r2);
         witness.push(r3);
         witness.push(self.c);
         witness.push(self.r);
-        witness.extend_from_slice(&digits[..]);
-        witness.extend_from_slice(&s_com);
-        witness.extend_from_slice(&rho);
-        witness.extend_from_slice(&w);
+        witness.extend_from_slice(&digits1[..]);
+        witness.extend_from_slice(&s_com1);
+        witness.extend_from_slice(&rho1);
+        witness.extend_from_slice(&w1);
+        witness.extend_from_slice(&digits2[..]);
+        witness.extend_from_slice(&s_com2);
+        witness.extend_from_slice(&rho2);
+        witness.extend_from_slice(&w2);
         witness.push(k_star);
-        witness.push(k3);
+        witness.push(rn);
         let pok = prover
             .prove_compact(&witness, &mut rng)
             .map_err(|_| Error::InvalidClientSpendProof)?;
 
-        // The new balance and its blinding factor under the summed commitment.
-        let v = digits
+        // The post-spend balance and the blinding factor of the refund
+        // commitment K' = K_n + sum_j 3^j*Com1[j].
+        let v1 = digits1
             .iter()
             .zip(pow3.iter())
             .map(|(d, p)| d * p)
             .fold(Scalar::ZERO, |acc, x| acc + x);
-        let r_star = s_com
+        let r_star = s_com1
             .iter()
             .zip(pow3.iter())
             .map(|(s_j, p)| s_j * p)
-            .fold(Scalar::ZERO, |acc, x| acc + x);
+            .fold(rn, |acc, x| acc + x);
 
         let prerefund = PreRefund {
             k: k_star,
             r: r_star,
-            v,
+            v: v1,
             ctx: self.ctx,
         };
 
@@ -1272,8 +1356,11 @@ impl CreditToken {
                 ctx: self.ctx,
                 a_prime,
                 b_bar,
-                com,
-                t,
+                com1,
+                t1,
+                com2,
+                t2,
+                k_n,
                 pok,
             },
             prerefund,
@@ -1310,8 +1397,9 @@ impl PreRefund {
     /// Constructs a new credit token from the refund response.
     ///
     /// This method verifies the issuer's refund response and, if valid, creates a new
-    /// credit token with balance `c - s + a + t`. This completes the spending protocol
-    /// by providing the client with a new token for their unspent credits.
+    /// credit token with balance `c - s + t`, where `t` is the issuer-chosen return
+    /// amount in `[0, s + a]`. This completes the spending protocol by providing the
+    /// client with a new token for their unspent credits.
     ///
     /// # Arguments
     ///
@@ -1353,9 +1441,15 @@ impl PreRefund {
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, Error> {
-        // Validate the refund amount and the new balance as integers.
+        // Validate the return amount against the spend proof's public
+        // amounts, and the new balance as integers.
         let t = scalar_to_u128(&refund.t).ok_or(Error::ScalarOutOfRangeError)?;
-        if t > MAX_CREDITS {
+        let s = scalar_to_u128(&spend_proof.s).ok_or(Error::ScalarOutOfRangeError)?;
+        let a = scalar_to_u128(&spend_proof.a).ok_or(Error::ScalarOutOfRangeError)?;
+        if s > MAX_CREDITS || a > MAX_CREDITS {
+            return Err(Error::InvalidAmount);
+        }
+        if t > s + a {
             return Err(Error::InvalidRefundAmount);
         }
         let v = scalar_to_u128(&self.v).ok_or(Error::ScalarOutOfRangeError)?;
@@ -1365,15 +1459,16 @@ impl PreRefund {
             return Err(Error::InvalidRefundAmount);
         }
 
-        // Reconstruct the summed commitment to the new balance.
+        // Reconstruct the commitment to the post-spend balance and the new
+        // nullifier: K' = K_n + sum_j 3^j*Com1[j].
         let pow3 = pow3_scalars();
         let g = RistrettoPoint::generator();
         let k_prime = spend_proof
-            .com
+            .com1
             .iter()
             .zip(pow3.iter())
             .map(|(com, p)| com * p)
-            .fold(RistrettoPoint::identity(), |acc, x| acc + x);
+            .fold(spend_proof.k_n, |acc, x| acc + x);
         // Reconstruct against the context bound in the client's own state, so
         // that pairing this PreRefund with a spend proof or refund from a
         // different context fails verification rather than silently minting an

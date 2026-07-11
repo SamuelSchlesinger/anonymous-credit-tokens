@@ -305,11 +305,15 @@ fn test_topup_basic() {
     let private_key = PrivateKey::random(OsRng);
     let token = issue_token(&params, &private_key, 100, test_ctx());
 
-    // Spend 30 while topping up 50: new balance 120.
+    // Spend 30 while topping up 50: the issuer grants the top-up by
+    // setting the return amount t = a = 50, so the new balance is
+    // 100 - 30 + 50 = 120.
     let (spend_proof, prerefund) = token.prove_spend(&params, 30, 50, OsRng).unwrap();
     assert_eq!(spend_proof.charge(), Scalar::from(30u64));
     assert_eq!(spend_proof.topup(), Scalar::from(50u64));
-    let refund = private_key.refund(&params, &spend_proof, 0, OsRng).unwrap();
+    let refund = private_key
+        .refund(&params, &spend_proof, 50, OsRng)
+        .unwrap();
     let token = prerefund
         .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
@@ -321,26 +325,36 @@ fn test_topup_basic() {
 }
 
 #[test]
-fn test_topup_covers_spend_beyond_balance() {
+fn test_topup_clawback() {
     let params = test_params();
     let private_key = PrivateKey::random(OsRng);
-    let token = issue_token(&params, &private_key, 10, test_ctx());
+    let token = issue_token(&params, &private_key, 100, test_ctx());
 
-    // s may exceed the balance when the top-up covers the difference:
-    // v = 10 - 200 + 300 = 110.
-    let token = spend_round(&params, &private_key, &token, 200, 300, 0).unwrap();
-    assert_eq!(token.credits(), Scalar::from(110u64));
+    // The issuer declines a declared top-up (e.g., the out-of-band payment
+    // failed) by setting t = 0: the client is charged the spend and gains
+    // nothing.
+    let (spend_proof, prerefund) = token.prove_spend(&params, 30, 50, OsRng).unwrap();
+    let refund = private_key.refund(&params, &spend_proof, 0, OsRng).unwrap();
+    let token = prerefund
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(token.credits(), Scalar::from(70u64));
 }
 
 #[test]
-fn test_topup_insufficient_balance_rejected() {
+fn test_spend_beyond_balance_rejected_even_with_topup() {
     let params = test_params();
     let private_key = PrivateKey::random(OsRng);
     let token = issue_token(&params, &private_key, 10, test_ctx());
 
-    // v = 10 - 200 + 100 < 0: rejected client-side.
+    // The floor range proof requires s <= c regardless of the top-up:
+    // spends are covered by the balance alone.
     assert_eq!(
-        token.prove_spend(&params, 200, 100, OsRng).err(),
+        token.prove_spend(&params, 200, 300, OsRng).err(),
+        Some(Error::InvalidAmount)
+    );
+    assert_eq!(
+        token.prove_spend(&params, 11, 1, OsRng).err(),
         Some(Error::InvalidAmount)
     );
 }
@@ -368,55 +382,70 @@ fn test_topup_exceeding_max_rejected() {
 }
 
 #[test]
-fn test_refund_bound_accounts_for_topup() {
+fn test_settlement_corridor() {
     let params = test_params();
     let private_key = PrivateKey::random(OsRng);
     let token = issue_token(&params, &private_key, 100, test_ctx());
 
-    // With s = 50 and a = 20, the partial refund is bounded by s - a = 30.
+    // With s = 50 and a = 20, the return amount ranges over [0, 70]:
+    // the corridor of reachable balances is [50, 120].
     let (spend_proof, prerefund) = token.prove_spend(&params, 50, 20, OsRng).unwrap();
     assert_eq!(
-        private_key.refund(&params, &spend_proof, 31, OsRng).err(),
+        private_key.refund(&params, &spend_proof, 71, OsRng).err(),
         Some(Error::InvalidRefundAmount)
     );
+    // The upper endpoint: full refund plus the whole top-up, landing on the
+    // ceiling-proved balance c + a = 120, above the original balance.
+    let refund = private_key
+        .refund(&params, &spend_proof, 70, OsRng)
+        .unwrap();
+    let token = prerefund
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(token.credits(), Scalar::from(120u64));
+
+    // The lower endpoint: t = 0 lands on the floor-proved balance c - s.
+    let (spend_proof, prerefund) = token.prove_spend(&params, 50, 20, OsRng).unwrap();
+    let refund = private_key.refund(&params, &spend_proof, 0, OsRng).unwrap();
+    let token = prerefund
+        .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+        .unwrap();
+    assert_eq!(token.credits(), Scalar::from(70u64));
+
+    // An interior point: grant the top-up and refund 10 of the spend.
+    let (spend_proof, prerefund) = token.prove_spend(&params, 50, 20, OsRng).unwrap();
     let refund = private_key
         .refund(&params, &spend_proof, 30, OsRng)
         .unwrap();
     let token = prerefund
         .to_credit_token(&params, &spend_proof, &refund, private_key.public())
         .unwrap();
-    // 100 - 50 + 20 + 30 = 100.
-    assert_eq!(token.credits(), Scalar::from(100u64));
-
-    // With a > s, no partial refund is allowed at all.
-    let (spend_proof, _) = token.prove_spend(&params, 50, 60, OsRng).unwrap();
-    assert_eq!(
-        private_key.refund(&params, &spend_proof, 1, OsRng).err(),
-        Some(Error::InvalidRefundAmount)
-    );
-    assert!(private_key.refund(&params, &spend_proof, 0, OsRng).is_ok());
+    // 70 - 50 + 30 = 50.
+    assert_eq!(token.credits(), Scalar::from(50u64));
 }
 
 // ===== AMOUNT VALIDATION AND WRAPAROUND =====
 
 /// A malicious client crafts a spend whose public amount wraps around the
-/// group order: with balance c and claimed remainder v, the scalar relation
-/// v = c - s + a (mod q) holds for s = c - v mod q even when v is enormous.
-/// The sigma protocol proof VERIFIES (the relation is true in the scalar
-/// field); only the issuer's integer validation of s blocks the attack.
+/// group order: with balance c and claimed post-spend balance v1, the scalar
+/// relation v1 = c - s (mod q) holds for s = c - v1 mod q even when v1 is
+/// enormous. The sigma protocol proof VERIFIES (the relation is true in the
+/// scalar field); only the issuer's integer validation of s blocks the attack.
 #[test]
 fn test_wraparound_attack_is_blocked_by_amount_validation() {
     let params = test_params();
     let private_key = PrivateKey::random(OsRng);
     let token = issue_token(&params, &private_key, 5, test_ctx());
 
-    // Claim the maximum possible remainder.
-    let v_target = MAX_CREDITS;
-    let digits = trits_of(&Scalar::from(v_target));
-    // s = c - v mod q: a "spend" that inflates the balance to v_target.
-    let s_scalar = Scalar::from(5u64) - Scalar::from(v_target);
+    // Claim the maximum possible post-spend balance.
+    let v1_target = MAX_CREDITS;
+    let digits1 = trits_of(&Scalar::from(v1_target));
+    // The ceiling decomposition stays honest: v2 = c + 0 = 5.
+    let digits2 = trits_of(&Scalar::from(5u64));
+    // s = c - v1 mod q: a "spend" that inflates the balance to v1_target.
+    let s_scalar = Scalar::from(5u64) - Scalar::from(v1_target);
     let (spend_proof, _prerefund) = token
-        .prove_spend_with_digits(&params, s_scalar, Scalar::ZERO, &digits, OsRng)
+        .prove_spend_with_digits(&params, s_scalar, Scalar::ZERO, &digits1, &digits2, OsRng)
         .unwrap();
 
     // Demonstrate the attack is real at the proof layer: the sigma protocol
@@ -431,8 +460,11 @@ fn test_wraparound_attack_is_blocked_by_amount_validation() {
         &spend_proof.a_prime,
         &spend_proof.b_bar,
         &a_bar,
-        &spend_proof.com,
-        &spend_proof.t,
+        &spend_proof.com1,
+        &spend_proof.t1,
+        &spend_proof.com2,
+        &spend_proof.t2,
+        &spend_proof.k_n,
     );
     let verifier = statement
         .into_nizk_with_protocol_id(
@@ -462,8 +494,8 @@ fn test_wraparound_attack_is_blocked_by_amount_validation() {
 }
 
 /// Same idea with the top-up amount: a top-up scalar that wraps around the
-/// group order (here a = -1 mod q, a "negative top-up" that silently drains
-/// one credit) satisfies the scalar relation but must be rejected by the
+/// group order (here a = -1 mod q, a "negative top-up") satisfies the scalar
+/// relation v2 = c + a (mod q) with v2 = 4, but must be rejected by the
 /// issuer's integer validation of a.
 #[test]
 fn test_wraparound_topup_is_blocked_by_amount_validation() {
@@ -471,12 +503,14 @@ fn test_wraparound_topup_is_blocked_by_amount_validation() {
     let private_key = PrivateKey::random(OsRng);
     let token = issue_token(&params, &private_key, 5, test_ctx());
 
-    // With s = 0 and a = -1 mod q, the claimed remainder v = 5 - 1 = 4
-    // satisfies v = c - s + a in the scalar field.
-    let digits = trits_of(&Scalar::from(4u64));
+    // With s = 0 the floor decomposition stays honest: v1 = 5. With
+    // a = -1 mod q, the claimed topped-up balance v2 = 5 - 1 = 4 satisfies
+    // v2 = c + a in the scalar field.
+    let digits1 = trits_of(&Scalar::from(5u64));
+    let digits2 = trits_of(&Scalar::from(4u64));
     let a_scalar = Scalar::ZERO - Scalar::ONE;
     let (spend_proof, _) = token
-        .prove_spend_with_digits(&params, Scalar::ZERO, a_scalar, &digits, OsRng)
+        .prove_spend_with_digits(&params, Scalar::ZERO, a_scalar, &digits1, &digits2, OsRng)
         .unwrap();
 
     // a does not decode as a credit amount, so the issuer rejects it
@@ -502,8 +536,9 @@ fn test_spend_amounts_are_individually_bound() {
     // Baseline: the honest proof verifies.
     assert!(private_key.refund(&params, &spend_proof, 0, OsRng).is_ok());
 
-    // Shift (s, a) -> (s + 5, a + 5): v is unchanged, and both remain valid
-    // credit amounts, but the proof was bound to the original s and a.
+    // Shift (s, a) -> (s + 5, a + 5): under the dual-proof statement each
+    // amount is constrained by its own consistency equation, so the shifted
+    // pair must not verify.
     let mut shifted = spend_proof.clone();
     shifted.s += Scalar::from(5u64);
     shifted.a += Scalar::from(5u64);
@@ -532,17 +567,23 @@ fn test_forged_digit_rejected() {
     let private_key = PrivateKey::random(OsRng);
     let token = issue_token(&params, &private_key, 3, test_ctx());
 
-    // Represent the remainder 3 as a single digit of value 3 instead of
-    // the honest [0, 1, 0, ...]. The consistency equation still balances,
-    // so only the ternary constraint can catch this.
-    let mut digits = [Scalar::ZERO; D];
-    digits[0] = Scalar::from(3u64);
+    // Represent the post-spend balance 3 as a single digit of value 3
+    // instead of the honest [0, 1, 0, ...]. The consistency equation still
+    // balances, so only the ternary constraint can catch this.
+    let mut digits1 = [Scalar::ZERO; D];
+    digits1[0] = Scalar::from(3u64);
+    let digits2 = trits_of(&Scalar::from(3u64));
 
     // The proving backend may refuse to prove the false statement outright;
     // if it produced a proof, the issuer must reject it.
-    if let Ok((spend_proof, _)) =
-        token.prove_spend_with_digits(&params, Scalar::ZERO, Scalar::ZERO, &digits, OsRng)
-    {
+    if let Ok((spend_proof, _)) = token.prove_spend_with_digits(
+        &params,
+        Scalar::ZERO,
+        Scalar::ZERO,
+        &digits1,
+        &digits2,
+        OsRng,
+    ) {
         assert_eq!(
             private_key.refund(&params, &spend_proof, 0, OsRng).err(),
             Some(Error::InvalidClientSpendProof)
@@ -604,12 +645,27 @@ fn test_tampered_spend_proof_rejected() {
     }
     {
         let mut p = spend_proof.clone();
-        p.com[D - 1] += RistrettoPoint::generator();
+        p.com1[D - 1] += RistrettoPoint::generator();
         assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
     }
     {
         let mut p = spend_proof.clone();
-        p.t[D / 2] += RistrettoPoint::generator();
+        p.t1[D / 2] += RistrettoPoint::generator();
+        assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
+    }
+    {
+        let mut p = spend_proof.clone();
+        p.com2[0] += RistrettoPoint::generator();
+        assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
+    }
+    {
+        let mut p = spend_proof.clone();
+        p.t2[D - 1] += RistrettoPoint::generator();
+        assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
+    }
+    {
+        let mut p = spend_proof.clone();
+        p.k_n += RistrettoPoint::generator();
         assert!(private_key.refund(&params, &p, 0, OsRng).is_err());
     }
     {
@@ -776,13 +832,16 @@ fn test_full_lifecycle_with_mixed_operations() {
     let mut token = issue_token(&params, &private_key, 1000, ctx);
     let mut expected: u128 = 1000;
 
-    // (spend, topup, refund) operations.
-    let operations: [(u128, u128, u128); 5] = [
-        (50, 0, 0),
-        (100, 0, 30),
-        (200, 500, 0),
-        (600, 0, 100),
-        (0, 25, 0),
+    // (spend, topup, return) operations exercising the whole corridor:
+    // plain spends, metered refunds, granted top-ups, a clawback, and a
+    // pure top-up.
+    let operations: [(u128, u128, u128); 6] = [
+        (50, 0, 0),      // plain spend:            950
+        (100, 0, 30),    // metered, return 30:     880
+        (200, 500, 700), // grant top-up + cancel:  1380
+        (600, 0, 100),   // metered, return 100:    880
+        (100, 300, 0),   // clawback (payment failed): 780
+        (0, 25, 25),     // pure top-up granted:    805
     ];
 
     for (s, a, t) in operations {
@@ -793,10 +852,10 @@ fn test_full_lifecycle_with_mixed_operations() {
         token = prerefund
             .to_credit_token(&params, &spend_proof, &refund, private_key.public())
             .unwrap();
-        expected = expected - s + a + t;
+        expected = expected - s + t;
         assert_eq!(token.credits(), Scalar::from(expected));
     }
-    assert_eq!(expected, 1000 - 50 - 70 + 300 - 500 + 25);
+    assert_eq!(expected, 805);
 }
 
 // ===== PROPERTY-BASED TESTS =====
@@ -814,42 +873,87 @@ fn point_strategy() -> impl Strategy<Value = RistrettoPoint> {
 proptest! {
     #![proptest_config(fast_config())]
 
-    /// Balances are conserved through spend/top-up/refund rounds:
-    /// final = c - s + a + t.
+    /// Balances are conserved through spend/top-up/return rounds:
+    /// final = c - s + t for any return amount t in [0, s + a].
     #[test]
     fn prop_balance_conservation(
         c in 0u128..=MAX_CREDITS / 2,
-        s in 0u128..=MAX_CREDITS,
+        s_frac in 0u128..=100,
         a in 0u128..=MAX_CREDITS / 2,
         t_frac in 0u128..=100,
     ) {
-        prop_assume!(c + a >= s);
-        let t = (s.saturating_sub(a)) * t_frac / 100;
+        let s = c * s_frac / 100;
+        let t = (s + a) * t_frac / 100;
 
         let params = test_params();
         let private_key = PrivateKey::random(OsRng);
         let token = issue_token(&params, &private_key, c, test_ctx());
         let new_token = spend_round(&params, &private_key, &token, s, a, t).unwrap();
-        prop_assert_eq!(new_token.credits(), Scalar::from(c + a + t - s));
+        prop_assert_eq!(new_token.credits(), Scalar::from(c - s + t));
     }
 
-    /// Spending more than c + a always fails client-side.
+    /// Every point of the settlement corridor [c - s, c + a] is reachable:
+    /// the issuer settles at any target f by returning t = f - (c - s).
+    #[test]
+    fn prop_corridor_reachability(
+        c in 0u128..=MAX_CREDITS / 2,
+        s_frac in 0u128..=100,
+        a in 0u128..=MAX_CREDITS / 2,
+        f_frac in 0u128..=100,
+    ) {
+        let s = c * s_frac / 100;
+        // A settlement target anywhere in [c - s, c + a].
+        let f = (c - s) + (s + a) * f_frac / 100;
+        let t = f - (c - s);
+
+        let params = test_params();
+        let private_key = PrivateKey::random(OsRng);
+        let token = issue_token(&params, &private_key, c, test_ctx());
+        let new_token = spend_round(&params, &private_key, &token, s, a, t).unwrap();
+        prop_assert_eq!(new_token.credits(), Scalar::from(f));
+        // The reached balance is itself a valid credit amount.
+        prop_assert!(f <= MAX_CREDITS);
+    }
+
+    /// Spending more than the balance always fails client-side, no matter
+    /// the declared top-up: the floor proof needs s <= c.
     #[test]
     fn prop_overspend_always_fails(
         c in 0u128..=MAX_CREDITS / 2,
         a in 0u128..=MAX_CREDITS / 2,
-        excess in 1u128..=MAX_CREDITS,
+        excess in 1u128..=MAX_CREDITS / 2,
     ) {
         let params = test_params();
         let private_key = PrivateKey::random(OsRng);
         let token = issue_token(&params, &private_key, c, test_ctx());
         prop_assert_eq!(
-            token.prove_spend(&params, c + a + excess, a, OsRng).err(),
+            token.prove_spend(&params, c + excess, a, OsRng).err(),
             Some(Error::InvalidAmount)
         );
     }
 
-    /// Partial refunds beyond max(0, s - a) always fail issuer-side.
+    /// A top-up that would lift the balance past the ceiling always fails
+    /// client-side: the ceiling proof needs c + a < 3^D.
+    #[test]
+    fn prop_ceiling_always_enforced(
+        c in 1u128..=MAX_CREDITS,
+        s_frac in 0u128..=100,
+        excess in 1u128..=MAX_CREDITS,
+    ) {
+        let a = MAX_CREDITS - c + excess; // c + a = MAX_CREDITS + excess
+        prop_assume!(a <= MAX_CREDITS);
+        let s = c * s_frac / 100;
+
+        let params = test_params();
+        let private_key = PrivateKey::random(OsRng);
+        let token = issue_token(&params, &private_key, c, test_ctx());
+        prop_assert_eq!(
+            token.prove_spend(&params, s, a, OsRng).err(),
+            Some(Error::InvalidAmount)
+        );
+    }
+
+    /// Return amounts beyond s + a always fail issuer-side.
     #[test]
     fn prop_excess_refund_always_fails(
         c in 0u128..=MAX_CREDITS / 2,
@@ -862,11 +966,89 @@ proptest! {
         let s = c * s_frac / 100;
         let token = issue_token(&params, &private_key, c, test_ctx());
         let (spend_proof, _) = token.prove_spend(&params, s, a, OsRng).unwrap();
-        let t = s.saturating_sub(a) + excess;
+        let t = s + a + excess;
         prop_assert_eq!(
             private_key.refund(&params, &spend_proof, t, OsRng).err(),
             Some(Error::InvalidRefundAmount)
         );
+    }
+
+    /// A dishonest decomposition of either proven value is rejected: the
+    /// consistency equations tie both digit vectors to the real balance, so
+    /// either the prover cannot produce the proof or the issuer rejects it.
+    #[test]
+    fn prop_forged_decomposition_rejected(
+        c in 1u128..=MAX_CREDITS / 2,
+        s_frac in 1u128..=100,
+        a in 0u128..=MAX_CREDITS / 2,
+        delta in 1u128..=1000,
+        forge_floor in any::<bool>(),
+    ) {
+        let params = test_params();
+        let private_key = PrivateKey::random(OsRng);
+        let s = 1 + (c - 1) * s_frac / 100;
+        let token = issue_token(&params, &private_key, c, test_ctx());
+
+        // Forge one decomposition to a wrong (in-range) value; keep the
+        // other honest.
+        let honest1 = c - s;
+        let honest2 = c + a;
+        let (v1, v2) = if forge_floor {
+            ((honest1 + delta) % (MAX_CREDITS + 1), honest2)
+        } else {
+            (honest1, (honest2 + delta) % (MAX_CREDITS + 1))
+        };
+        prop_assume!(v1 != honest1 || v2 != honest2);
+        let digits1 = trits_of(&Scalar::from(v1));
+        let digits2 = trits_of(&Scalar::from(v2));
+
+        let result = token.prove_spend_with_digits(
+            &params,
+            Scalar::from(s),
+            Scalar::from(a),
+            &digits1,
+            &digits2,
+            OsRng,
+        );
+        if let Ok((spend_proof, _)) = result {
+            prop_assert_eq!(
+                private_key.refund(&params, &spend_proof, 0, OsRng).err(),
+                Some(Error::InvalidClientSpendProof)
+            );
+        }
+    }
+
+    /// A random multi-round chain conserves the balance under arbitrary
+    /// valid (spend, top-up, return) choices, exercising refund-token
+    /// chaining end to end.
+    #[test]
+    fn prop_random_chain_conserves_balance(
+        c0 in 0u128..=MAX_CREDITS / 2,
+        ops in prop::collection::vec(
+            (0u128..=100, 0u128..=MAX_CREDITS / 8, 0u128..=100), 1..=4),
+    ) {
+        let params = test_params();
+        let private_key = PrivateKey::random(OsRng);
+        let mut db = NullifierDb::new();
+        let mut token = issue_token(&params, &private_key, c0, test_ctx());
+        let mut expected = c0;
+
+        for (s_frac, a_raw, t_frac) in ops {
+            let s = expected * s_frac / 100;
+            let a = a_raw.min(MAX_CREDITS - expected);
+            let t = (s + a) * t_frac / 100;
+
+            let (spend_proof, prerefund) =
+                token.prove_spend(&params, s, a, OsRng).unwrap();
+            prop_assert!(!db.is_spent(&spend_proof.nullifier()));
+            db.record_spent(&spend_proof.nullifier());
+            let refund = private_key.refund(&params, &spend_proof, t, OsRng).unwrap();
+            token = prerefund
+                .to_credit_token(&params, &spend_proof, &refund, private_key.public())
+                .unwrap();
+            expected = expected - s + t;
+            prop_assert_eq!(token.credits(), Scalar::from(expected));
+        }
     }
 
     /// TritDecompose roundtrips over the full credit range.
@@ -921,8 +1103,9 @@ proptest! {
         let bytes = spend_proof.to_bytes();
         let decoded = SpendProof::from_bytes(&bytes).unwrap();
 
-        // The decoded proof still verifies and refunds correctly.
-        let refund = private_key.refund(&params, &decoded, 0, OsRng).unwrap();
+        // The decoded proof still verifies and refunds correctly; the
+        // issuer grants the declared top-up (t = a).
+        let refund = private_key.refund(&params, &decoded, a, OsRng).unwrap();
         let new_token = prerefund
             .to_credit_token(&params, &decoded, &refund, private_key.public())
             .unwrap();
