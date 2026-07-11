@@ -6,7 +6,7 @@ use rand_core::OsRng;
 use std::sync::Arc;
 
 // Create a shared parameter object once for all benchmarks
-fn create_params() -> Arc<Params> {
+fn create_params() -> Arc<Params<8>> {
     Arc::new(Params::new(
         "bench-org",
         "bench-service",
@@ -21,7 +21,7 @@ fn bench_ctx() -> Scalar {
 
 /// Issues a fresh token with a random balance in [20, 1000) and returns it
 /// together with the issuing key and a random charge below the balance.
-fn setup_token(params: &Params) -> (PrivateKey, CreditToken, u128) {
+fn setup_token(params: &Params<8>) -> (PrivateKey, CreditToken, u128) {
     let private_key = PrivateKey::random(OsRng);
     let preissuance = PreIssuance::random(OsRng);
     let issuance_request = preissuance.request(params, OsRng);

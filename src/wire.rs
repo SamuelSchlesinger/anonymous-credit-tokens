@@ -35,7 +35,7 @@
 //! not protocol messages.
 
 use crate::{
-    CreditToken, D, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund, PrivateKey,
+    CreditToken, IssuanceRequest, IssuanceResponse, PreIssuance, PreRefund, PrivateKey,
     PublicKey, Refund, SpendProof,
 };
 use curve25519_dalek::ristretto::CompressedRistretto;
@@ -64,8 +64,11 @@ const NS: usize = 32;
 pub const ISSUANCE_REQUEST_SIZE: usize = 130;
 /// The exact wire size of IssuanceResponseMsg: Ne + 4*Ns + 2.
 pub const ISSUANCE_RESPONSE_SIZE: usize = 162;
-/// The exact wire size of SpendProofMsg: (4D+3)*Ne + (8D+12)*Ns + 2.
-pub const SPEND_PROOF_SIZE: usize = 384 * D + 482;
+/// The exact wire size of SpendProofMsg for a given digit count D:
+/// (4D+3)*Ne + (8D+12)*Ns + 2.
+pub const fn spend_proof_size(d: usize) -> usize {
+    384 * d + 482
+}
 /// The exact wire size of RefundMsg: Ne + 4*Ns + 2.
 pub const REFUND_SIZE: usize = 162;
 
@@ -199,7 +202,7 @@ impl IssuanceResponse {
     }
 }
 
-impl SpendProof {
+impl<const D: usize> SpendProof<D> {
     /// Encodes this message as a SpendProofMsg:
     ///
     /// ```text
@@ -219,7 +222,7 @@ impl SpendProof {
     /// } SpendProofMsg;
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(SPEND_PROOF_SIZE);
+        let mut out = Vec::with_capacity(spend_proof_size(D));
         put_scalar(&mut out, &self.k);
         put_scalar(&mut out, &self.s);
         put_scalar(&mut out, &self.a);
@@ -249,6 +252,7 @@ impl SpendProof {
     /// the issuer's IdentityPointError check in refund processing covers
     /// proofs constructed in memory.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WireError> {
+        const { assert!(D >= 1 && D <= crate::MAX_DIGITS, "D must be in 1..=MAX_DIGITS") };
         let mut r = Reader::new(bytes);
         let k = r.scalar()?;
         let s = r.scalar()?;
@@ -436,7 +440,9 @@ mod tests {
     use super::*;
     use rand_core::OsRng;
 
-    fn setup() -> (crate::Params, PrivateKey, CreditToken) {
+    const D: usize = 8;
+
+    fn setup() -> (crate::Params<D>, PrivateKey, CreditToken) {
         let params = crate::Params::new("wire-org", "wire-svc", "test", "2024-01-01");
         let private_key = PrivateKey::random(OsRng);
         let pre = PreIssuance::random(OsRng);
@@ -455,7 +461,8 @@ mod tests {
     /// draft's performance table, and roundtrip through the wire format.
     #[test]
     fn test_message_sizes_and_roundtrips() {
-        let params = crate::Params::new("wire-org", "wire-svc", "test", "2024-01-01");
+        let params: crate::Params<D> =
+            crate::Params::new("wire-org", "wire-svc", "test", "2024-01-01");
         let private_key = PrivateKey::random(OsRng);
         let pre = PreIssuance::random(OsRng);
         let ctx = Scalar::from(7u64);
@@ -480,8 +487,8 @@ mod tests {
             .unwrap();
         let (spend_proof, prerefund) = token.prove_spend(&params, 30, 5, OsRng).unwrap();
         let spend_bytes = spend_proof.to_bytes();
-        assert_eq!(spend_bytes.len(), SPEND_PROOF_SIZE);
-        let spend_proof2 = SpendProof::from_bytes(&spend_bytes).unwrap();
+        assert_eq!(spend_bytes.len(), spend_proof_size(D));
+        let spend_proof2 = SpendProof::<D>::from_bytes(&spend_bytes).unwrap();
 
         // The decoded proof still verifies and refunds correctly.
         let refund = private_key
@@ -541,28 +548,28 @@ mod tests {
 
         // Truncated input.
         assert_eq!(
-            SpendProof::from_bytes(&bytes[..bytes.len() - 1]).err(),
+            SpendProof::<D>::from_bytes(&bytes[..bytes.len() - 1]).err(),
             Some(WireError::TooShort)
         );
         // Trailing bytes.
         let mut extended = bytes.clone();
         extended.push(0);
         assert_eq!(
-            SpendProof::from_bytes(&extended).err(),
+            SpendProof::<D>::from_bytes(&extended).err(),
             Some(WireError::TrailingBytes)
         );
         // Identity point (32 zero bytes) in A_prime's position.
         let mut identity_point = bytes.clone();
         identity_point[128..160].fill(0);
         assert_eq!(
-            SpendProof::from_bytes(&identity_point).err(),
+            SpendProof::<D>::from_bytes(&identity_point).err(),
             Some(WireError::InvalidPoint)
         );
         // Non-canonical scalar (order + 1 <=> all-ones high bits) for k.
         let mut bad_scalar = bytes.clone();
         bad_scalar[0..32].fill(0xff);
         assert_eq!(
-            SpendProof::from_bytes(&bad_scalar).err(),
+            SpendProof::<D>::from_bytes(&bad_scalar).err(),
             Some(WireError::InvalidScalar)
         );
         // Zero-length pok.

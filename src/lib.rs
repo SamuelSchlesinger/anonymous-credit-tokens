@@ -129,24 +129,23 @@ pub enum Error {
 // PrivateKey::refund), so this library never raises a double-spend error; the
 // caller records nullifiers and rejects reuse with its own error type.
 
-/// The number of base-3 digits used in the range proof decomposition.
+/// The largest safe number of base-3 digits for the range proof
+/// decomposition.
 ///
 /// The ACT specification treats D as a deployment parameter with
-/// `D <= MAX_DIGITS = 80` (the largest D for which 3^D < 2^127, so every
+/// `D <= MAX_DIGITS = 80`: the largest D for which 3^D < 2^127, so every
 /// credit amount fits the u128 encoding while keeping 3^D + 2^128 far below
-/// the group order; see the specification's security considerations on
-/// amount validation and modular wraparound).
+/// the group order (see the specification's security considerations on
+/// amount validation and modular wraparound). Every entry point asserts
+/// `1 <= D <= MAX_DIGITS` at monomorphization time.
 ///
-/// This branch fixes D = 8 — balances in [0, 6561) — sized for
-/// rate-limiting-style deployments (MoLE). The spend proof is linear in D
+/// D is a const generic parameter of [`Params`], from which it flows to
+/// every protocol operation by inference. The spend proof is linear in D
 /// (384*D + 482 bytes on the wire), so small D keeps presentations inside
-/// ordinary HTTP header budgets: 3,554 bytes at D = 8 versus 31,202 at
-/// D = 80. Making D a const generic so one build supports several
-/// deployments remains TODO.
-pub const D: usize = 8;
-
-/// The maximum credit amount representable in a token: 3^D - 1.
-pub const MAX_CREDITS: u128 = 3u128.pow(D as u32) - 1;
+/// ordinary HTTP header budgets: 3,554 bytes at D = 8 (balances in
+/// [0, 6561), sized for rate-limiting-style deployments such as MoLE)
+/// versus 31,202 bytes at D = 80.
+pub const MAX_DIGITS: usize = 80;
 
 pub mod wire;
 
@@ -183,7 +182,7 @@ pub fn scalar_to_u128(scalar: &Scalar) -> Option<u128> {
 ///
 /// The input must represent an integer in `[0, 3^D)`; higher-order residue
 /// is discarded.
-fn trits_of(s: &Scalar) -> [Scalar; D] {
+fn trits_of<const D: usize>(s: &Scalar) -> [Scalar; D] {
     let mut bytes = *s.as_bytes();
     let mut result = [Scalar::ZERO; D];
 
@@ -202,7 +201,7 @@ fn trits_of(s: &Scalar) -> [Scalar; D] {
 }
 
 /// Returns the powers of three `3^0, ..., 3^(D-1)` as scalars.
-fn pow3_scalars() -> [Scalar; D] {
+fn pow3_scalars<const D: usize>() -> [Scalar; D] {
     let mut out = [Scalar::ZERO; D];
     let mut acc: u128 = 1;
     for o in out.iter_mut() {
@@ -289,7 +288,7 @@ fn act_protocol_id() -> [u8; 64] {
 
 /// Builds a session identifier from the domain separator, a label, and
 /// protocol-bound scalars, as specified for each proof in the draft.
-fn session(params: &Params, label: &[u8], scalars: &[&Scalar]) -> Vec<u8> {
+fn session<const D: usize>(params: &Params<D>, label: &[u8], scalars: &[&Scalar]) -> Vec<u8> {
     let mut out = params.domain_separator.clone();
     out.extend_from_slice(label);
     for s in scalars {
@@ -352,8 +351,14 @@ pub struct PublicKey {
 /// These parameters are used in various cryptographic operations throughout the protocol.
 /// They must be generated deterministically from a domain separator that uniquely identifies
 /// your deployment.
+///
+/// The const generic `D` is the number of base-3 digits in the range proof
+/// decomposition: credit values lie in `[0, 3^D)`. It is asserted to be in
+/// `1..=MAX_DIGITS` at monomorphization time and flows to every protocol
+/// operation through the `Params` argument. Deployments with different `D`
+/// MUST use distinct domain separators.
 #[derive(Clone)]
-pub struct Params {
+pub struct Params<const D: usize> {
     /// The domain separator this instance was derived from
     domain_separator: Vec<u8>,
     /// First generator point used in commitment schemes (credit values)
@@ -366,8 +371,8 @@ pub struct Params {
     h4: RistrettoBasepointTable,
 }
 
-impl PartialEq for Params {
-    fn eq(&self, other: &Params) -> bool {
+impl<const D: usize> PartialEq for Params<D> {
+    fn eq(&self, other: &Params<D>) -> bool {
         self.domain_separator == other.domain_separator
             && self.h1.basepoint() == other.h1.basepoint()
             && self.h2.basepoint() == other.h2.basepoint()
@@ -376,18 +381,22 @@ impl PartialEq for Params {
     }
 }
 
-impl std::fmt::Debug for Params {
+impl<const D: usize> std::fmt::Debug for Params<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Params")
             .field(
                 "domain_separator",
                 &String::from_utf8_lossy(&self.domain_separator),
             )
+            .field("D", &D)
             .finish_non_exhaustive()
     }
 }
 
-impl Params {
+impl<const D: usize> Params<D> {
+    /// The maximum credit amount representable in a token: 3^D - 1.
+    pub const MAX_CREDITS: u128 = 3u128.pow(D as u32) - 1;
+
     /// Creates system parameters using a structured domain separator.
     ///
     /// This method creates deterministic parameters based on deployment-specific
@@ -405,7 +414,7 @@ impl Params {
     /// ```
     /// use anonymous_credit_tokens::Params;
     ///
-    /// let params = Params::new(
+    /// let params: Params<8> = Params::new(
     ///     "example-corp",
     ///     "payment-api",
     ///     "production",
@@ -431,6 +440,10 @@ impl Params {
     /// The `domain_separator` SHOULD follow the structured format produced by
     /// [`Params::new`].
     pub fn from_domain_separator(domain_separator: &[u8]) -> Self {
+        // Monomorphization-time check that the digit count is in the safe
+        // range: 3^D must fit the u128 credit encoding with the wraparound
+        // margin required by the specification.
+        const { assert!(D >= 1 && D <= MAX_DIGITS, "D must be in 1..=MAX_DIGITS") };
         // The specification requires a non-empty domain separator and warns
         // against generic or unstructured separators, which would collapse the
         // cryptographic isolation between deployments.
@@ -560,10 +573,14 @@ impl PreIssuance {
     /// use rand_core::OsRng;
     ///
     /// let pre_issuance = PreIssuance::random(OsRng);
-    /// let params = Params::new("test-org", "test-service", "test", "2024-01-01");
+    /// let params: Params<8> = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// let request = pre_issuance.request(&params, OsRng);
     /// ```
-    pub fn request(&self, params: &Params, mut rng: impl CryptoRngCore) -> IssuanceRequest {
+    pub fn request<const D: usize>(
+        &self,
+        params: &Params<D>,
+        mut rng: impl CryptoRngCore,
+    ) -> IssuanceRequest {
         // Create a commitment to the client's identifier and blinding factor
         let big_k = &params.h2 * &self.k + &params.h3 * &self.r;
 
@@ -601,7 +618,7 @@ impl PreIssuance {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
+    /// # let params: Params<8> = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let ctx = Scalar::from(7u64);
     /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
@@ -614,9 +631,9 @@ impl PreIssuance {
     ///     ctx,
     /// ).unwrap();
     /// ```
-    pub fn to_credit_token(
+    pub fn to_credit_token<const D: usize>(
         &self,
-        params: &Params,
+        params: &Params<D>,
         public: &PublicKey,
         request: &IssuanceRequest,
         response: &IssuanceResponse,
@@ -695,23 +712,23 @@ impl PrivateKey {
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
+    /// # let params: Params<8> = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// #
     /// // Issue 20 credits to the client
     /// let ctx = Scalar::from(7u64);
     /// let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
     /// ```
-    pub fn issue(
+    pub fn issue<const D: usize>(
         &self,
-        params: &Params,
+        params: &Params<D>,
         request: &IssuanceRequest,
         c: u128,
         ctx: Scalar,
         mut rng: impl CryptoRngCore,
     ) -> Result<IssuanceResponse, Error> {
         // Validate the credit amount
-        if c > MAX_CREDITS {
+        if c > Params::<D>::MAX_CREDITS {
             return Err(Error::AmountTooBigError);
         }
         let c = Scalar::from(c);
@@ -764,7 +781,7 @@ impl PrivateKey {
 /// public spend amount `s`, the public top-up amount `a`, and the request
 /// context `ctx`.
 #[derive(ZeroizeOnDrop, Debug, Clone)]
-pub struct SpendProof {
+pub struct SpendProof<const D: usize> {
     /// The nullifier, uniquely identifying this spend to prevent double-spending
     k: Scalar,
     /// The amount being spent in this transaction
@@ -793,7 +810,7 @@ pub struct SpendProof {
     pok: Vec<u8>,
 }
 
-impl SpendProof {
+impl<const D: usize> SpendProof<D> {
     /// Returns the nullifier associated with this spend.
     ///
     /// The nullifier is a unique identifier for this spend that should be recorded
@@ -842,8 +859,8 @@ impl SpendProof {
 /// Both consistency equations share the witness `c`, tying the two range
 /// proofs to the same hidden balance.
 #[allow(clippy::too_many_arguments)]
-fn spend_statement(
-    params: &Params,
+fn spend_statement<const D: usize>(
+    params: &Params<D>,
     k: &Scalar,
     s: &Scalar,
     a: &Scalar,
@@ -858,7 +875,7 @@ fn spend_statement(
     k_n: &RistrettoPoint,
 ) -> LinearRelation<RistrettoPoint> {
     let g = RistrettoPoint::generator();
-    let pow3 = pow3_scalars();
+    let pow3 = pow3_scalars::<D>();
     let mut rel = LinearRelation::new();
 
     // Scalar variables, in witness order.
@@ -1004,7 +1021,7 @@ impl PrivateKey {
     /// #
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
+    /// # let params: Params<8> = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let ctx = Scalar::from(7u64);
     /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
@@ -1018,10 +1035,10 @@ impl PrivateKey {
     /// // Then process the refund, returning 2 of the 10 spent credits
     /// let refund = private_key.refund(&params, &spend_proof, 2, OsRng).unwrap();
     /// ```
-    pub fn refund(
+    pub fn refund<const D: usize>(
         &self,
-        params: &Params,
-        spend_proof: &SpendProof,
+        params: &Params<D>,
+        spend_proof: &SpendProof<D>,
         t: u128,
         mut rng: impl CryptoRngCore,
     ) -> Result<Refund, Error> {
@@ -1035,7 +1052,7 @@ impl PrivateKey {
         // considerations on amount validation and modular wraparound).
         let s = scalar_to_u128(&spend_proof.s).ok_or(Error::ScalarOutOfRangeError)?;
         let a = scalar_to_u128(&spend_proof.a).ok_or(Error::ScalarOutOfRangeError)?;
-        if s > MAX_CREDITS || a > MAX_CREDITS {
+        if s > Params::<D>::MAX_CREDITS || a > Params::<D>::MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
 
@@ -1086,7 +1103,7 @@ impl PrivateKey {
         // Issue a refund for the post-spend balance, adding the return
         // amount t homomorphically. K' commits to v1 = c - s and the new
         // nullifier.
-        let pow3 = pow3_scalars();
+        let pow3 = pow3_scalars::<D>();
         let k_prime = spend_proof
             .com1
             .iter()
@@ -1193,7 +1210,7 @@ impl CreditToken {
     /// # // Create a valid credit token with 20 credits
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
+    /// # let params: Params<8> = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let ctx = Scalar::from(7u64);
     /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
@@ -1204,15 +1221,15 @@ impl CreditToken {
     ///
     /// // Send spend_proof to the issuer and keep prerefund for later
     /// ```
-    pub fn prove_spend(
+    pub fn prove_spend<const D: usize>(
         &self,
-        params: &Params,
+        params: &Params<D>,
         s: u128,
         a: u128,
         rng: impl CryptoRngCore,
-    ) -> Result<(SpendProof, PreRefund), Error> {
+    ) -> Result<(SpendProof<D>, PreRefund), Error> {
         // Validate the amounts and compute the two proven values as integers.
-        if s > MAX_CREDITS || a > MAX_CREDITS {
+        if s > Params::<D>::MAX_CREDITS || a > Params::<D>::MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
         let c = scalar_to_u128(&self.c).ok_or(Error::ScalarOutOfRangeError)?;
@@ -1222,7 +1239,7 @@ impl CreditToken {
         // corrupted or crafted token could carry a larger c; use checked
         // arithmetic so a bad token is rejected rather than overflowing.
         let v2 = c.checked_add(a).ok_or(Error::InvalidAmount)?;
-        if v2 > MAX_CREDITS {
+        if v2 > Params::<D>::MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
         let digits1 = trits_of(&Scalar::from(v1));
@@ -1242,16 +1259,16 @@ impl CreditToken {
     /// decompositions of the post-spend balance `c - s` and the topped-up
     /// balance `c + a`. Split out so that tests can exercise the protocol
     /// with dishonest digit values.
-    fn prove_spend_with_digits(
+    fn prove_spend_with_digits<const D: usize>(
         &self,
-        params: &Params,
+        params: &Params<D>,
         s: Scalar,
         a: Scalar,
         digits1: &[Scalar; D],
         digits2: &[Scalar; D],
         mut rng: impl CryptoRngCore,
-    ) -> Result<(SpendProof, PreRefund), Error> {
-        let pow3 = pow3_scalars();
+    ) -> Result<(SpendProof<D>, PreRefund), Error> {
+        let pow3 = pow3_scalars::<D>();
         let two = Scalar::from(2u64);
 
         // Randomize the signature.
@@ -1418,7 +1435,7 @@ impl PreRefund {
     /// # let private_key = PrivateKey::random(OsRng);
     /// # let public_key = private_key.public();
     /// # let pre_issuance = PreIssuance::random(OsRng);
-    /// # let params = Params::new("test-org", "test-service", "test", "2024-01-01");
+    /// # let params: Params<8> = Params::new("test-org", "test-service", "test", "2024-01-01");
     /// # let request = pre_issuance.request(&params, OsRng);
     /// # let ctx = Scalar::from(7u64);
     /// # let response = private_key.issue(&params, &request, 20, ctx, OsRng).unwrap();
@@ -1434,10 +1451,10 @@ impl PreRefund {
     ///     public_key
     /// ).unwrap();
     /// ```
-    pub fn to_credit_token(
+    pub fn to_credit_token<const D: usize>(
         &self,
-        params: &Params,
-        spend_proof: &SpendProof,
+        params: &Params<D>,
+        spend_proof: &SpendProof<D>,
         refund: &Refund,
         public_key: &PublicKey,
     ) -> Result<CreditToken, Error> {
@@ -1446,7 +1463,7 @@ impl PreRefund {
         let t = scalar_to_u128(&refund.t).ok_or(Error::ScalarOutOfRangeError)?;
         let s = scalar_to_u128(&spend_proof.s).ok_or(Error::ScalarOutOfRangeError)?;
         let a = scalar_to_u128(&spend_proof.a).ok_or(Error::ScalarOutOfRangeError)?;
-        if s > MAX_CREDITS || a > MAX_CREDITS {
+        if s > Params::<D>::MAX_CREDITS || a > Params::<D>::MAX_CREDITS {
             return Err(Error::InvalidAmount);
         }
         if t > s + a {
@@ -1455,13 +1472,13 @@ impl PreRefund {
         let v = scalar_to_u128(&self.v).ok_or(Error::ScalarOutOfRangeError)?;
         // Use checked arithmetic: a corrupted PreRefund could carry a v larger
         // than MAX_CREDITS, which must be rejected rather than wrapping.
-        if v.checked_add(t).is_none_or(|vt| vt > MAX_CREDITS) {
+        if v.checked_add(t).is_none_or(|vt| vt > Params::<D>::MAX_CREDITS) {
             return Err(Error::InvalidRefundAmount);
         }
 
         // Reconstruct the commitment to the post-spend balance and the new
         // nullifier: K' = K_n + sum_j 3^j*Com1[j].
-        let pow3 = pow3_scalars();
+        let pow3 = pow3_scalars::<D>();
         let g = RistrettoPoint::generator();
         let k_prime = spend_proof
             .com1

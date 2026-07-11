@@ -31,7 +31,7 @@ impl NullifierStore for InMemoryNullifierStore {
 
 fn main() {
     // 1. System Initialization
-    let params = Params::new("example-org", "payment-api", "production", "2024-01-15");
+    let params: Params<8> = Params::new("example-org", "payment-api", "production", "2024-01-15");
     let private_key = PrivateKey::random(OsRng);
     let mut nullifier_store = InMemoryNullifierStore::default();
 

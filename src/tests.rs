@@ -18,6 +18,12 @@ use proptest::prelude::*;
 use rand_core::OsRng;
 use std::collections::HashSet;
 
+/// The digit count used throughout these tests (except the genericity
+/// test, which exercises several).
+const D: usize = 8;
+/// The maximum credit amount at the test digit count.
+const MAX_CREDITS: u128 = Params::<D>::MAX_CREDITS;
+
 // Configure proptest to run fewer cases for faster testing.
 fn fast_config() -> ProptestConfig {
     ProptestConfig::with_cases(8)
@@ -45,7 +51,7 @@ impl NullifierDb {
     }
 }
 
-fn test_params() -> Params {
+fn test_params() -> Params<D> {
     Params::new("test-org", "test-service", "test-env", "2024-01-01")
 }
 
@@ -54,7 +60,12 @@ fn test_ctx() -> Scalar {
 }
 
 /// Runs the full issuance protocol and returns the resulting token.
-fn issue_token(params: &Params, private_key: &PrivateKey, c: u128, ctx: Scalar) -> CreditToken {
+fn issue_token<const DD: usize>(
+    params: &Params<DD>,
+    private_key: &PrivateKey,
+    c: u128,
+    ctx: Scalar,
+) -> CreditToken {
     let pre_issuance = PreIssuance::random(OsRng);
     let request = pre_issuance.request(params, OsRng);
     let response = private_key.issue(params, &request, c, ctx, OsRng).unwrap();
@@ -64,8 +75,8 @@ fn issue_token(params: &Params, private_key: &PrivateKey, c: u128, ctx: Scalar) 
 }
 
 /// Runs one spend/refund round trip and returns the new token.
-fn spend_round(
-    params: &Params,
+fn spend_round<const DD: usize>(
+    params: &Params<DD>,
     private_key: &PrivateKey,
     token: &CreditToken,
     s: u128,
@@ -92,14 +103,14 @@ fn recompose_trits(digits: &[Scalar; D]) -> u128 {
 
 #[test]
 fn test_params_generation_deterministic() {
-    let params1 = Params::new("org", "svc", "prod", "2024-01-01");
-    let params2 = Params::new("org", "svc", "prod", "2024-01-01");
+    let params1: Params<D> = Params::new("org", "svc", "prod", "2024-01-01");
+    let params2: Params<D> = Params::new("org", "svc", "prod", "2024-01-01");
     assert_eq!(params1, params2);
 
     // Any change to the domain separator changes the parameters.
-    let params3 = Params::new("org", "svc", "prod", "2024-01-02");
+    let params3: Params<D> = Params::new("org", "svc", "prod", "2024-01-02");
     assert_ne!(params1, params3);
-    let params4 = Params::new("org", "svc", "staging", "2024-01-01");
+    let params4: Params<D> = Params::new("org", "svc", "staging", "2024-01-01");
     assert_ne!(params1, params4);
 }
 
@@ -126,8 +137,8 @@ fn test_long_domain_separator_does_not_panic() {
     // A domain separator long enough to push the hash-to-group DST past 255
     // bytes must be handled via RFC 9380's oversized-DST reduction, not panic.
     let long = "x".repeat(300);
-    let params = Params::from_domain_separator(long.as_bytes());
-    let params2 = Params::from_domain_separator(long.as_bytes());
+    let params: Params<D> = Params::from_domain_separator(long.as_bytes());
+    let params2: Params<D> = Params::from_domain_separator(long.as_bytes());
     assert_eq!(params, params2);
 }
 
@@ -164,7 +175,7 @@ fn test_trit_decompose_edges() {
     }
 
     // MAX_CREDITS = 3^D - 1 decomposes to all-2 digits.
-    let digits = trits_of(&Scalar::from(MAX_CREDITS));
+    let digits = trits_of::<D>(&Scalar::from(MAX_CREDITS));
     for d in digits.iter() {
         assert_eq!(*d, Scalar::from(2u64));
     }
@@ -858,6 +869,36 @@ fn test_full_lifecycle_with_mixed_operations() {
     assert_eq!(expected, 805);
 }
 
+// ===== GENERIC DIGIT COUNTS =====
+
+/// The protocol is generic over the digit count: run a full
+/// issue/spend/settle round plus a wire round trip at several D values,
+/// including both extremes of the safe range.
+#[test]
+fn test_generic_digit_counts() {
+    fn corridor_round<const DD: usize>() {
+        let params: Params<DD> = Params::new("gen-org", "gen-svc", "test", "2024-01-01");
+        let private_key = PrivateKey::random(OsRng);
+        let max = Params::<DD>::MAX_CREDITS;
+        // A balance, spend, and top-up that fit any D >= 2.
+        let c = 8u128.min(max / 2);
+        let a = 8u128.min(max - c);
+        let s = c / 2;
+        let token = issue_token(&params, &private_key, c, test_ctx());
+        // Settle at the ceiling endpoint of the corridor.
+        let token = spend_round(&params, &private_key, &token, s, a, s + a).unwrap();
+        assert_eq!(token.credits(), Scalar::from(c + a));
+        // And a wire round trip at this D.
+        let (spend_proof, _) = token.prove_spend(&params, 0, 0, OsRng).unwrap();
+        let decoded = SpendProof::<DD>::from_bytes(&spend_proof.to_bytes()).unwrap();
+        assert!(private_key.refund(&params, &decoded, 0, OsRng).is_ok());
+    }
+    corridor_round::<2>();
+    corridor_round::<4>();
+    corridor_round::<40>();
+    corridor_round::<80>();
+}
+
 // ===== PROPERTY-BASED TESTS =====
 
 /// Strategy for generating random Scalars
@@ -1149,7 +1190,7 @@ proptest! {
     #[test]
     fn prop_issuer_isolation(c in 1u128..=MAX_CREDITS) {
         let params1 = test_params();
-        let params2 = Params::new("other-org", "other-svc", "prod", "2024-01-01");
+        let params2: Params<D> = Params::new("other-org", "other-svc", "prod", "2024-01-01");
         let key1 = PrivateKey::random(OsRng);
         let key2 = PrivateKey::random(OsRng);
 
